@@ -16,4 +16,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdrm2 \
     && rm -rf /var/lib/apt/lists/*
 
+# Everything below exists so the container can run as the *host* user rather
+# than root. A root container writing into the bind-mounted working directory
+# leaves root-owned files behind on the host — which is not a theoretical
+# tidiness problem: it produced a root-owned package-lock.json here that the
+# host user could no longer rewrite, and pre-commit's end-of-file-fixer then
+# failed with PermissionError and blocked committing at all.
+#
+# The uid is supplied at run time (see docker-compose.yml's `user:`), not baked
+# in, so no assumption is made about it matching this image's own `node` user
+# (uid 1000, which is not this host's 1001).
+#
+# Mode 1777 is the load-bearing detail: a named volume initialises its
+# ownership and permissions from whatever the image has at that path. Creating
+# these world-writable in the image is what lets an arbitrary uid write to them
+# later; leave it out and the volumes come up root-owned and every non-root
+# build fails on first write.
+RUN mkdir -p /app /app/node_modules /cache/npm /cache/electron /cache/home \
+    && chmod -R 1777 /app /cache
+
+# HOME has to point somewhere writable by an arbitrary uid, or npm and
+# Electron's postinstall both fall over trying to create dot-directories in a
+# home they don't own. Pointing the caches at a named volume also stops the
+# ~100MB Electron binary being re-downloaded on every run.
+ENV HOME=/cache/home \
+    npm_config_cache=/cache/npm \
+    ELECTRON_CACHE=/cache/electron
+
 WORKDIR /app

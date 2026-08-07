@@ -66,15 +66,37 @@ cycle guard rejects a self-nesting move.
 
 ## Development
 
-All tooling runs in Docker — nothing needs to be installed on the host.
+All tooling runs in disposable Docker containers — nothing needs to be
+installed on the host.
+
+First, tell the container which user to run as, so files it writes into the
+working directory come out owned by you rather than by root:
+
+```sh
+printf 'DOCKER_UID=%s\nDOCKER_GID=%s\n' "$(id -u)" "$(id -g)" > .env
+```
+
+`.env` is gitignored and machine-local. Skipping this step is not cosmetic:
+the container would fall back to uid 1000, and a mismatched uid leaves files
+in the checkout that you cannot rewrite — which is how a root-owned
+`package-lock.json` once broke `pre-commit`'s `end-of-file-fixer` and blocked
+committing entirely. (Compose reads `DOCKER_UID` from the environment or
+`.env`. Note bash's own `$UID` is a shell variable and is *not* exported, so
+it will not reach Compose by itself.)
 
 ```sh
 docker compose build dev
-docker compose run --rm dev npm install
+docker compose run --rm dev npm ci
 docker compose run --rm dev npm run lint
 docker compose run --rm dev npx tsc --noEmit
 docker compose run --rm dev npm run build
 ```
+
+npm's cache and Electron's ~100MB binary live in a named `cache` volume, so
+they survive across the throwaway containers. If you ever change the container
+user, remove the volumes so they are re-created with the new ownership —
+`docker compose down -v` — since a named volume takes its permissions from the
+image at first use and keeps them thereafter.
 
 To run the app itself, Electron needs a display. On Linux, forward your X
 server into the container:
@@ -137,6 +159,17 @@ Two things that are easy to lose an hour to:
 Chromium 111 a CDP WebSocket handshake carrying a non-allow-listed `Origin`
 header is rejected with a bare 403, which most remote clients hit and local
 ones do not.
+
+To check the endpoint works at all:
+
+```sh
+docker compose run --rm -e NOTEBOOK_AI_MODE_URL=about:blank dev \
+  xvfb-run -a scripts/smoke-devtools.sh 9222
+```
+
+It should list two `page` targets — the embedded panel and the app's own UI.
+The `Failed to shutdown` line it prints at the end is the script killing
+Electron, not a fault.
 
 ## Dependencies
 

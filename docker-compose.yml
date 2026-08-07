@@ -8,9 +8,19 @@ services:
     working_dir: /app
     init: true
     shm_size: '1gb'
+    # Run as the host user so bind-mounted writes (out/, package-lock.json)
+    # come out owned by whoever is driving this, not root. Defaults to 1000
+    # only as a fallback; see README for exporting these. Compose reads them
+    # from the environment or a .env file — note that bash's own $UID is a
+    # shell variable and is NOT exported, so it will not arrive here by itself.
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
     volumes:
       - .:/app
       - node_modules:/app/node_modules
+      # Persisting npm's cache and Electron's downloaded binary across
+      # disposable containers — the containers are throwaway, the ~100MB
+      # download need not be.
+      - cache:/cache
     environment:
       - DISPLAY=${DISPLAY:-}
       - NOTEBOOK_DISABLE_GPU=1
@@ -19,3 +29,4 @@ services:
 
 volumes:
   node_modules:
+  cache:
