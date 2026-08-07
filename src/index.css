@@ -1,0 +1,347 @@
+:root {
+  /* Must match SIDEBAR_FRACTION in src/main/aiModeView.ts, which positions the
+     native AI Mode view to start exactly where this pane ends. Nothing
+     enforces the two agreeing — change both together. */
+  --sidebar-fraction: 55%;
+
+  --border: #d5d5d5;
+  --muted: #666;
+  --selected: #dbeafe;
+  --drop: #bbf7d0;
+}
+
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  margin: 0;
+  height: 100vh;
+  overflow: hidden;
+  font-size: 0.9rem;
+}
+
+#app {
+  display: flex;
+  height: 100vh;
+}
+
+/* The app owns the whole window until the live panel is asked for — reading
+   an archived conversation is the primary activity here, not watching a
+   browser. */
+#app-pane {
+  width: 100%;
+  flex: none;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+#app.panel-visible #app-pane {
+  width: var(--sidebar-fraction);
+  border-right: 1px solid var(--border);
+}
+
+#app-root,
+.workspace {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.toolbar h1 {
+  font-size: 0.95rem;
+  margin: 0;
+  flex: 1;
+}
+
+button {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: linear-gradient(to bottom, #ffffff, #ececec);
+  color: #222;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: linear-gradient(to bottom, #ffffff, #e0e0e0);
+}
+
+button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.banner {
+  padding: 0.4rem 0.6rem;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  justify-content: space-between;
+  flex: none;
+}
+
+.banner.error {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.status-line {
+  margin: 0;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: none;
+}
+
+.status-line.error {
+  color: #b00;
+}
+
+/* ------------------------------------------------------------------ panes */
+
+.panes {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.pane {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.pane-tree {
+  width: 220px;
+  flex: none;
+  border-right: 1px solid var(--border);
+  padding: 0.4rem 0;
+}
+
+.pane-list {
+  width: 260px;
+  flex: none;
+  border-right: 1px solid var(--border);
+}
+
+.pane-reader {
+  flex: 1;
+  min-width: 0;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.hint.empty {
+  padding: 0.8rem;
+}
+
+/* ------------------------------------------------------------------- tree */
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.15rem 0.3rem 0.15rem 0.4rem;
+  cursor: default;
+  border-radius: 4px;
+}
+
+.tree-row:hover {
+  background: #f2f2f2;
+}
+
+.tree-row.selected {
+  background: var(--selected);
+}
+
+.tree-row.drop-target {
+  outline: 2px solid #22c55e;
+  background: var(--drop);
+}
+
+.tree-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.twisty,
+.row-action {
+  border: none;
+  background: none;
+  padding: 0 0.2rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  line-height: 1;
+}
+
+.twisty {
+  width: 1.1rem;
+}
+
+.twisty-spacer {
+  display: inline-block;
+  width: 1.1rem;
+}
+
+/* Row actions stay out of the way until the row is under the pointer —
+   otherwise three glyphs per row turn the tree into visual noise. */
+.row-action {
+  visibility: hidden;
+}
+
+.tree-row:hover .row-action {
+  visibility: visible;
+}
+
+.row-action:hover {
+  background: #ffffff;
+  border-radius: 4px;
+}
+
+.tree-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 0.35rem 0.4rem;
+}
+
+.tree-add {
+  margin: 0.5rem 0.4rem;
+  width: calc(100% - 0.8rem);
+}
+
+/* ------------------------------------------------------------------- list */
+
+.chat-row.selected {
+  background: var(--selected);
+}
+
+.chat-open {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-bottom: 1px solid #eee;
+  border-radius: 0;
+  background: none;
+  padding: 0.45rem 0.6rem;
+}
+
+.chat-open:hover:not(:disabled) {
+  background: #f2f2f2;
+}
+
+.chat-title {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.untitled {
+  color: #999;
+  font-style: italic;
+}
+
+.chat-meta {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 0.15rem;
+}
+
+/* ----------------------------------------------------------------- reader */
+
+.reader {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.reader-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.reader-head h2 {
+  font-size: 1rem;
+  margin: 0;
+  flex: 1;
+}
+
+.reader-body {
+  overflow-y: auto;
+  padding: 0.5rem 0.8rem 2rem;
+  flex: 1;
+}
+
+.turn {
+  margin: 0.8rem 0;
+}
+
+.turn-role {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 0.2rem;
+}
+
+.turn-user .turn-body {
+  background: #f3f4f6;
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+}
+
+.turn-body {
+  line-height: 1.5;
+}
+
+/* Captured markup carries no stylesheet of its own — these keep third-party
+   HTML from breaking the pane's layout. */
+.turn-body img {
+  max-width: 100%;
+  height: auto;
+}
+
+.turn-body pre {
+  background: #f6f8fa;
+  padding: 0.5rem 0.7rem;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+.turn-body table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.turn-body td,
+.turn-body th {
+  border: 1px solid var(--border);
+  padding: 0.25rem 0.5rem;
+}

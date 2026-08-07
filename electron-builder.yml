@@ -1,0 +1,47 @@
+appId: com.non7top.aichatnotebook
+productName: AI Chat Notebook
+# electron-builder lowercases the executable name on Linux by default unless
+# pinned explicitly — set it so scripts/afterPack.cjs (and anyone launching
+# the unpacked binary) can rely on the same name across platforms.
+executableName: AIChatNotebook
+directories:
+  output: dist
+  buildResources: build
+
+# electron-vite already bundles everything main/preload/renderer need (see
+# electron.vite.config.ts) — nothing under node_modules is required at
+# runtime, so files is deliberately narrow instead of electron-builder's
+# node_modules-including default.
+files:
+  - out/**/*
+  - package.json
+
+afterPack: scripts/afterPack.cjs
+
+win:
+  target: nsis
+  artifactName: '${productName}-Setup-${version}.${ext}'
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+
+linux:
+  target:
+    - deb
+    - rpm
+  category: Utility
+
+mac:
+  target:
+    - zip
+
+publish:
+  provider: github
+  owner: non7top
+  repo: ai-chat-notebook
+  # electron-builder defaults to publishing a *draft* release and silently
+  # skips every asset upload if a release of a different type already exists
+  # for the tag. release-please creates a normal (non-draft) release before
+  # the publish workflow runs, so without this the release ships empty.
+  # (Learned the hard way on PromptLoom v2.0.0 — see ../sprite-manager/README.md.)
+  releaseType: release

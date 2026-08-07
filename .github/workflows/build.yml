@@ -1,0 +1,78 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  # On-demand Windows builds without needing a push or a PR — this is how you
+  # get an installer for a work-in-progress branch.
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      # `docker compose build` has no cross-run cache on ephemeral GH-hosted
+      # runners, so every run would re-do the full apt-get install (xvfb plus
+      # Electron's runtime libs) from scratch. Pre-build the same image via
+      # buildx with the GitHub Actions cache backend, tagged to match what
+      # `docker compose build` looks for (see docker-compose.yml's top-level
+      # `name:`), so that step becomes a fast cache hit instead.
+      - name: Build dev image (with layer cache)
+        run: |
+          docker buildx build \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            --tag ai-chat-notebook-dev:latest \
+            --load \
+            -f Dockerfile.dev .
+
+      - name: Build dev image
+        run: docker compose build dev
+
+      - name: Install dependencies
+        run: docker compose run --rm dev npm ci
+
+      - name: Lint
+        run: docker compose run --rm dev npm run lint
+
+      - name: Type-check
+        run: docker compose run --rm dev npx tsc --noEmit
+
+      - name: Build bundles
+        run: docker compose run --rm dev npm run build
+
+  build-windows:
+    # electron-builder cross-builds its deb and rpm targets from Linux, but
+    # not NSIS — that needs a real Windows host. (Established the hard way on
+    # PromptLoom; see ../sprite-manager/README.md.) Hence a separate runner
+    # rather than a matrix entry.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Package Windows installer
+        run: npm run make
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer
+          path: dist/*.exe
+          retention-days: 14
+          # Setup.exe is already a compressed archive internally, so the
+          # action's own zip wrapper is pure overhead.
+          archive: false

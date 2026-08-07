@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      The reader renders HTML captured from Google's pages, so this policy
+      exists to make one specific failure loud: if an image URL was missed by
+      the asset-rewriting pass, there is no http(s) source in img-src for it
+      to fall back to, so it breaks visibly instead of silently fetching from
+      Google every time an archived conversation is opened.
+
+      script-src/style-src 'unsafe-inline' are concessions to the
+      electron-vite dev server (@vitejs/plugin-react injects an inline refresh
+      preamble). They are not needed by the packaged build — tightening the
+      policy for production is tracked as a follow-up.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self';
+               img-src 'self' file: data: blob:;
+               media-src 'self' file: data: blob:;
+               style-src 'self' 'unsafe-inline';
+               script-src 'self' 'unsafe-inline';
+               connect-src 'self' ws://localhost:* http://localhost:*;
+               font-src 'self' data:;
+               object-src 'none';
+               frame-src 'none';"
+    />
+    <title>AI Chat Notebook</title>
+  </head>
+  <body>
+    <div id="app">
+      <main id="app-pane">
+        <div id="app-root"></div>
+      </main>
+    </div>
+    <script type="module" src="/src/renderer.tsx"></script>
+  </body>
+</html>
