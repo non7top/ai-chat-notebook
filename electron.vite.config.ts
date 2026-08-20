@@ -14,7 +14,18 @@ const external = [
 
 export default defineConfig({
   main: {
+    // electron-vite auto-adds its own externalize-deps plugin unless told not
+    // to (build.externalizeDeps defaults to true). It externalizes every
+    // package.json "dependencies" entry as a bare require(), with no regard
+    // for the `external` allowlist above — so the comment above is a lie
+    // without this line. Verified concretely here, not taken on trust: with
+    // the default left on, out/main/index.js contained
+    // require("electron-context-menu"), and since electron-builder.yml ships
+    // no node_modules that crashes the packaged app at startup (contextMenu()
+    // is called at module top level in src/main.ts, so it isn't even deferred
+    // to the first right-click).
     build: {
+      externalizeDeps: false,
       rollupOptions: {
         input: { index: 'src/main.ts' },
         external,
@@ -23,6 +34,7 @@ export default defineConfig({
   },
   preload: {
     build: {
+      externalizeDeps: false,
       rollupOptions: {
         // Two independent preloads: the app's own, and a separate one for the
         // embedded AI Mode WebContentsView (see src/main/aiModeView.ts).

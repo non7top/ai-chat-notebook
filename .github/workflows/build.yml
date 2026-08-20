@@ -56,6 +56,13 @@ jobs:
       - name: Build bundles
         run: docker compose run --rm dev npm run build
 
+      # Catches a bug class nothing else here can see: lint and tsc read
+      # source, not the bundle, and running from a checkout resolves a stray
+      # bare require() against the node_modules sitting right there. The
+      # packaged app has no node_modules, so it would crash instead.
+      - name: Check bundle externals
+        run: docker compose run --rm dev npm run check:bundle
+
   build-windows:
     # electron-builder cross-builds its deb and rpm targets from Linux, but
     # not NSIS — that needs a real Windows host. (Established the hard way on

@@ -11,7 +11,8 @@
     "package": "electron-vite build && electron-builder --dir --publish never",
     "make": "electron-vite build && electron-builder --publish never",
     "publish": "electron-vite build && electron-builder --publish always",
-    "lint": "biome lint ."
+    "lint": "biome lint .",
+    "check:bundle": "node scripts/check-bundle-externals.mjs"
   },
   "keywords": [],
   "author": {
