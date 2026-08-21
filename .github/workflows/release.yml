@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: ["release-please"]
+    types: [completed]
+  # Escape hatch to (re)build and publish an already-tagged release without
+  # waiting for a new release-please cycle — e.g. to backfill a release whose
+  # assets failed to upload for a reason unrelated to the tag itself.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to (re)build and publish, e.g. v0.2.0'
+        required: true
+
+jobs:
+  # release-please-action creates its tag/release using the default
+  # GITHUB_TOKEN, and GitHub deliberately does not trigger downstream
+  # workflows for refs created that way (an anti-recursion guard) — so this
+  # cannot simply trigger on `push: tags` the way a normal release workflow
+  # would. A completed workflow_run fires regardless of which token the
+  # upstream run used.
+  #
+  # release-please itself runs on every push to master, not only ones that cut
+  # a release, so check whether this particular run actually did by looking
+  # for a semver tag on its exact commit before building anything.
+  check-release-tag:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.find_tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # workflow_run does not check out the commit that triggered it by
+          # default — it checks out the default branch's current tip, which
+          # may have moved on since. Pin to the exact commit release-please
+          # just processed.
+          #
+          # For a manual backfill (workflow_dispatch), deliberately do NOT
+          # check out the given tag: the point of a backfill is to rebuild
+          # with whatever release-process fix just landed on the dispatch ref
+          # (normally master), not to reproduce the original, possibly broken,
+          # build verbatim. `tag` is only used to know which existing
+          # tag/version this is.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Find a release tag pointing at this commit
+        id: find_tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            # grep exits 1 when no tag matches, which is the normal case for a
+            # non-release merge. Under this step's implicit `-e -o pipefail`
+            # shell that would fail the whole step rather than just yielding an
+            # empty $TAG — which is the expected, already-handled outcome (see
+            # the `release` job's `if:` below).
+            TAG=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: check-release-tag
+    if: needs.check-release-tag.outputs.tag != ''
+    # NSIS needs a real Windows host; electron-builder cross-builds deb/rpm
+    # from Linux but not this.
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      # Keyless cosign signing exchanges this job's OIDC token for a
+      # short-lived Fulcio cert — no signing key ever touches the repo.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Same reasoning as check-release-tag's checkout above: build from
+          # the dispatch ref (current code) on a manual backfill, not from the
+          # tag itself, so a release-process fix actually takes effect.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.workflow_run.head_sha }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Guards the failure mode that shipped a dead v0.1.0 installer:
+      # electron-vite externalizes package.json dependencies by default, and
+      # electron-builder.yml ships no node_modules, so a bare require() left
+      # in the bundle crashes the installed app at startup. Runs before
+      # publish so a broken bundle never reaches a release.
+      - name: Build and check bundle externals
+        run: npm run build
+      - run: npm run check:bundle
+
+      - name: Publish (build installer + create GitHub release)
+        run: npm run publish
+        env:
+          # electron-builder's GitHub publisher reads GH_TOKEN specifically
+          # (not GITHUB_TOKEN, which was electron-forge's convention) — set
+          # both, since nothing else here reads either.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: sigstore/cosign-installer@v3
+
+      # Keyless: cosign trades this job's GitHub OIDC token for a short-lived
+      # Fulcio cert and records the signature in the public Rekor log, so
+      # there is no private key to hold or leak. Signs what the build just
+      # produced locally (already uploaded by the publish step) rather than
+      # re-downloading from the release. electron-builder's NSIS target
+      # produces a single installer .exe in dist/.
+      - name: Sign release artifacts (cosign, keyless)
+        id: cosign_sign
+        shell: bash
+        run: |
+          shopt -s nullglob
+          bundles=()
+          for f in dist/*.exe; do
+            cosign sign-blob --yes --bundle "$f.cosign.bundle" "$f"
+            bundles+=("$f.cosign.bundle")
+          done
+          printf '%s\n' "${bundles[@]}" > cosign_bundles.txt
+          cat cosign_bundles.txt
+
+      - name: Upload signature bundles to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.check-release-tag.outputs.tag }}" $(cat cosign_bundles.txt) --clobber --repo "${{ github.repository }}"

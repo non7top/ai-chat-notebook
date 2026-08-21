@@ -200,6 +200,74 @@ from PromptLoom, where each one was arrived at the hard way — see
 [../sprite-manager/README.md](../sprite-manager/README.md#build-tooling--known-hurdles)
 for the reasoning rather than rediscovering it.
 
+## Releasing
+
+Releases are cut by [release-please](https://github.com/googleapis/release-please)
+from Conventional Commit messages, so the version and changelog come from the
+commit history rather than being edited by hand.
+
+1. Merge work to `master` with conventional commit subjects (`feat:`, `fix:`,
+   `feat!:` for breaking).
+2. `release-please.yml` opens or updates a release PR, labelled `RELEASE` and
+   colour-coded by bump type (green patch, yellow minor, orange major).
+3. Merging that PR tags the release.
+4. `release.yml` then builds the Windows installer on a `windows-latest`
+   runner, publishes it to the GitHub release, and signs it with cosign.
+
+On pull requests, `release-please-preview.yml` comments the version the PR
+would produce, and `build.yml` attaches a Windows installer named for that
+predicted version, with a download link commented on the PR.
+
+Signing is **keyless**: cosign exchanges the job's GitHub OIDC token for a
+short-lived Fulcio certificate and records the signature in the public Rekor
+log, so no private key exists to hold or leak. To verify a downloaded
+installer:
+
+```sh
+cosign verify-blob --bundle <installer>.cosign.bundle \
+  --certificate-identity-regexp '^https://github.com/non7top/ai-chat-notebook/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  <installer>
+```
+
+Both the PR build and the release build run `npm run check:bundle` against the
+packaged bundle. That guard exists because v0.1.0 shipped an installer that
+could not start: electron-vite had externalized `electron-context-menu` to a
+bare `require()`, and `electron-builder.yml` ships no `node_modules`. Lint,
+type-check and running from a dev checkout all pass in that state — only the
+installed app fails — so the check is the only thing standing between that
+class of bug and a release.
+
+### Known hurdles
+
+Inherited from PromptLoom, where each was found the hard way — see
+[../sprite-manager/README.md](../sprite-manager/README.md#build-tooling--known-hurdles):
+
+- `release.yml` triggers on `workflow_run`, not `push: tags`. GitHub does not
+  fire workflows for tags created with the default `GITHUB_TOKEN`, which is an
+  anti-recursion guard, so a tag-triggered release workflow would simply never
+  run.
+- `publish.releaseType: release` is pinned in `electron-builder.yml`.
+  electron-builder defaults to *draft* releases and silently skips every asset
+  upload when a release of a different type already exists for the tag — which
+  it always does here, since release-please created it first. The failure mode
+  is a release with no installer attached and only a log line to show why.
+- `release.yml` has a `workflow_dispatch` escape hatch to rebuild and publish
+  an existing tag without waiting for a new release cycle. It deliberately
+  builds from the dispatch ref rather than the tag, so a release-process fix
+  actually takes effect instead of faithfully reproducing the broken build.
+
+## Packaging
+
+```sh
+docker compose run --rm dev npm run make
+```
+
+That produces Linux deb/rpm. The Windows NSIS installer cannot be cross-built
+from Linux — electron-builder cross-builds its deb and rpm targets happily, but
+NSIS needs a real Windows host, so CI builds it on a `windows-latest` runner
+(see `.github/workflows/build.yml`). There is no wine path here; use CI.
+
 ## Security notes
 
 - The embedded panel holds a **live, logged-in Google session**, and the app's

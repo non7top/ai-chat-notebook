@@ -1,0 +1,78 @@
+name: release-please
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # release-please-config.json's extra-label handles applying RELEASE
+      # to the generated PR natively — just make sure it exists before the
+      # action runs, since the action won't create it itself. Red here is
+      # only a safe default for the label's very first creation; the
+      # "Color the RELEASE label by bump type" step below recolors it to
+      # match the actual predicted bump on every run.
+      #
+      # extra-label (additive) is deliberate over label (release-please's
+      # own identifying label for its managed PR — replacing it risks
+      # breaking its ability to find/update that PR later) or release-label
+      # (applied post-merge/tag, not while the PR is still open).
+      #
+      # See release-please-preview.yml for why that workflow still shells
+      # out to the CLI's --dry-run instead of using this same action with
+      # skip-github-pull-request/skip-github-release: with those set, every
+      # output (prs_created, pr, version, ...) comes back completely empty,
+      # confirmed empirically and tracked upstream at
+      # https://github.com/googleapis/release-please-action/issues/1214
+      - name: Ensure the RELEASE label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh label create RELEASE --color FF0000 --force --repo "${{ github.repository }}"
+
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # The action's own major/minor/patch outputs only populate once a
+      # release is actually tagged (i.e. after this generated PR merges) —
+      # while it's still open/updating, all we get is `pr`, the
+      # PullRequest object as JSON. Its body embeds both the old and new
+      # version in the changelog heading's compare link
+      # (".../compare/vOLD...vNEW)"), which is enough to diff ourselves
+      # without waiting for a real release. Falls back to the original
+      # static red if that link isn't found (e.g. the very first release,
+      # which has nothing to compare against). Keep this color scheme in
+      # sync with predict-next-version's copy (used for regular PRs) so
+      # RELEASE means the same thing everywhere it shows up.
+      - name: Color the RELEASE label by bump type
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_JSON: ${{ steps.release.outputs.pr }}
+        run: |
+          body=$(echo "$PR_JSON" | jq -r '.body')
+          compare=$(echo "$body" | grep -oE '/compare/v[0-9]+\.[0-9]+\.[0-9]+\.\.\.v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+
+          color=FF0000
+          if [ -n "$compare" ]; then
+            old_version=$(echo "$compare" | sed -E 's#.*/compare/v([0-9.]+)\.\.\.v.*#\1#')
+            new_version=$(echo "$compare" | sed -E 's#.*\.\.\.v([0-9.]+)#\1#')
+            IFS='.' read -r old_major old_minor _ <<< "$old_version"
+            IFS='.' read -r new_major new_minor _ <<< "$new_version"
+            if [ "$new_major" -gt "$old_major" ]; then
+              color=D93F0B
+            elif [ "$new_minor" -gt "$old_minor" ]; then
+              color=FBCA04
+            else
+              color=0E8A16
+            fi
+          fi
+          gh label edit RELEASE --color "$color" --repo "${{ github.repository }}"

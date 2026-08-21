@@ -69,8 +69,17 @@ jobs:
     # PromptLoom; see ../sprite-manager/README.md.) Hence a separate runner
     # rather than a matrix entry.
     runs-on: windows-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      # Needed for the cosign dry run below to mint a Fulcio cert via OIDC.
+      id-token: write
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Full history and tags: predict-next-version walks back to the last
+          # release tag and builds its own merge commit on top of this clone.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v7
         with:
@@ -80,15 +89,96 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Compute short SHA
+        id: vars
+        shell: bash
+        run: echo "sha_short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      # post-comment: false — this action's own PR comment and RELEASE-label
+      # side effects belong to release-please-preview.yml. Here we only want
+      # the predicted version, to name this PR's build artifact.
+      - name: Predict next version
+        id: predict
+        if: github.event_name == 'pull_request'
+        uses: non7top/predict-next-version-action@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          post-comment: 'false'
+
+      # The action above leaves the working tree on its own synthetic
+      # preview-merge branch (or, if simulating the merge failed, on unmerged
+      # master) in order to compute the prediction — restore the PR's own head
+      # commit, which that action already fetched into this local branch, so
+      # the build below builds the PR's real changes rather than whatever the
+      # action happened to leave checked out.
+      - name: Restore the PR's own head commit for the build
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: git checkout preview-head
+
       - name: Package Windows installer
         run: npm run make
 
+      # Same guard as the release workflow, and the reason it exists: a bare
+      # require() left in the bundle crashes the installed app at startup,
+      # because electron-builder.yml ships no node_modules. Checked after
+      # `make` so it inspects exactly the bundle that went into this installer.
+      - name: Check bundle externals
+        run: npm run check:bundle
+
+      - uses: sigstore/cosign-installer@v3
+
+      # This PR build never becomes a real release, so there is nothing to
+      # attach the signature to — it exists purely to prove the keyless
+      # sign/verify invocation used in release.yml actually works against a
+      # real installer file before that (otherwise CI-unverifiable) step runs
+      # for real.
+      - name: Cosign sign/verify dry run
+        shell: bash
+        run: |
+          EXE_PATH=$(find dist -maxdepth 1 -name '*.exe' | head -1)
+          cosign sign-blob --yes --bundle "$EXE_PATH.cosign.bundle" "$EXE_PATH"
+          cosign verify-blob --bundle "$EXE_PATH.cosign.bundle" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$EXE_PATH"
+
+      # Only meaningful for PR builds with a predicted release — plain pushes
+      # to master (already merged, nothing to preview) and PRs with no
+      # releasable change keep the plain glob path below instead.
+      - name: Rename build artifact to the predicted version
+        id: artifact_names
+        if: github.event_name == 'pull_request' && steps.predict.outputs.version != ''
+        shell: bash
+        run: |
+          VERSION_TAG="${{ steps.predict.outputs.version }}-rc${{ github.event.pull_request.number }}"
+          EXE_PATH=$(find dist -maxdepth 1 -name '*.exe' | head -1)
+          NEW_EXE="$(dirname "$EXE_PATH")/ai-chat-notebook-installer-${VERSION_TAG}.exe"
+          mv "$EXE_PATH" "$NEW_EXE"
+
+          echo "version_tag=$VERSION_TAG" >> "$GITHUB_OUTPUT"
+          echo "exe_path=$NEW_EXE" >> "$GITHUB_OUTPUT"
+
       - name: Upload installer
+        id: upload-installer
         uses: actions/upload-artifact@v7
         with:
+          # `name` is ignored by the action whenever archive: false — the
+          # artifact takes the name of the file it is given instead, so the
+          # rename step above (when it ran) is what actually names this.
           name: windows-installer
-          path: dist/*.exe
+          path: ${{ steps.artifact_names.outputs.exe_path || 'dist/*.exe' }}
           retention-days: 14
           # Setup.exe is already a compressed archive internally, so the
           # action's own zip wrapper is pure overhead.
           archive: false
+
+      - name: Comment download link on PR
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LABEL_SUFFIX="${{ steps.artifact_names.outputs.version_tag || steps.vars.outputs.sha_short }}"
+          gh pr comment "${{ github.event.pull_request.number }}" --body "Windows build ready for \`${{ steps.vars.outputs.sha_short }}\`:
+          - [ai-chat-notebook-installer-${LABEL_SUFFIX}](${{ steps.upload-installer.outputs.artifact-url }})"

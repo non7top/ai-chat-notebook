@@ -1,0 +1,29 @@
+name: release-please-preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [master]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history and tags: release-please needs to walk back to the
+          # last release tag, and the action builds its own merge commit on
+          # top of this clone.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - uses: non7top/predict-next-version-action@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
