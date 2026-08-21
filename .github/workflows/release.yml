@@ -116,21 +116,34 @@ jobs:
       # produced locally (already uploaded by the publish step) rather than
       # re-downloading from the release. electron-builder's NSIS target
       # produces a single installer .exe in dist/.
-      - name: Sign release artifacts (cosign, keyless)
-        id: cosign_sign
-        shell: bash
-        run: |
-          shopt -s nullglob
-          bundles=()
-          for f in dist/*.exe; do
-            cosign sign-blob --yes --bundle "$f.cosign.bundle" "$f"
-            bundles+=("$f.cosign.bundle")
-          done
-          printf '%s\n' "${bundles[@]}" > cosign_bundles.txt
-          cat cosign_bundles.txt
-
-      - name: Upload signature bundles to the release
+      # Signs and uploads in one step, deliberately. The previous split
+      # version passed the bundle list between steps as unquoted
+      # $(cat cosign_bundles.txt), which word-splits on spaces — and
+      # productName here is "AI Chat Notebook", so the single path
+      # "dist/AI Chat Notebook-Setup-0.2.0.exe.cosign.bundle" arrived as three
+      # arguments and v0.2.0's release shipped with no signatures at all
+      # ("no matches found for `dist/AI`"). PromptLoom never hit this because
+      # its productName is one word. Keeping the filename inside a quoted
+      # variable, never round-tripped through a text file, is what actually
+      # fixes it rather than re-quoting the same fragile pipeline.
+      - name: Sign release artifacts and upload signatures (cosign, keyless)
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ needs.check-release-tag.outputs.tag }}" $(cat cosign_bundles.txt) --clobber --repo "${{ github.repository }}"
+        run: |
+          shopt -s nullglob
+          signed=0
+          for f in dist/*.exe; do
+            cosign sign-blob --yes --bundle "$f.cosign.bundle" "$f"
+            gh release upload "${{ needs.check-release-tag.outputs.tag }}" \
+              "$f.cosign.bundle" --clobber --repo "${{ github.repository }}"
+            signed=$((signed + 1))
+          done
+          # nullglob means a missing installer yields an empty loop rather than
+          # an error, which would otherwise pass silently and publish an
+          # unsigned release — exactly the failure this step exists to prevent.
+          if [ "$signed" -eq 0 ]; then
+            echo "No installer found in dist/ to sign" >&2
+            exit 1
+          fi
+          echo "Signed and uploaded $signed artifact(s)."
