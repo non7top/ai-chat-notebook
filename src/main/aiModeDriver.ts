@@ -279,13 +279,46 @@ export async function findAiModeFrame(): Promise<WebFrameMain> {
 // real JS error across the boundary, only a generic "Script failed to execute"
 // wrapper. Every script below returns { ok, ... } and the real error is raised
 // in TS. (Lesson inherited from perchanceDriver.ts.)
-async function run<T>(script: string): Promise<T> {
+const SCRIPT_TIMEOUT_MS = 30_000;
+
+async function run<T>(script: string, timeoutMs = SCRIPT_TIMEOUT_MS): Promise<T> {
   const frame = await findAiModeFrame();
-  const result = (await frame.executeJavaScript(script)) as { ok: boolean; error?: string } & T;
-  if (!result.ok) {
-    throw new Error(result.error ?? 'Injected script failed');
+  // Time-bounded, because executeJavaScript can hang indefinitely rather than
+  // reject: if the page navigates while the script is awaiting, the execution
+  // context is torn down and the promise simply never settles. Without this a
+  // single navigation mid-script would wedge the harvester forever.
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const result = (await Promise.race([
+      frame.executeJavaScript(script),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Injected script timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ])) as { ok: boolean; error?: string } & T;
+    if (!result.ok) {
+      throw new Error(result.error ?? 'Injected script failed');
+    }
+    return result;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  return result;
+}
+
+/**
+ * Runs a script whose side effect is the point and whose result cannot be
+ * awaited — a click that navigates destroys the context before the promise
+ * resolves, so waiting for it is waiting for something that will never arrive.
+ * Gives the page a moment to act on it and moves on.
+ */
+async function fireAndForget(script: string, graceMs = 2500): Promise<void> {
+  const frame = await findAiModeFrame();
+  await Promise.race([
+    frame.executeJavaScript(script).catch(() => undefined),
+    new Promise((resolve) => setTimeout(resolve, graceMs)),
+  ]);
 }
 
 export interface ThreadListEntry {
@@ -452,4 +485,207 @@ export async function scrollListToTop(): Promise<void> {
       }
     })();
   `);
+}
+
+/* --------------------------------------------------- opening a conversation */
+
+// Threads can only be opened by clicking their sidebar row (see the mtid notes
+// above), and the list is virtualised, so the row may not exist in the DOM yet.
+//
+// Scrolling-to-find and clicking are deliberately SEPARATE steps. The click
+// navigates, which destroys the execution context — so if the click were part
+// of the same awaited script, that script's promise would never settle and the
+// caller would hang. Learned by hanging.
+const SCROLL_TO_THREAD_SCRIPT = (externalId: string) => `
+(async () => {
+  try {
+    const wanted = ${JSON.stringify(externalId)};
+    const scroller = document.querySelector(${JSON.stringify(THREAD_LIST_SCROLLER)});
+    if (!scroller) return { ok: false, error: 'Thread list scroller not found' };
+    if (getComputedStyle(scroller).display === 'none') {
+      return { ok: false, error: 'History sidebar is closed' };
+    }
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    // Quoted attribute selector: thread ids can begin with '-', which would be
+    // an invalid identifier unquoted.
+    const find = () => document.querySelector('button.qqMZif[data-thread-id="' + wanted + '"]');
+
+    scroller.scrollTop = 0;
+    await wait(400);
+
+    for (let step = 0; step < 220; step += 1) {
+      const el = find();
+      if (el && el.offsetParent !== null) {
+        el.scrollIntoView({ block: 'center' });
+        await wait(150);
+        return { ok: true, steps: step };
+      }
+      const before = scroller.scrollTop;
+      scroller.scrollTop = Math.min(before + scroller.clientHeight * 0.8, scroller.scrollHeight);
+      // Bottom reached and still not found — report rather than spin.
+      if (scroller.scrollTop === before) break;
+      await wait(350);
+    }
+    return { ok: false, error: 'Thread row never rendered: ' + wanted };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+})();
+`;
+
+const CLICK_THREAD_SCRIPT = (externalId: string) => `
+(() => {
+  const el = document.querySelector('button.qqMZif[data-thread-id="' + ${JSON.stringify(externalId)} + '"]');
+  if (el) el.click();
+  return { ok: true };
+})();
+`;
+
+export async function openThreadById(externalId: string): Promise<void> {
+  // Generous timeout: finding a row can mean scrolling most of a 300-row
+  // virtualised list, at ~350ms a step.
+  await run(SCROLL_TO_THREAD_SCRIPT(externalId), 120_000);
+  await fireAndForget(CLICK_THREAD_SCRIPT(externalId));
+}
+
+// Chrome that sits inside a turn and would otherwise be captured as part of the
+// message. Each was seen welded onto real text during recon — reading the outer
+// element yields "CopiedCopyEditможешь ей ноги..." and similar.
+const TURN_CHROME_SELECTORS = [
+  'div.SK38Xc', // Copied / Copy / Edit
+  'div.NyIrK.wcKEcb', // Share / Download
+  'div.HvurC', // feedback widget
+  'div.DBd2Wb', // AI disclaimer + share-link UI
+  'div.UYpEO', // the timestamp, captured separately
+];
+
+const READ_TURNS_SCRIPT = `
+(() => {
+  try {
+    const clean = (el) => (el ? (el.textContent || '').replace(/\s+/g, ' ').trim() : '');
+    const pairs = Array.from(document.querySelectorAll('div.CKgc1d'));
+    if (pairs.length === 0) return { ok: false, error: 'No conversation turns rendered' };
+
+    const chromeSel = ${JSON.stringify(TURN_CHROME_SELECTORS.join(','))};
+    const imagesIn = (el) =>
+      Array.from(el.querySelectorAll('img'))
+        .map((img) => ({
+          src: img.currentSrc || img.getAttribute('src') || '',
+          alt: img.getAttribute('alt') || null,
+          width: img.naturalWidth,
+          height: img.naturalHeight,
+        }))
+        // Icons and spacers are not conversation content. 120px is above every
+        // UI glyph seen and below every real image.
+        .filter((i) => i.src && (i.width >= 120 || i.height >= 120));
+
+    // Strip chrome from a COPY, so the live page is never modified — this runs
+    // against the user's real session.
+    const stripped = (el) => {
+      const copy = el.cloneNode(true);
+      for (const junk of Array.from(copy.querySelectorAll(chromeSel))) junk.remove();
+      return copy;
+    };
+
+    const turns = [];
+    pairs.forEach((pair) => {
+      const userEl = pair.querySelector('div.ilZyRc.R7mRQb');
+      if (userEl) {
+        const body = userEl.querySelector('div.tbIZh.wQN2Jd.Odbbif');
+        const copy = stripped(userEl);
+        turns.push({
+          role: 'user',
+          // Prefer the precise body element; fall back to the de-chromed block.
+          text: clean(body) || clean(copy),
+          html: null,
+          images: imagesIn(userEl),
+          stamp: clean(userEl.querySelector('div.UYpEO div.kwdzO')) || null,
+        });
+      }
+      // The AI answer is the pair's other child — unclassed, and identified by
+      // position rather than a class name, which is the only stable handle.
+      const aiEl = Array.from(pair.children).find((c) => c !== userEl && clean(c).length > 0);
+      if (aiEl) {
+        const copy = stripped(aiEl);
+        turns.push({
+          role: 'ai',
+          text: clean(copy),
+          html: copy.innerHTML,
+          images: imagesIn(aiEl),
+          stamp: clean(aiEl.querySelector('div.UYpEO div.kwdzO')) || null,
+        });
+      }
+    });
+
+    return { ok: true, turns, pairCount: pairs.length, url: location.href };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+})();
+`;
+
+export interface CapturedImage {
+  src: string;
+  alt: string | null;
+  width: number;
+  height: number;
+}
+
+export interface CapturedTurn {
+  role: 'user' | 'ai';
+  text: string;
+  html: string | null;
+  images: CapturedImage[];
+  /** Display-only: "17:05" today, "August 21, 2026" older, often absent. */
+  stamp: string | null;
+}
+
+export async function readTurns(): Promise<{ turns: CapturedTurn[]; url: string }> {
+  const result = await run<{ turns: CapturedTurn[]; url: string }>(READ_TURNS_SCRIPT);
+  return { turns: result.turns, url: result.url };
+}
+
+/**
+ * Waits for a conversation to finish rendering after a click. Requires the turn
+ * count to hold steady, not merely be non-zero: turns stream in, and reading at
+ * the first sight of one captures a fragment.
+ */
+export async function waitForTurnsToSettle(timeoutMs = 12000): Promise<number> {
+  const started = Date.now();
+  let last = -1;
+  let stableFor = 0;
+  while (Date.now() - started < timeoutMs) {
+    let count = 0;
+    try {
+      count = (
+        await run<{ count: number }>(
+          `
+      (() => {
+        try {
+          return { ok: true, count: document.querySelectorAll('div.CKgc1d').length };
+        } catch (err) {
+          return { ok: false, error: String((err && err.message) || err) };
+        }
+      })();
+    `,
+          4000,
+        )
+      ).count;
+    } catch {
+      // Expected while the click's navigation is still in flight: the frame is
+      // being replaced, so the probe fails rather than returning zero. Keep
+      // polling instead of treating it as a failed capture.
+      count = -1;
+    }
+    if (count > 0 && count === last) {
+      stableFor += 1;
+      if (stableFor >= 2) return count;
+    } else {
+      stableFor = 0;
+    }
+    last = count;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  if (last > 0) return last;
+  throw new Error('Conversation did not render within the timeout');
 }
