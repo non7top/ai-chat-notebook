@@ -52,9 +52,28 @@ export default function ChatList({ chats, selectedId, onSelect }: Props) {
             </span>
             <span className="chat-meta">
               {started ? `${started} · ` : ''}
-              {chat.messageCount === 0
-                ? 'not captured yet'
-                : `${chat.messageCount} turn${chat.messageCount === 1 ? '' : 's'}`}
+              {chat.messageCount === 0 ? (
+                // A conversation that has been tried and failed looked exactly
+                // like one never attempted, so a stuck one was invisible.
+                chat.captureAttempts > 0 ? (
+                  <span className="chat-failed">
+                    capture failed
+                    {chat.captureAttempts > 1 ? ` (${chat.captureAttempts}×)` : ''}
+                  </span>
+                ) : (
+                  'not captured yet'
+                )
+              ) : (
+                `${chat.messageCount} turn${chat.messageCount === 1 ? '' : 's'}`
+              )}
+              {/* Most of this archive is image generation, so images are the
+                  thing worth browsing by. */}
+              {chat.imageCount > 0 && (
+                <span className="chat-images" title={`${chat.imageCount} image(s) archived`}>
+                  {' · '}
+                  {chat.imageCount} img
+                </span>
+              )}
             </span>
           </button>
         </div>

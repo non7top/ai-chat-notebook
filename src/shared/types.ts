@@ -20,6 +20,10 @@ export interface ChatSummary {
   startedAt: string | null;
   lastSeenAt: string;
   messageCount: number;
+  /** Distinct images archived, so an image-heavy conversation is findable. */
+  imageCount: number;
+  /** Failed capture attempts — distinguishes "failed" from "never tried". */
+  captureAttempts: number;
 }
 
 export interface Message {

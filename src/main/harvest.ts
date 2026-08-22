@@ -365,15 +365,23 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
     // anything never tried.
     const queue = db.chatsWithoutTurns(limit);
     let consecutiveFailures = 0;
-    for (const chat of queue) {
+    // Conversations that failed this pass, retried once at the end. Most
+    // failures here are transient — a page that took longer than 60s to settle
+    // — so without a retry "Capture all" reliably leaves a tail behind and the
+    // name is misleading. One extra pass, not a loop: retrying until success
+    // would spin forever on a conversation that genuinely cannot be read.
+    const retryable: db.ChatToCapture[] = [];
+    let isRetry = false;
+    const runPass = async (chats: db.ChatToCapture[]) => {
+    for (const chat of chats) {
       if (captureCancelled) break;
       summary.attempted += 1;
       broadcastCapture({
         phase: 'capturing',
         done: summary.captured,
-        total: queue.length,
+        total: queue.length + retryable.length,
         errors: summary.errors,
-        current: chat.title.slice(0, 60),
+        current: `${isRetry ? 'retry: ' : ''}${chat.title.slice(0, 60)}`,
       });
       try {
         const result = await captureOneChat(chat);
@@ -394,6 +402,7 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
           title: chat.title.slice(0, 60),
           reason: error instanceof Error ? error.message : String(error),
         });
+        if (!isRetry) retryable.push(chat);
         if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
           summary.stoppedEarly =
             `Stopped after ${consecutiveFailures} consecutive failures — ` +
@@ -403,6 +412,19 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
         }
       }
       await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS));
+    }
+    };
+
+    await runPass(queue);
+    // Second and final pass over this run's failures. Their earlier failure
+    // already counted, so the totals reflect attempts rather than pretending
+    // the first try never happened.
+    if (!captureCancelled && retryable.length > 0) {
+      isRetry = true;
+      consecutiveFailures = 0;
+      const toRetry = [...retryable];
+      retryable.length = 0;
+      await runPass(toRetry);
     }
 
     summary.cancelled = captureCancelled;

@@ -466,3 +466,11 @@ button:disabled {
   background: var(--border);
   margin: 0 0.2rem;
 }
+
+.chat-failed {
+  color: #b45309;
+}
+
+.chat-images {
+  color: #047857;
+}
