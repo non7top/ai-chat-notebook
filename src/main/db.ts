@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ChatDetail, ChatSummary, Folder, Message } from '../shared/types';
@@ -276,6 +277,66 @@ export function setChatTitle(chatId: number, userTitle: string): void {
 
 export function deleteChat(id: number): void {
   db.prepare('DELETE FROM chats WHERE id = ?').run(id);
+}
+
+/* ---------------------------------------------------------------- harvest */
+
+export interface UpsertResult {
+  created: boolean;
+  /** True when a row existed and its title changed. */
+  titleChanged: boolean;
+}
+
+// The sidebar title IS the thread's opening query (confirmed during recon: a
+// thread with three turns showed its first turn as both the title and the URL's
+// q=). So it doubles as the content key for spotting Google's own duplicates —
+// two threads started from the same prompt, which this history really contains.
+function contentKeyFor(title: string): string {
+  const normalised = title.toLowerCase().replace(/\s+/g, ' ').trim();
+  return createHash('sha256').update(normalised).digest('hex');
+}
+
+/**
+ * Records a thread seen in the history list. Turns are not captured here — a
+ * list harvest only learns that a conversation exists and what it is called.
+ */
+export function upsertThreadFromList(
+  externalId: string,
+  title: string,
+  url: string | null,
+): UpsertResult {
+  const now = new Date().toISOString();
+  const existing = db
+    .prepare('SELECT id, title FROM chats WHERE external_id = ?')
+    .get(externalId) as unknown as { id: number; title: string | null } | undefined;
+
+  if (existing) {
+    // last_seen_at moves on every sighting; title is refreshed in case Google
+    // ever revises it, but user_title is never touched — a name typed by hand
+    // must survive re-harvesting.
+    db.prepare('UPDATE chats SET title = ?, url = ?, last_seen_at = ? WHERE id = ?').run(
+      title,
+      url,
+      now,
+      existing.id,
+    );
+    return { created: false, titleChanged: (existing.title ?? '') !== title };
+  }
+
+  db.prepare(
+    `INSERT INTO chats
+       (folder_id, external_id, content_key, url, title, started_at, last_seen_at, source, raw_json)
+     VALUES (NULL, ?, ?, ?, ?, NULL, ?, 'harvest', ?)`,
+  ).run(externalId, contentKeyFor(title), url, title, now, JSON.stringify({ title }));
+  return { created: true, titleChanged: false };
+}
+
+/** external_ids already stored, so a harvest can tell new from seen. */
+export function knownExternalIds(): Set<string> {
+  const rows = db.prepare('SELECT external_id FROM chats').all() as unknown as {
+    external_id: string;
+  }[];
+  return new Set(rows.map((r) => r.external_id));
 }
 
 /* --------------------------------------------------------------- dev seed */

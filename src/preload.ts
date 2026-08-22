@@ -1,7 +1,16 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AiModeStatus, NotebookApi } from './shared/types';
+import type { AiModeStatus, HarvestProgress, NotebookApi } from './shared/types';
 
 const api: NotebookApi = {
+  harvestThreadList: () => ipcRenderer.invoke('harvest:threadList'),
+  cancelHarvest: () => ipcRenderer.invoke('harvest:cancel'),
+  onHarvestProgress: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: HarvestProgress) =>
+      callback(progress);
+    ipcRenderer.on('harvest:progress', listener);
+    return () => ipcRenderer.removeListener('harvest:progress', listener);
+  },
+
   listFolders: () => ipcRenderer.invoke('folders:list'),
   createFolder: (parentId, name) => ipcRenderer.invoke('folders:create', parentId, name),
   renameFolder: (id, name) => ipcRenderer.invoke('folders:rename', id, name),

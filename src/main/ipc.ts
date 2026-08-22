@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import * as db from './db';
 import { getLastAiModeStatus, setAiModeViewHidden } from './aiModeView';
+import { cancelHarvest, harvestThreadList } from './harvest';
 import type { ChatScope } from '../shared/types';
 
 export function registerIpcHandlers(): void {
@@ -27,6 +28,9 @@ export function registerIpcHandlers(): void {
     db.setChatTitle(chatId, userTitle),
   );
   ipcMain.handle('chats:delete', (_event, id: number) => db.deleteChat(id));
+
+  ipcMain.handle('harvest:threadList', () => harvestThreadList());
+  ipcMain.handle('harvest:cancel', () => cancelHarvest());
 
   ipcMain.handle('aiMode:getStatus', () => getLastAiModeStatus());
   ipcMain.handle('aiMode:setHidden', (_event, hidden: boolean) => setAiModeViewHidden(hidden));

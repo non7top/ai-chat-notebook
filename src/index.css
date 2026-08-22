@@ -345,3 +345,42 @@ button:disabled {
   border: 1px solid var(--border);
   padding: 0.25rem 0.5rem;
 }
+
+/* --------------------------------------------------------------- harvesting */
+
+.harvest-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+  font-size: 0.78rem;
+}
+
+.harvest-status {
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.harvest-status.error {
+  color: #b00;
+}
+
+.harvest-track {
+  flex: 1;
+  height: 4px;
+  background: #e5e7eb;
+  border-radius: 2px;
+  overflow: hidden;
+  min-width: 60px;
+}
+
+.harvest-fill {
+  display: block;
+  height: 100%;
+  background: #22c55e;
+  transition: width 0.2s linear;
+}

@@ -3,6 +3,7 @@ import type { AiModeStatus, ChatDetail, ChatScope, ChatSummary, Folder } from '.
 import ChatList from './ChatList';
 import ChatReader from './ChatReader';
 import FolderTree from './FolderTree';
+import HarvestBar from './HarvestBar';
 
 export default function App() {
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -65,6 +66,8 @@ export default function App() {
           {panelVisible ? 'Hide panel' : 'Show panel'}
         </button>
       </div>
+
+      <HarvestBar onNeedPanel={() => setPanelVisible(true)} onFinished={reloadAll} />
 
       {error && (
         <div className="banner error">
