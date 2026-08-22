@@ -59,7 +59,32 @@ import { getAiModeNavState, getAiModeWebContents } from './aiModeView';
 //   state" was wrong, and the failed experiment that produced it used the wrong
 //   URL shape: mtid= plus q= with NO mstk. mtid alone is not an address.
 //
-// BUT OPENING A CONVERSATION MAY RE-RUN IT — unresolved, and it matters
+// RESOLVED: TAKEOUT LINKS RE-RUN THE PROMPT. NEVER NAVIGATE TO THEM.
+// - Following one on an image conversation produced the model replying "If you
+//   referenced a specific original image for this character, please upload the
+//   image so I can accurately match her face features..." — it re-executed the
+//   prompt in a context where the uploaded reference no longer exists, and asked
+//   for it back.
+// - So an mstk link is not a permalink to a conversation's CONTENT. It restores
+//   enough to look right (correct mtid, original date) while losing the uploads
+//   the conversation depended on, and it appends a fresh answer.
+// - CLICKING THE SIDEBAR ROW DOES NOT DO THIS. The same sprite conversation
+//   opened by click yielded 9 pairs with the original img.taqkMe upload intact
+//   and its generated results in place. That is the faithful path, and it is
+//   what capture already uses.
+// - Therefore: use Takeout for METADATA ONLY — query text and its exact
+//   timestamp. Never navigate to its links, never offer them as "open", and do
+//   not use them to build a Takeout-to-conversation key. Paying one page load
+//   per entry for that key would re-run several hundred prompts.
+//
+// SUPERSEDED SPECULATION — kept as a record of a wrong turn: an earlier note
+// treated addressability as an easy win and worried that click-opening might
+// regenerate images too. The evidence above says the click path preserves
+// originals, so capture by click is sound and the concern applied only to the
+// link path.
+//
+// (earlier framing, now answered:)
+// OPENING A CONVERSATION MAY RE-RUN IT
 // - The app's owner reports that following these links makes Google execute the
 //   query again, and on image conversations attempt to RE-CREATE the images.
 // - The test above cannot confirm or deny that: it used a text-only query, so
