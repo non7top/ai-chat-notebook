@@ -1,5 +1,7 @@
 import { BrowserWindow, dialog, ipcMain } from 'electron';
 import { pathToFileURL } from 'node:url';
+import fs from 'node:fs';
+import path from 'node:path';
 import * as db from './db';
 import {
   aiModeGoBack,
@@ -9,6 +11,7 @@ import {
   navigateAiMode,
   setAiModeViewHidden,
 } from './aiModeView';
+import { importTakeout } from './takeout';
 import {
   cancelCapture,
   cancelHarvest,
@@ -69,6 +72,39 @@ export function registerIpcHandlers(): void {
   // path there would resolve against the bundle and every image would break —
   // it needs the real base to resolve against at read time.
   ipcMain.handle('assets:baseUrl', () => `${pathToFileURL(db.getAssetsDir()).href}/`);
+
+  // Takeout import is split in two so the parse is verifiable before anything
+  // is written: 'pick' only reads the folder, 'apply' stores what the renderer
+  // parsed from it.
+  ipcMain.handle('takeout:pick', async () => {
+    const window = BrowserWindow.getFocusedWindow();
+    const options: Electron.OpenDialogOptions = {
+      title: 'Select the Takeout "My Activity/AI Mode" folder',
+      properties: ['openDirectory'],
+    };
+    const { canceled, filePaths } = window
+      ? await dialog.showOpenDialog(window, options)
+      : await dialog.showOpenDialog(options);
+    if (canceled || filePaths.length === 0) return null;
+
+    const folder = filePaths[0];
+    const names = fs.readdirSync(folder);
+    const htmlName = names.find((n) => /MyActivity\.html?$/i.test(n));
+    if (!htmlName) {
+      throw new Error(`No MyActivity.html in ${folder}. Pick the "AI Mode" folder itself.`);
+    }
+    return {
+      folder,
+      html: fs.readFileSync(path.join(folder, htmlName), 'utf8'),
+      // Local images sit beside the HTML, so nothing is fetched.
+      imageFiles: names.filter((n) => /\.(jpe?g|png|webp|gif)$/i.test(n)),
+    };
+  });
+
+  ipcMain.handle(
+    'takeout:apply',
+    (_event, folder: string, rows: db.TakeoutImportRow[]) => importTakeout(folder, rows),
+  );
 
   ipcMain.handle('capture:turns', (_event, limit: number) => captureTurns(limit));
   ipcMain.handle('capture:cancel', () => cancelCapture());

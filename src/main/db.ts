@@ -437,7 +437,9 @@ export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetT
       );
     }
 
-    db.prepare('UPDATE chats SET last_seen_at = ? WHERE id = ?').run(
+    // source moves to 'capture': this content came from the panel, uploads and
+    // images included, so it no longer wants a refresh.
+    db.prepare("UPDATE chats SET last_seen_at = ?, source = 'capture' WHERE id = ?").run(
       new Date().toISOString(),
       chatId,
     );
@@ -468,9 +470,15 @@ export interface ChatToCapture {
 }
 
 /**
- * Conversations still needing capture, in Google's own recency order so the
- * most recent are archived first — that is what a partial run should leave you
- * with.
+ * Conversations still wanting a sidebar capture, in Google's own recency order
+ * so the most recent are archived first — that is what a partial run should
+ * leave you with.
+ *
+ * Two kinds qualify. Ones with no turns at all, and ones whose text came from
+ * Takeout: that import gives complete text and exact timestamps but few images,
+ * and none of the original uploads. Only the sidebar path restores those, and
+ * only while Google still lists the conversation — so a Takeout-sourced chat
+ * stays queued until it has been pulled from the panel.
  */
 export function chatsWithoutTurns(limit: number): ChatToCapture[] {
   const rows = db
@@ -478,7 +486,10 @@ export function chatsWithoutTurns(limit: number): ChatToCapture[] {
       `SELECT c.id, c.external_id, ${CHAT_TITLE_SQL} AS title
        FROM chats c
        WHERE c.merged_into IS NULL
-         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
+         AND (
+           NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
+           OR c.source = 'takeout'
+         )
        -- Never-attempted conversations first, then by Google's recency order.
        -- Without this, a long unattended run re-tries the same early failures
        -- ahead of hundreds of conversations it has never even looked at, and
@@ -502,10 +513,102 @@ export function countChatsWithoutTurns(): number {
     .prepare(
       `SELECT COUNT(*) AS n FROM chats c
        WHERE c.merged_into IS NULL
-         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)`,
+         AND (
+           NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
+           OR c.source = 'takeout'
+         )`,
     )
     .get() as unknown as { n: number };
   return row.n;
+}
+
+/* ---------------------------------------------------------------- takeout */
+
+export interface TakeoutImportRow {
+  query: string;
+  timestamp: string | null;
+  href: string | null;
+  text: string;
+  imageFiles: string[];
+}
+
+export interface TakeoutImportResult {
+  created: number;
+  updatedText: number;
+  skipped: number;
+}
+
+/**
+ * Imports Takeout entries as conversations.
+ *
+ * Takeout carries no thread id, so identity comes from the normalised query
+ * plus the exact timestamp — which, unlike query text alone, separates the
+ * duplicate-prompt groups this history contains, because two submissions of the
+ * same prompt happened at different times.
+ *
+ * Existing sidebar-harvested conversations are matched by content_key and given
+ * their text and real timestamp, without touching external_id or user_title.
+ */
+export function importTakeoutEntries(rows: TakeoutImportRow[]): TakeoutImportResult {
+  const result: TakeoutImportResult = { created: 0, updatedText: 0, skipped: 0 };
+  const findByKey = db.prepare('SELECT id, source FROM chats WHERE content_key = ? LIMIT 2');
+  const findByExternal = db.prepare('SELECT id FROM chats WHERE external_id = ?');
+
+  db.exec('BEGIN');
+  try {
+    for (const row of rows) {
+      if (!row.query.trim()) {
+        result.skipped += 1;
+        continue;
+      }
+      const key = contentKeyFor(row.query);
+      // Synthetic and stable, so re-importing the same export updates rather
+      // than duplicating. The timestamp is what makes it unique per submission.
+      const externalId = `takeout:${key.slice(0, 16)}:${row.timestamp ?? 'unknown'}`;
+
+      const existingSynthetic = findByExternal.get(externalId) as unknown as
+        | { id: number }
+        | undefined;
+      const candidates = findByKey.all(key) as unknown as { id: number; source: string }[];
+      // Only adopt a harvested conversation when the match is unambiguous;
+      // otherwise create a Takeout record of its own rather than guess which of
+      // several same-prompt conversations this was.
+      const harvested = candidates.length === 1 ? candidates[0] : undefined;
+      const targetId = existingSynthetic?.id ?? harvested?.id;
+
+      if (targetId) {
+        db.prepare(
+          `UPDATE chats
+             SET started_at = COALESCE(?, started_at),
+                 raw_json = ?,
+                 source = CASE WHEN source = 'capture' THEN source ELSE 'takeout' END
+           WHERE id = ?`,
+        ).run(row.timestamp, JSON.stringify({ takeout: { href: row.href } }), targetId);
+        result.updatedText += 1;
+        continue;
+      }
+
+      db.prepare(
+        `INSERT INTO chats
+           (folder_id, external_id, content_key, url, title, started_at, last_seen_at,
+            source, raw_json, list_rank)
+         VALUES (NULL, ?, ?, NULL, ?, ?, ?, 'takeout', ?, NULL)`,
+      ).run(
+        externalId,
+        key,
+        row.query,
+        row.timestamp,
+        new Date().toISOString(),
+        JSON.stringify({ takeout: { href: row.href } }),
+      );
+      result.created += 1;
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  return result;
 }
 
 /* --------------------------------------------------------------- dev seed */

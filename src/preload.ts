@@ -9,6 +9,8 @@ import type {
 const api: NotebookApi = {
   confirm: (message, detail) => ipcRenderer.invoke('ui:confirm', message, detail),
 
+  pickTakeout: () => ipcRenderer.invoke('takeout:pick'),
+  applyTakeout: (folder, rows) => ipcRenderer.invoke('takeout:apply', folder, rows),
   getAssetsBaseUrl: () => ipcRenderer.invoke('assets:baseUrl'),
   captureTurns: (limit) => ipcRenderer.invoke('capture:turns', limit),
   cancelCapture: () => ipcRenderer.invoke('capture:cancel'),

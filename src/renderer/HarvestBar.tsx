@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import type { CaptureProgress, HarvestProgress } from '../shared/types';
+import type { CaptureProgress, HarvestProgress, TakeoutPick } from '../shared/types';
+import { parseTakeoutHtml } from './parseTakeout';
 
 interface Props {
   /** Harvesting scrapes the live sidebar, so the panel has to be on screen. */
@@ -23,6 +24,9 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured }: Prop
   const [busy, setBusy] = useState(false);
   const [capture, setCapture] = useState<CaptureProgress | null>(null);
   const [capturing, setCapturing] = useState(false);
+  const [takeout, setTakeout] = useState<TakeoutPick | null>(null);
+  const [takeoutNote, setTakeoutNote] = useState<string | null>(null);
+  const [takeoutBusy, setTakeoutBusy] = useState(false);
 
   useEffect(
     () =>
@@ -49,6 +53,59 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured }: Prop
       }),
     [onFinished],
   );
+
+  // Two steps on purpose. Scanning reports what the parser found so a layout
+  // change shows up as counts that look wrong, rather than as a silent import
+  // of nothing.
+  const scanTakeout = async () => {
+    setTakeoutBusy(true);
+    setTakeoutNote(null);
+    try {
+      const picked = await window.notebook.pickTakeout();
+      if (!picked) return;
+      const { scan } = parseTakeoutHtml(picked.html);
+      setTakeout(picked);
+      setTakeoutNote(
+        `${scan.entryCount} entries · ${scan.withTimestamp} dated · ${scan.withQuery} titled · ` +
+          `${scan.withImages} with images (${scan.imageRefsTotal} refs) · ` +
+          `text ${scan.textLengths.min}/${scan.textLengths.median}/${scan.textLengths.max} chars · ` +
+          `container ${scan.containerDescription}` +
+          (scan.repeatedLabels.length ? ` · labels ${scan.repeatedLabels.join(', ')}` : ''),
+      );
+    } catch (err) {
+      setTakeoutNote(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTakeoutBusy(false);
+    }
+  };
+
+  const applyTakeout = async () => {
+    if (!takeout) return;
+    setTakeoutBusy(true);
+    try {
+      const { entries } = parseTakeoutHtml(takeout.html);
+      const summary = await window.notebook.applyTakeout(
+        takeout.folder,
+        entries.map((e) => ({
+          query: e.query,
+          timestamp: e.timestamp,
+          href: e.href,
+          text: e.text,
+          imageFiles: e.images,
+        })),
+      );
+      setTakeoutNote(
+        `imported ${summary.entries}: ${summary.created} new, ${summary.updated} updated, ` +
+          `${summary.skipped} skipped · images ${summary.imagesCopied} copied, ${summary.imagesMissing} missing`,
+      );
+      setTakeout(null);
+      onFinished();
+    } catch (err) {
+      setTakeoutNote(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTakeoutBusy(false);
+    }
+  };
 
   const startCapture = async (limit: number) => {
     setCapturing(true);
@@ -129,6 +186,18 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured }: Prop
           )}
         </span>
       )}
+
+      <span className="harvest-sep" />
+
+      <button type="button" onClick={scanTakeout} disabled={takeoutBusy || busy || capturing}>
+        {takeoutBusy ? 'Reading…' : 'Scan Takeout…'}
+      </button>
+      {takeout && (
+        <button type="button" onClick={applyTakeout} disabled={takeoutBusy}>
+          Import it
+        </button>
+      )}
+      {takeoutNote && <span className="harvest-status">{takeoutNote}</span>}
 
       <span className="harvest-sep" />
 

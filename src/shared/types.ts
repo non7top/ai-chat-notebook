@@ -96,7 +96,34 @@ export interface CaptureSummary {
   stoppedEarly?: string;
 }
 
+export interface TakeoutPick {
+  folder: string;
+  html: string;
+  imageFiles: string[];
+}
+
+export interface TakeoutImportRow {
+  query: string;
+  timestamp: string | null;
+  href: string | null;
+  text: string;
+  imageFiles: string[];
+}
+
+export interface TakeoutImportSummary {
+  entries: number;
+  created: number;
+  updated: number;
+  skipped: number;
+  imagesCopied: number;
+  imagesMissing: number;
+}
+
 export interface NotebookApi {
+  /** Reads the Takeout folder only — nothing is stored until applyTakeout. */
+  pickTakeout(): Promise<TakeoutPick | null>;
+  applyTakeout(folder: string, rows: TakeoutImportRow[]): Promise<TakeoutImportSummary>;
+
   /** file:// base for resolving the relative asset paths in stored HTML. */
   getAssetsBaseUrl(): Promise<string>;
   captureTurns(limit: number): Promise<CaptureSummary>;

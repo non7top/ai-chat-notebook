@@ -326,21 +326,28 @@ button:disabled {
   line-height: 1.55;
 }
 
-/* The question: tinted, boxed, and deliberately narrower than the answer, so
-   the shape alone says which is which. */
+/* The question: tinted, boxed, narrower than the answer, and pushed to the
+   right. Side alone then identifies the speaker, which survives skim-reading a
+   long conversation better than colour does. */
 .turn-user .turn-body {
   background: #eef2ff;
   border: 1px solid #c7d2fe;
   border-radius: 8px;
   padding: 0.55rem 0.75rem;
   max-width: 46rem;
+  margin-left: auto;
 }
 
-/* The answer: full width, no fill, with a rule down the side to anchor long
-   passages that scroll past their own heading. */
+.turn-user .turn-role {
+  text-align: right;
+}
+
+/* The answer: plain, unadorned, and the full width of the pane — matching AI
+   Mode itself, where only the prompt is a bubble. An earlier version added a
+   left rule; that made every answer look like a blockquote and fought the
+   asymmetry that already distinguishes the two. */
 .turn-ai .turn-body {
-  border-left: 3px solid #a7f3d0;
-  padding: 0.1rem 0 0.1rem 0.8rem;
+  padding: 0;
 }
 
 /* Captured markup carries no stylesheet of its own — these keep third-party
