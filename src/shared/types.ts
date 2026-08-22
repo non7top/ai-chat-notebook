@@ -71,6 +71,7 @@ export interface CaptureProgress {
   total: number;
   errors: number;
   current?: string;
+  stoppedEarly?: string;
   turns?: number;
   images?: number;
   remaining?: number;
@@ -87,6 +88,8 @@ export interface CaptureSummary {
   cancelled: boolean;
   /** Kept rather than only counted — a bare error count is unactionable. */
   failures: { title: string; reason: string }[];
+  /** Set when a run gave up early, e.g. on a run of consecutive failures. */
+  stoppedEarly?: string;
 }
 
 export interface NotebookApi {

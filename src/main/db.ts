@@ -108,6 +108,7 @@ export function initDb(userDataPath: string): void {
   // CREATE TABLE above is IF NOT EXISTS, so it does nothing to a database that
   // already holds harvested rows.
   ensureColumn('chats', 'list_rank', 'list_rank INTEGER');
+  ensureColumn('chats', 'capture_attempts', 'capture_attempts INTEGER NOT NULL DEFAULT 0');
   db.exec('CREATE INDEX IF NOT EXISTS chats_list_rank ON chats(list_rank);');
 
   fts5Available = probeFts5(db);
@@ -473,11 +474,22 @@ export function chatsWithoutTurns(limit: number): ChatToCapture[] {
        FROM chats c
        WHERE c.merged_into IS NULL
          AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
-       ORDER BY CASE WHEN c.list_rank IS NULL THEN 1 ELSE 0 END, c.list_rank ASC
+       -- Never-attempted conversations first, then by Google's recency order.
+       -- Without this, a long unattended run re-tries the same early failures
+       -- ahead of hundreds of conversations it has never even looked at, and
+       -- successive runs make no progress.
+       ORDER BY c.capture_attempts ASC,
+                CASE WHEN c.list_rank IS NULL THEN 1 ELSE 0 END,
+                c.list_rank ASC
        LIMIT ?`,
     )
     .all(limit) as unknown as { id: number; external_id: string; title: string }[];
   return rows.map((r) => ({ id: r.id, externalId: r.external_id, title: r.title }));
+}
+
+/** Counted, so a conversation that keeps failing sinks in the queue. */
+export function recordCaptureFailure(chatId: number): void {
+  db.prepare('UPDATE chats SET capture_attempts = capture_attempts + 1 WHERE id = ?').run(chatId);
 }
 
 export function countChatsWithoutTurns(): number {

@@ -45,14 +45,14 @@ export default function HarvestBar({ onNeedPanel, onFinished }: Props) {
     window.notebook.countChatsWithoutTurns().then(setRemaining);
   }, []);
 
-  const startCapture = async () => {
+  const startCapture = async (limit: number) => {
     setCapturing(true);
     setCapture(null);
     // Capture drives the real sidebar, so the panel has to be on screen for the
     // same reason harvesting does.
     onNeedPanel();
     try {
-      await window.notebook.captureTurns(CAPTURE_BATCH);
+      await window.notebook.captureTurns(limit);
     } catch (err) {
       setCapture({
         phase: 'error',
@@ -127,9 +127,22 @@ export default function HarvestBar({ onNeedPanel, onFinished }: Props) {
 
       <span className="harvest-sep" />
 
-      <button type="button" onClick={startCapture} disabled={busy || capturing}>
-        {capturing ? 'Capturing…' : `Capture ${CAPTURE_BATCH} conversations`}
+      <button type="button" onClick={() => startCapture(CAPTURE_BATCH)} disabled={busy || capturing}>
+        {capturing ? 'Capturing…' : `Capture ${CAPTURE_BATCH}`}
       </button>
+      {/* The backlog is hours long at ~30-60s per conversation, almost all of it
+          Google's own load time. Clicking a 25-batch a dozen times is not a
+          workflow, so this exists to be started and left. */}
+      {remaining !== null && remaining > 0 && (
+        <button
+          type="button"
+          onClick={() => startCapture(remaining)}
+          disabled={busy || capturing}
+          title="Works through everything not yet captured. Safe to leave running; Stop works at any point."
+        >
+          Capture all ({remaining})
+        </button>
+      )}
       {capturing && (
         <button type="button" onClick={() => window.notebook.cancelCapture()}>
           Stop
@@ -145,7 +158,7 @@ export default function HarvestBar({ onNeedPanel, onFinished }: Props) {
                   capture.images ?? 0
                 } images${capture.errors ? ` · ${capture.errors} failed` : ''}${
                   capture.remaining ? ` · ${capture.remaining} left` : ''
-                }`}
+                }${capture.stoppedEarly ? ` — ${capture.stoppedEarly}` : ''}`}
         </span>
       ) : (
         remaining !== null &&

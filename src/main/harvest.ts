@@ -27,6 +27,14 @@ const MAX_STEPS = 200;
 // produces nothing new for several steps in the middle of a run whenever the
 // render window lags the scroll. Only a bottom that stays put counts.
 const STAGNANT_AT_BOTTOM_LIMIT = 3;
+// Between conversations. Not a rate limit so much as breathing room: this
+// drives a real browser session, and hammering it back-to-back for hours is
+// both more likely to be throttled and harder to interrupt.
+const BETWEEN_CAPTURES_MS = 800;
+// A run that fails this many times in a row has hit something systemic — signed
+// out, offline, page restructured — and grinding through 300 conversations to
+// fail at every one wastes hours and buries the cause.
+const CONSECUTIVE_FAILURE_LIMIT = 10;
 
 let cancelRequested = false;
 let running = false;
@@ -315,6 +323,7 @@ export interface CaptureSummary {
   remaining: number;
   cancelled: boolean;
   failures: { title: string; reason: string }[];
+  stoppedEarly?: string;
 }
 
 /**
@@ -343,7 +352,12 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
 
   try {
     await ensureOnAiMode();
+    // The queue is taken ONCE, so each conversation gets one attempt per run.
+    // Re-reading it in a loop would retry the same failure forever in an
+    // unattended run; a fresh run picks failures up again, ordered behind
+    // anything never tried.
     const queue = db.chatsWithoutTurns(limit);
+    let consecutiveFailures = 0;
     for (const chat of queue) {
       if (captureCancelled) break;
       summary.attempted += 1;
@@ -357,6 +371,7 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
       try {
         const result = await captureOneChat(chat);
         summary.captured += 1;
+        consecutiveFailures = 0;
         summary.turns += result.turns;
         summary.images += result.images;
       } catch (error) {
@@ -366,11 +381,21 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
         // whereas knowing they were all load timeouts points straight at the
         // fix.
         summary.errors += 1;
+        consecutiveFailures += 1;
+        db.recordCaptureFailure(chat.id);
         summary.failures.push({
           title: chat.title.slice(0, 60),
           reason: error instanceof Error ? error.message : String(error),
         });
+        if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
+          summary.stoppedEarly =
+            `Stopped after ${consecutiveFailures} consecutive failures — ` +
+            'something systemic (signed out, offline, or the page changed) ' +
+            'rather than awkward conversations.';
+          break;
+        }
       }
+      await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS));
     }
 
     summary.cancelled = captureCancelled;
@@ -383,6 +408,7 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
       turns: summary.turns,
       images: summary.images,
       remaining: summary.remaining,
+      stoppedEarly: summary.stoppedEarly,
     });
     return summary;
   } catch (error) {
