@@ -297,26 +297,50 @@ button:disabled {
   flex: 1;
 }
 
+/* User and AI turns are told apart three ways at once — colour, width and a
+   left rule — because any one of them alone is easy to lose. A conversation
+   scrolled past its own start should still be readable at a glance, and
+   several of these run to 19,000 characters of answer around a 15-character
+   question. */
 .turn {
-  margin: 0.8rem 0;
+  margin: 1.1rem 0;
 }
 
 .turn-role {
-  font-size: 0.7rem;
+  font-size: 0.68rem;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-  margin-bottom: 0.2rem;
+  letter-spacing: 0.06em;
+  margin-bottom: 0.3rem;
 }
 
-.turn-user .turn-body {
-  background: #f3f4f6;
-  border-radius: 8px;
-  padding: 0.5rem 0.7rem;
+.turn-user .turn-role {
+  color: #1d4ed8;
+}
+
+.turn-ai .turn-role {
+  color: #047857;
 }
 
 .turn-body {
-  line-height: 1.5;
+  line-height: 1.55;
+}
+
+/* The question: tinted, boxed, and deliberately narrower than the answer, so
+   the shape alone says which is which. */
+.turn-user .turn-body {
+  background: #eef2ff;
+  border: 1px solid #c7d2fe;
+  border-radius: 8px;
+  padding: 0.55rem 0.75rem;
+  max-width: 46rem;
+}
+
+/* The answer: full width, no fill, with a rule down the side to anchor long
+   passages that scroll past their own heading. */
+.turn-ai .turn-body {
+  border-left: 3px solid #a7f3d0;
+  padding: 0.1rem 0 0.1rem 0.8rem;
 }
 
 /* Captured markup carries no stylesheet of its own — these keep third-party
