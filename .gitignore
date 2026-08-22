@@ -100,8 +100,11 @@ data/
 # Personal/local Claude Code settings (not shared)
 .claude/settings.local.json
 
-# Core dumps from crashed dev-container Electron processes
+# Core dumps from crashed dev-container Electron processes. The glob matters:
+# Linux writes core.<pid> when kernel.core_pattern includes %p, so a bare
+# "core" missed them and an empty core.42 was committed.
 core
+core.*
 
 # Throwaway CDP probe queries (scripts/cdp-eval.mjs --file=.q-*.js). They have
 # to live in the repo because that is what the dev container mounts, but they
