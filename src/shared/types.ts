@@ -85,6 +85,8 @@ export interface CaptureSummary {
   errors: number;
   remaining: number;
   cancelled: boolean;
+  /** Kept rather than only counted — a bare error count is unactionable. */
+  failures: { title: string; reason: string }[];
 }
 
 export interface NotebookApi {

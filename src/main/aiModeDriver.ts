@@ -526,36 +526,46 @@ const SCROLL_TO_THREAD_SCRIPT = (externalId: string) => `
       return { ok: false, error: 'Thread list never laid out (clientHeight stayed 0)' };
     }
 
-    scroller.scrollTop = 0;
-    await wait(400);
-
-    for (let step = 0; step < 220; step += 1) {
-      const el = find();
-      if (el && el.offsetParent !== null) {
-        el.scrollIntoView({ block: 'center' });
-        await wait(150);
-        return { ok: true, steps: step };
-      }
-      // Bottom detected from geometry, not from "the scroll didn't move".
-      // Those are different things, and conflating them is what broke this.
-      const atBottom =
-        scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8;
-      if (atBottom) {
-        // One last look: the final window may have rendered on this settle.
+    // Two passes: first forward from wherever the list already is, then from
+    // the top. Captures run in list order, so the next thread is usually just
+    // below the last one — rewinding to the top every time re-walks the whole
+    // list and gets slower the deeper it goes. The wrap-around second pass is
+    // what keeps it correct regardless of starting position.
+    let steps = 0;
+    for (let pass = 0; pass < 2; pass += 1) {
+      if (pass === 1) {
+        scroller.scrollTop = 0;
         await wait(400);
-        const last = find();
-        if (last && last.offsetParent !== null) {
-          last.scrollIntoView({ block: 'center' });
-          await wait(150);
-          return { ok: true, steps: step };
-        }
-        break;
       }
-      scroller.scrollTop = Math.min(
-        scroller.scrollTop + scroller.clientHeight * 0.8,
-        scroller.scrollHeight,
-      );
-      await wait(350);
+      for (let step = 0; step < 220; step += 1) {
+        steps += 1;
+        const el = find();
+        if (el && el.offsetParent !== null) {
+          el.scrollIntoView({ block: 'center' });
+          await wait(150);
+          return { ok: true, steps: steps, pass: pass };
+        }
+        // Bottom detected from geometry, not from "the scroll didn't move".
+        // Those are different things, and conflating them is what broke this.
+        const atBottom =
+          scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8;
+        if (atBottom) {
+          // One last look: the final window may have rendered on this settle.
+          await wait(400);
+          const last = find();
+          if (last && last.offsetParent !== null) {
+            last.scrollIntoView({ block: 'center' });
+            await wait(150);
+            return { ok: true, steps: steps, pass: pass };
+          }
+          break;
+        }
+        scroller.scrollTop = Math.min(
+          scroller.scrollTop + scroller.clientHeight * 0.8,
+          scroller.scrollHeight,
+        );
+        await wait(350);
+      }
     }
     return { ok: false, error: 'Thread row never rendered: ' + wanted };
   } catch (err) {
@@ -720,10 +730,16 @@ export async function readTurns(): Promise<{ turns: CapturedTurn[]; url: string 
  * count to hold steady, not merely be non-zero: turns stream in, and reading at
  * the first sight of one captures a fragment.
  */
-export async function waitForTurnsToSettle(timeoutMs = 12000): Promise<number> {
+export async function waitForTurnsToSettle(timeoutMs = 60_000): Promise<number> {
   const started = Date.now();
   let last = -1;
   let stableFor = 0;
+  // Four consecutive identical readings, not two. Conversations load slowly and
+  // turn by turn, so a count can sit unchanged for over a second while more is
+  // still arriving — which stored a 6-turn conversation as 1 turn and, because
+  // the queue skips anything with turns, never revisited it. Silent truncation
+  // is worse than a slow capture.
+  const requiredStablePolls = 4;
   while (Date.now() - started < timeoutMs) {
     let count = 0;
     try {
@@ -749,7 +765,7 @@ export async function waitForTurnsToSettle(timeoutMs = 12000): Promise<number> {
     }
     if (count > 0 && count === last) {
       stableFor += 1;
-      if (stableFor >= 2) return count;
+      if (stableFor >= requiredStablePolls) return count;
     } else {
       stableFor = 0;
     }

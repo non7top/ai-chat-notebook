@@ -239,6 +239,17 @@ async function captureOneChat(chat: { id: number; externalId: string; title: str
   await waitForTurnsToSettle();
   const { turns } = await readTurns();
 
+  // A conversation that shows user turns but no answer is still rendering, not a
+  // conversation without answers. Refusing it leaves it in the queue for the
+  // next run; storing it would mark it done forever at whatever fraction had
+  // loaded. Two real multi-turn conversations were stored as a single turn
+  // before this check existed.
+  if (turns.length === 0 || !turns.some((t) => t.role === 'ai')) {
+    throw new Error(
+      `Conversation had no answer turns yet (${turns.length} turn(s) seen) — still loading`,
+    );
+  }
+
   const toSave: db.TurnToSave[] = [];
   const assets: db.AssetToSave[] = [];
   let images = 0;
@@ -303,6 +314,7 @@ export interface CaptureSummary {
   errors: number;
   remaining: number;
   cancelled: boolean;
+  failures: { title: string; reason: string }[];
 }
 
 /**
@@ -326,6 +338,7 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
     errors: 0,
     remaining: 0,
     cancelled: false,
+    failures: [],
   };
 
   try {
@@ -349,12 +362,14 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
       } catch (error) {
         // One unreadable conversation must not abort the run — with hundreds
         // queued, stopping on the first oddity would make the feature useless.
+        // The reason is kept, not just counted: "7 errors" is unactionable,
+        // whereas knowing they were all load timeouts points straight at the
+        // fix.
         summary.errors += 1;
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[Notebook] capture failed for ${chat.externalId}:`,
-          error instanceof Error ? error.message : error,
-        );
+        summary.failures.push({
+          title: chat.title.slice(0, 60),
+          reason: error instanceof Error ? error.message : String(error),
+        });
       }
     }
 
