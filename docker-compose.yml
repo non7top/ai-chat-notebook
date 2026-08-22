@@ -27,6 +27,26 @@ services:
       - ELECTRON_DISABLE_SANDBOX=1
     tty: true
 
+  # Same image and caches as `dev`, but sharing the host's network namespace.
+  # Needed only for talking to a debugging port that lives on the host's
+  # loopback — a normal container gets its own namespace, so 127.0.0.1 there is
+  # the container, not the host, and a reverse-forwarded CDP port is invisible
+  # to it. Host networking is deliberately confined to this one service rather
+  # than applied to `dev`, since it also removes the isolation that makes the
+  # default safe to run anything in.
+  recon:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    working_dir: /app
+    init: true
+    network_mode: host
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+      - cache:/cache
+
 volumes:
   node_modules:
   cache:

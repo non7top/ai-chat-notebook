@@ -128,13 +128,79 @@ contents. Use **Debug → Open AI Mode DevTools** in the app menu — that is th
 only way to see console output from injected scripts or to run diagnostic JS
 against the real page.
 
+### Mapping the AI Mode DOM
+
+The harvester is blocked on knowing the real page structure, and none of it
+should be guessed. `scripts/recon-aimode.js` is a read-only probe for that:
+open **Debug → Open AI Mode DevTools** while signed in and looking at your
+conversation history, paste the script into that console, and it prints (and
+copies) a JSON summary — candidate history controls, repeated `data-*`
+attributes that could carry a stable thread id, conversation-looking links,
+turn containers with their ancestor chains, and image hosts with their
+lazy-loading attributes.
+
+It assumes no selectors and clicks nothing. Chromium blocks the first paste
+into a DevTools console; type `allow pasting` at the prompt once if it refuses.
+
+To run the same probe over CDP instead of pasting it by hand, start the app
+with `--devtools-port=9222` and:
+
+```sh
+docker compose run --rm recon node scripts/cdp-recon.mjs
+```
+
+It evaluates in **every** execution context, not just the main frame —
+whether AI Mode renders its history in a subframe is one of the unknowns being
+probed, and a main-frame-only evaluate would report "found nothing" for a page
+that is actually full of content one frame down, indistinguishable from having
+the wrong selectors.
+
+Note the `recon` service, not `dev`: it shares the host's network namespace.
+A normal container has its own, so `127.0.0.1` inside it is the container
+rather than the host, and a debugging port on the host's loopback is invisible
+(verified — `dev` gets connection-refused where `recon` succeeds). Host
+networking is confined to this one service because it also removes the
+isolation that makes the default safe.
+
+### Reaching a Windows app's port from WSL
+
+Chromium binds the debugging port to `127.0.0.1`, and under WSL's default NAT
+networking that is a *different* loopback from the Windows host's — WSL sits on
+its own interface with the host as gateway, so it can reach ports bound to the
+host's LAN address but never one bound only to the host's loopback.
+
+The simplest fix is a reverse forward from Windows into WSL, so the port
+appears on WSL's own `127.0.0.1:9222` and the command above works unchanged.
+Avoid `netsh portproxy` onto `0.0.0.0`: that publishes an unauthenticated CDP
+endpoint controlling a logged-in Google session to the whole network.
+
+Alternatively, skip the networking entirely and run the app inside WSL —
+`/mnt/wslg` provides a display, so `npm start` works — at the cost of signing
+into Google again in that instance.
+
 ### Remote debugging (CDP)
 
 For driving the app from outside — including inspecting the live AI Mode page
 without sitting at the machine — start it with a debugging port:
 
+```powershell
+& "$env:LOCALAPPDATA\Programs\AI Chat Notebook\AIChatNotebook.exe" --devtools-port=9222
 ```
-"AI Chat Notebook.exe" --devtools-port=9222
+
+Two things that make the obvious version of that command fail:
+
+- The executable is `AIChatNotebook.exe`, **not** `AI Chat Notebook.exe`.
+  `electron-builder.yml` pins `executableName` separately from `productName`,
+  so the install *directory* has spaces and the binary does not.
+- PowerShell needs the `&` call operator. Without it a quoted path is parsed
+  as a string expression rather than a command, and `--devtools-port=9222`
+  then trips "The '--' operator works only on variables or on properties".
+  `cmd.exe` does not need `&`.
+
+If the install directory was changed at install time, locate it with:
+
+```powershell
+Get-ChildItem "$env:LOCALAPPDATA\Programs","$env:PROGRAMFILES" -Filter AIChatNotebook.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
 ```
 
 `NOTEBOOK_REMOTE_DEBUGGING_PORT=9222` does the same thing, for launches where
