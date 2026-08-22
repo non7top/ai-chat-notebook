@@ -61,12 +61,16 @@ import { getAiModeWebContents } from './aiModeView';
 //   which is exactly how an earlier pass misidentified them.
 //
 // IMAGES — three kinds, and the one that matters is fetchable
-// - AI-generated images: `img.HkNHyd` with alt="AI generated image", served
-//   from https://lens.usercontent.google.com/banana?agsi=... at full
-//   resolution (1024x1024 natural, displayed 423px). A normal HTTPS URL — so
-//   net.fetch bound to the persist:google session is viable for the case that
-//   actually matters. This was the open question and the answer is the cheap
-//   one.
+// - AI-generated images: `img.HkNHyd` with alt="AI generated image", and the
+//   src comes in TWO forms, so the pipeline must handle both:
+//     * https://lens.usercontent.google.com/banana?agsi=... — seen on a
+//       conversation reopened from history (1024x1024). Fetchable with
+//       net.fetch bound to the persist:google session.
+//     * data:image/jpeg;base64,... — seen immediately after generating an
+//       image in the live session (896x1200). Already inline, no fetch.
+//   Branch on the scheme rather than assuming a URL; an earlier note recorded
+//   only the https form, which would have dropped every freshly generated
+//   image on the floor.
 // - User-uploaded (Lens) reference images: `img.taqkMe.Tbpky` with
 //   alt="Visually searched image", src is a `data:image/jpeg;base64,...` URI
 //   (1000x1000). The bytes are already in the DOM; no fetch at all.
@@ -143,18 +147,46 @@ import { getAiModeWebContents } from './aiModeView';
 //   pair it with a stored turn count and a hash of the last turn per chat, and
 //   re-verify those whenever a thread is opened anyway (Resume, or asking
 //   something new in it), which costs nothing extra.
-// - Two things deliberately NOT concluded:
-//     * Whether the sort updates live or only on reload. Opening two threads
-//       did not visibly move them to the top, but the virtualised render window
-//       makes any observed order unreliable, so the harvester should reload
-//       before trusting position rather than assume live re-sorting.
-//     * Whether "recent activity" means last turn or thread creation.
+// - THE LIST DOES NOT RE-SORT LIVE. Measured directly: a turn (with a newly
+//   generated image) was added to thread -CKIasHWF62phvcP7bHs4Ak while the
+//   sidebar was open, and afterwards that thread was still at rank 8 with
+//   scrollTop 0 and an unchanged top row. Its data-thread-id and its q= were
+//   also unchanged, so the update landed in place — the list simply does not
+//   reflect it.
+// - Consequence: position is stale the moment anything is added. The recency
+//   ordering is only trustworthy on a freshly loaded list, so an incremental
+//   harvest must reload (or at least re-open the sidebar) before reading order,
+//   and must never infer "nothing changed" from a list it has been watching.
+// - Still not concluded: whether "recent activity" means last turn or thread
+//   creation, and whether a reload really does re-sort.
 // - If real timestamps ever become necessary, the page links to
 //   myactivity.google.com/search-services/history/search, which does render
 //   dates per item. A different page with its own DOM, so a separate job.
-// - The only per-turn date in AI Mode itself is div.UYpEO > div.kwdzO, and it
-//   is a date with no time ("August 21, 2026") — enough to notice a change on a
-//   different day, useless within one day.
+// TIMESTAMPS: NOTHING MACHINE-READABLE EXISTS ON THE PAGE
+// - div.UYpEO > div.kwdzO is an ADAPTIVE, display-only string: "17:05" for a
+//   turn from today, "August 21, 2026" for an older one. An earlier note called
+//   it date-only and therefore useless within a day, which was wrong — but it
+//   is still only text, and today's form carries no date at all.
+// - Searched for a precise value and there is none: div.kwdzO has no attributes
+//   beyond class, div.UYpEO carries only a jsuid (a Google-internal element
+//   handle), and the page contains zero <time> elements and nothing with
+//   datetime / data-timestamp / data-ts / data-time. No title or aria-label
+//   holds a date either.
+// - Worse, it is not even rendered per turn: of four div.UYpEO in a two-turn
+//   conversation, two were empty. So turn time is not reliably available at all.
+// - The URL's sxsrf parameter ends in a millisecond epoch
+//   (…:1787368726497), but that is when the PAGE loaded, not when a turn
+//   happened. Useless for backfilling history.
+// - The only real source of per-thread timestamps is the page's own link to
+//   myactivity.google.com/search-services/history/search, which does render
+//   them. Two caveats before treating that as the answer: it is a separate page
+//   needing its own recon, and it is not obvious that it exposes
+//   data-thread-id — if the only join key is the query text, that is a fuzzy
+//   join and would silently attach wrong times to threads with similar
+//   openings, which this history demonstrably has (see the duplicate-prefix
+//   finding above).
+// - Meanwhile the archive can always record its own capture time, which is
+//   precise and trustworthy, just not retroactive.
 //
 // FRAMES / CONTEXTS
 // - Conversation and history both live in the TOP-LEVEL frame. The only child
