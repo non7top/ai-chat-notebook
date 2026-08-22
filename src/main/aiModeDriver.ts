@@ -47,18 +47,24 @@ import { getAiModeNavState, getAiModeWebContents } from './aiModeView';
 //   capturing from a stale copy. Every read asserts the container is visible
 //   and filters on offsetParent.
 //
-// RESUMING A THREAD — corrected
-// - The list buttons genuinely have no href, on the button or any ancestor or
-//   descendant. An earlier note concluded from that alone that Resume could
-//   only ever click. That was wrong.
-// - Once a thread is OPEN, the page URL carries it:
-//     /search?udm=50&mtid=<data-thread-id>&q=<original query>&aep=26...
-//   Verified: mtid=rMyIarywKpDRwcsPh6rA6AY matched that thread's
-//   data-thread-id exactly, and q= held its first query.
-// - So Resume most likely just navigates to that URL, and the click path is
-//   the fallback rather than the only option. NOT yet confirmed by actually
-//   navigating to a constructed URL — that is the one test still owed, and it
-//   decides how much of the harvester needs to drive the sidebar at all.
+// RESUMING A THREAD — mtid URLs DO NOT WORK, and trying is destructive
+// - The list buttons have no href anywhere. An open thread's URL does carry
+//   /search?udm=50&mtid=<data-thread-id>&q=<first query>, which looked like an
+//   address for that conversation. It is not.
+// - TESTED against the live app: navigating to a constructed
+//   ?udm=50&mtid=dRKJaoixPPWphvcPoYOp6QM&q=gpg+clearsign+specify+the+key did
+//   NOT reopen that thread. Google ignored the supplied mtid, ran q= as a
+//   fresh query, and issued a NEW thread id (Ij6Jau-DNIezhvcPmK_20Q4) — one
+//   turn pair, no history. So mtid is session-bound state (it travels with
+//   mstk), not a durable permalink.
+// - Consequence, and it is a big one: the ONLY way to open a stored thread is
+//   to click its button.qqMZif[data-thread-id] in the sidebar. Both turn
+//   capture and Resume have to drive the virtualised list — scroll until the
+//   row renders, then click. There is no URL shortcut.
+// - Worse than merely not working: following such a URL CREATES a duplicate
+//   conversation in the user's history. Doing it during the test added one.
+//   So a constructed mtid URL must never be stored anywhere a click could
+//   reach it, and must never be offered as "open in browser".
 //
 // SIDEBAR CONTROLS
 // - Open/close: `button.SbLVJc[aria-label="AI Mode history"]`, and

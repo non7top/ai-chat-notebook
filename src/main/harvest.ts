@@ -40,12 +40,19 @@ function broadcast(progress: HarvestProgress): void {
   }
 }
 
-// The URL an opened thread actually has. Stored so Resume can try navigating
-// straight to it; the recon notes flag that this is not yet confirmed to work,
-// which is why Resume must keep a click-through fallback.
-function threadUrl(entry: ThreadListEntry): string {
-  const params = new URLSearchParams({ udm: '50', mtid: entry.externalId, q: entry.title });
-  return `https://www.google.com/search?${params.toString()}`;
+// Deliberately NOT storing a constructed ?mtid= URL.
+//
+// It looked like a permalink — an open thread's URL contains
+// mtid=<data-thread-id> — but navigating to one was tested and does not reopen
+// the thread. Google ignores the supplied mtid, treats q= as a fresh query, and
+// mints a new thread id. So the URL is not merely useless: following it CREATES
+// a duplicate conversation in the user's history, and storing it would put that
+// one click away from anyone who saw the field.
+//
+// Threads are opened by clicking their sidebar row instead. See the notes in
+// aiModeDriver.ts.
+function threadUrl(_entry: ThreadListEntry): string | null {
+  return null;
 }
 
 export interface HarvestSummary {
