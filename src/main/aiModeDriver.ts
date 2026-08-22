@@ -617,6 +617,7 @@ const READ_TURNS_SCRIPT = `
     if (pairs.length === 0) return { ok: false, error: 'No conversation turns rendered' };
 
     const chromeSel = ${JSON.stringify(TURN_CHROME_SELECTORS.join(','))};
+    // Defined before stripped(), which depends on it.
     const imagesIn = (el) =>
       Array.from(el.querySelectorAll('img'))
         .map((img) => ({
@@ -647,8 +648,29 @@ const READ_TURNS_SCRIPT = `
       // querySelectorAll never matches the root itself, so a root that IS a
       // script would keep all of its source. Handle that case explicitly.
       if (isCode(el)) return document.createElement('div');
+
+      // Which images are real content, decided on the LIVE element: a detached
+      // clone reports naturalWidth 0 for everything, so size cannot be judged
+      // there.
+      const keep = new Set(imagesIn(el).map((i) => i.src));
+
       const copy = el.cloneNode(true);
-      for (const junk of Array.from(copy.querySelectorAll(chromeSel))) junk.remove();
+      for (const junk of Array.from(copy.querySelectorAll(chromeSel))) {
+        // Controls are stripped for their labels, but Google puts real images
+        // inside them — an uploaded reference image lives in a clickable
+        // wrapper, and removing the control removed the picture too. The user
+        // turn then had no <img> at all, so the subject of the whole
+        // conversation was archived to disk and never rendered. Rescue the
+        // images, drop the rest.
+        const rescued = Array.from(junk.querySelectorAll('img')).filter((img) =>
+          keep.has(img.currentSrc || img.getAttribute('src') || ''),
+        );
+        if (rescued.length > 0) {
+          junk.replaceWith.apply(junk, rescued);
+        } else {
+          junk.remove();
+        }
+      }
       for (const code of Array.from(copy.querySelectorAll('script,style,noscript,template'))) {
         code.remove();
       }
