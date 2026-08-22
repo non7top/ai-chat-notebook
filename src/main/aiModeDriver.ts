@@ -275,6 +275,13 @@ export async function findAiModeFrame(): Promise<WebFrameMain> {
   );
 }
 
+// BACKSLASHES MUST BE DOUBLED in every script below. These are TS template
+// literals, so a lone \s is not an escape JS recognises and collapses to a
+// bare "s" — /\s+/g shipped as /s+/g and silently replaced every letter s in
+// every captured message with a space ("Reset the AI's conversation state"
+// became "Re et the AI'  conver ation  tate"). It reads as a page-structure
+// problem, not a quoting one.
+//
 // Never throw inside injected code: executeJavaScript does not propagate the
 // real JS error across the boundary, only a generic "Script failed to execute"
 // wrapper. Every script below returns { ok, ... } and the real error is raised
@@ -417,10 +424,10 @@ const READ_THREADS_SCRIPT = `
         const overflow = row ? row.querySelector('button.fMed7[aria-label]') : null;
         const label = overflow ? overflow.getAttribute('aria-label') || '' : '';
         // The visible button text is clipped; this aria-label is not.
-        const full = label.replace(/^more options for\s*/i, '').trim();
+        const full = label.replace(/^more options for\\s*/i, '').trim();
         return {
           externalId: el.getAttribute('data-thread-id'),
-          title: full || (el.textContent || '').replace(/\s+/g, ' ').trim(),
+          title: full || (el.textContent || '').replace(/\\s+/g, ' ').trim(),
         };
       })
       .filter((t) => t.externalId);
@@ -595,7 +602,7 @@ const TURN_CHROME_SELECTORS = [
 const READ_TURNS_SCRIPT = `
 (() => {
   try {
-    const clean = (el) => (el ? (el.textContent || '').replace(/\s+/g, ' ').trim() : '');
+    const clean = (el) => (el ? (el.textContent || '').replace(/\\s+/g, ' ').trim() : '');
     const pairs = Array.from(document.querySelectorAll('div.CKgc1d'));
     if (pairs.length === 0) return { ok: false, error: 'No conversation turns rendered' };
 

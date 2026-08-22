@@ -280,6 +280,21 @@ async function captureOneChat(chat: { id: number; externalId: string; title: str
   return { turns: toSave.length, images, skipped, failed };
 }
 
+/**
+ * Re-reads one conversation, discarding what was stored for it first. Needed
+ * whenever a capture is known to be wrong rather than missing — a parser fix
+ * does not help conversations already in the database, and chatsWithoutTurns
+ * deliberately skips anything that has turns.
+ */
+export async function recaptureChat(chatId: number): Promise<{ turns: number; images: number }> {
+  const chat = db.getChatForCapture(chatId);
+  if (!chat) throw new Error(`No chat with id ${chatId}`);
+  await ensureOnAiMode();
+  db.clearTurns(chatId);
+  const result = await captureOneChat(chat);
+  return { turns: result.turns, images: result.images };
+}
+
 export interface CaptureSummary {
   attempted: number;
   captured: number;

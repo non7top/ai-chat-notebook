@@ -92,6 +92,8 @@ export interface NotebookApi {
   getAssetsBaseUrl(): Promise<string>;
   captureTurns(limit: number): Promise<CaptureSummary>;
   cancelCapture(): Promise<void>;
+  /** Re-reads one conversation, discarding what was stored for it. */
+  recaptureChat(chatId: number): Promise<{ turns: number; images: number }>;
   onCaptureProgress(callback: (progress: CaptureProgress) => void): () => void;
   countChatsWithoutTurns(): Promise<number>;
 

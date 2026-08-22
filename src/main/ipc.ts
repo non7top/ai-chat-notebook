@@ -9,7 +9,13 @@ import {
   navigateAiMode,
   setAiModeViewHidden,
 } from './aiModeView';
-import { cancelCapture, cancelHarvest, captureTurns, harvestThreadList } from './harvest';
+import {
+  cancelCapture,
+  cancelHarvest,
+  captureTurns,
+  harvestThreadList,
+  recaptureChat,
+} from './harvest';
 import type { ChatScope } from '../shared/types';
 
 export function registerIpcHandlers(): void {
@@ -66,6 +72,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('capture:turns', (_event, limit: number) => captureTurns(limit));
   ipcMain.handle('capture:cancel', () => cancelCapture());
+  ipcMain.handle('capture:recapture', (_event, chatId: number) => recaptureChat(chatId));
   ipcMain.handle('capture:remaining', () => db.countChatsWithoutTurns());
 
   ipcMain.handle('harvest:threadList', () => harvestThreadList());

@@ -439,6 +439,22 @@ export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetT
   }
 }
 
+/**
+ * Drops a conversation's stored turns so it can be captured again. Assets
+ * cascade with the messages; the files on disk are content-addressed and shared,
+ * so they stay.
+ */
+export function clearTurns(chatId: number): void {
+  db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
+}
+
+export function getChatForCapture(chatId: number): ChatToCapture | null {
+  const row = db
+    .prepare(`SELECT id, external_id, ${CHAT_TITLE_SQL} AS title FROM chats WHERE id = ?`)
+    .get(chatId) as unknown as { id: number; external_id: string; title: string } | undefined;
+  return row ? { id: row.id, externalId: row.external_id, title: row.title } : null;
+}
+
 export interface ChatToCapture {
   id: number;
   externalId: string;

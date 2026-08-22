@@ -12,6 +12,7 @@ const api: NotebookApi = {
   getAssetsBaseUrl: () => ipcRenderer.invoke('assets:baseUrl'),
   captureTurns: (limit) => ipcRenderer.invoke('capture:turns', limit),
   cancelCapture: () => ipcRenderer.invoke('capture:cancel'),
+  recaptureChat: (chatId) => ipcRenderer.invoke('capture:recapture', chatId),
   countChatsWithoutTurns: () => ipcRenderer.invoke('capture:remaining'),
   onCaptureProgress: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, progress: CaptureProgress) =>
