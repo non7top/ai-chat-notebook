@@ -65,7 +65,40 @@ export interface HarvestSummary {
   cancelled: boolean;
 }
 
+export interface CaptureProgress {
+  phase: 'capturing' | 'done' | 'cancelled' | 'error';
+  done: number;
+  total: number;
+  errors: number;
+  current?: string;
+  turns?: number;
+  images?: number;
+  remaining?: number;
+  error?: string;
+}
+
+export interface CaptureSummary {
+  attempted: number;
+  captured: number;
+  turns: number;
+  images: number;
+  errors: number;
+  remaining: number;
+  cancelled: boolean;
+  /** Kept rather than only counted — a bare error count is unactionable. */
+  failures: { title: string; reason: string }[];
+}
+
 export interface NotebookApi {
+  /** file:// base for resolving the relative asset paths in stored HTML. */
+  getAssetsBaseUrl(): Promise<string>;
+  captureTurns(limit: number): Promise<CaptureSummary>;
+  cancelCapture(): Promise<void>;
+  /** Re-reads one conversation, discarding what was stored for it. */
+  recaptureChat(chatId: number): Promise<{ turns: number; images: number }>;
+  onCaptureProgress(callback: (progress: CaptureProgress) => void): () => void;
+  countChatsWithoutTurns(): Promise<number>;
+
   /**
    * Native confirmation dialog. Electron implements confirm() but NOT prompt(),
    * so dialogs go through the main process and names are edited inline.

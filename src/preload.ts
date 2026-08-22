@@ -1,8 +1,25 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AiModeStatus, HarvestProgress, NotebookApi } from './shared/types';
+import type {
+  AiModeStatus,
+  CaptureProgress,
+  HarvestProgress,
+  NotebookApi,
+} from './shared/types';
 
 const api: NotebookApi = {
   confirm: (message, detail) => ipcRenderer.invoke('ui:confirm', message, detail),
+
+  getAssetsBaseUrl: () => ipcRenderer.invoke('assets:baseUrl'),
+  captureTurns: (limit) => ipcRenderer.invoke('capture:turns', limit),
+  cancelCapture: () => ipcRenderer.invoke('capture:cancel'),
+  recaptureChat: (chatId) => ipcRenderer.invoke('capture:recapture', chatId),
+  countChatsWithoutTurns: () => ipcRenderer.invoke('capture:remaining'),
+  onCaptureProgress: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: CaptureProgress) =>
+      callback(progress);
+    ipcRenderer.on('capture:progress', listener);
+    return () => ipcRenderer.removeListener('capture:progress', listener);
+  },
 
   harvestThreadList: () => ipcRenderer.invoke('harvest:threadList'),
   cancelHarvest: () => ipcRenderer.invoke('harvest:cancel'),

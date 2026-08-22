@@ -67,10 +67,21 @@ function clean(node: Element): void {
   }
 }
 
-export function sanitizeHtml(html: string): string {
+export function sanitizeHtml(html: string, assetsBaseUrl?: string): string {
   // DOMParser builds a detached document: nothing here loads a resource or
   // runs a script, unlike assigning to innerHTML on a live node.
   const doc = new DOMParser().parseFromString(html, 'text/html');
   clean(doc.body);
+
+  // Relative "assets/..." paths are stored rather than absolute file:// URLs so
+  // the archive can be moved between machines. Resolve them now, against the
+  // real assets directory, since the renderer itself lives inside the app
+  // bundle and would otherwise look for images there.
+  if (assetsBaseUrl) {
+    for (const img of Array.from(doc.body.querySelectorAll('img[src^="assets/"]'))) {
+      const src = img.getAttribute('src') ?? '';
+      img.setAttribute('src', assetsBaseUrl + src.slice('assets/'.length));
+    }
+  }
   return doc.body.innerHTML;
 }

@@ -362,6 +362,135 @@ export function knownExternalIds(): Set<string> {
   return new Set(rows.map((r) => r.external_id));
 }
 
+/* ------------------------------------------------------------ turn capture */
+
+export interface TurnToSave {
+  seq: number;
+  role: 'user' | 'ai';
+  text: string;
+  html: string | null;
+}
+
+export interface AssetToSave {
+  messageSeq: number;
+  originalUrl: string | null;
+  sha256: string;
+  mime: string;
+  localPath: string;
+  bytes: number;
+}
+
+/**
+ * Replaces a conversation's turns wholesale, in one transaction.
+ *
+ * Deliberately delete-then-insert rather than upsert per turn: a re-capture may
+ * find FEWER turns than are stored (a deleted turn, or a partial render), and an
+ * upsert would silently keep the stale extras, leaving a conversation that never
+ * existed in that form. Replacing means what is stored is always a whole
+ * snapshot of one reading.
+ *
+ * Assets cascade from messages, so their rows go with the old turns; the files
+ * on disk are content-addressed and shared, so they are left alone.
+ */
+export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetToSave[]): void {
+  db.exec('BEGIN');
+  try {
+    db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
+    const insertMessage = db.prepare(
+      'INSERT INTO messages (chat_id, seq, role, text, html) VALUES (?, ?, ?, ?, ?)',
+    );
+    const messageIdBySeq = new Map<number, number>();
+    for (const turn of turns) {
+      const { lastInsertRowid } = insertMessage.run(
+        chatId,
+        turn.seq,
+        turn.role,
+        turn.text,
+        turn.html,
+      );
+      messageIdBySeq.set(turn.seq, Number(lastInsertRowid));
+    }
+
+    const insertAsset = db.prepare(
+      `INSERT OR IGNORE INTO assets
+         (chat_id, message_id, original_url, sha256, mime, local_path, bytes)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const asset of assets) {
+      insertAsset.run(
+        chatId,
+        messageIdBySeq.get(asset.messageSeq) ?? null,
+        asset.originalUrl,
+        asset.sha256,
+        asset.mime,
+        asset.localPath,
+        asset.bytes,
+      );
+    }
+
+    db.prepare('UPDATE chats SET last_seen_at = ? WHERE id = ?').run(
+      new Date().toISOString(),
+      chatId,
+    );
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/**
+ * Drops a conversation's stored turns so it can be captured again. Assets
+ * cascade with the messages; the files on disk are content-addressed and shared,
+ * so they stay.
+ */
+export function clearTurns(chatId: number): void {
+  db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
+}
+
+export function getChatForCapture(chatId: number): ChatToCapture | null {
+  const row = db
+    .prepare(`SELECT id, external_id, ${CHAT_TITLE_SQL} AS title FROM chats WHERE id = ?`)
+    .get(chatId) as unknown as { id: number; external_id: string; title: string } | undefined;
+  return row ? { id: row.id, externalId: row.external_id, title: row.title } : null;
+}
+
+export interface ChatToCapture {
+  id: number;
+  externalId: string;
+  title: string;
+}
+
+/**
+ * Conversations still needing capture, in Google's own recency order so the
+ * most recent are archived first — that is what a partial run should leave you
+ * with.
+ */
+export function chatsWithoutTurns(limit: number): ChatToCapture[] {
+  const rows = db
+    .prepare(
+      `SELECT c.id, c.external_id, ${CHAT_TITLE_SQL} AS title
+       FROM chats c
+       WHERE c.merged_into IS NULL
+         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
+       ORDER BY CASE WHEN c.list_rank IS NULL THEN 1 ELSE 0 END, c.list_rank ASC
+       LIMIT ?`,
+    )
+    .all(limit) as unknown as { id: number; external_id: string; title: string }[];
+  return rows.map((r) => ({ id: r.id, externalId: r.external_id, title: r.title }));
+}
+
+export function countChatsWithoutTurns(): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM chats c
+       WHERE c.merged_into IS NULL
+         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)`,
+    )
+    .get() as unknown as { n: number };
+  return row.n;
+}
+
 /* --------------------------------------------------------------- dev seed */
 
 // Lives here rather than in a script because the database is inside the app's

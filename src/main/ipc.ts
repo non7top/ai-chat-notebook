@@ -1,4 +1,5 @@
 import { BrowserWindow, dialog, ipcMain } from 'electron';
+import { pathToFileURL } from 'node:url';
 import * as db from './db';
 import {
   aiModeGoBack,
@@ -8,7 +9,13 @@ import {
   navigateAiMode,
   setAiModeViewHidden,
 } from './aiModeView';
-import { cancelHarvest, harvestThreadList } from './harvest';
+import {
+  cancelCapture,
+  cancelHarvest,
+  captureTurns,
+  harvestThreadList,
+  recaptureChat,
+} from './harvest';
 import type { ChatScope } from '../shared/types';
 
 export function registerIpcHandlers(): void {
@@ -56,6 +63,17 @@ export function registerIpcHandlers(): void {
       : await dialog.showMessageBox(options);
     return response === 1;
   });
+
+  // Stored HTML holds relative "assets/<sha>.png" paths so the archive survives
+  // being moved. The renderer loads from inside the app bundle, so a relative
+  // path there would resolve against the bundle and every image would break —
+  // it needs the real base to resolve against at read time.
+  ipcMain.handle('assets:baseUrl', () => `${pathToFileURL(db.getAssetsDir()).href}/`);
+
+  ipcMain.handle('capture:turns', (_event, limit: number) => captureTurns(limit));
+  ipcMain.handle('capture:cancel', () => cancelCapture());
+  ipcMain.handle('capture:recapture', (_event, chatId: number) => recaptureChat(chatId));
+  ipcMain.handle('capture:remaining', () => db.countChatsWithoutTurns());
 
   ipcMain.handle('harvest:threadList', () => harvestThreadList());
   ipcMain.handle('harvest:cancel', () => cancelHarvest());

@@ -435,3 +435,10 @@ button:disabled {
   border-color: #3b82f6;
   outline: none;
 }
+
+.harvest-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+  margin: 0 0.2rem;
+}

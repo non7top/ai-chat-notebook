@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { HarvestProgress } from '../shared/types';
+import type { CaptureProgress, HarvestProgress } from '../shared/types';
 
 interface Props {
   /** Harvesting scrapes the live sidebar, so the panel has to be on screen. */
@@ -7,9 +7,14 @@ interface Props {
   onFinished: () => void;
 }
 
+const CAPTURE_BATCH = 25;
+
 export default function HarvestBar({ onNeedPanel, onFinished }: Props) {
   const [progress, setProgress] = useState<HarvestProgress | null>(null);
   const [busy, setBusy] = useState(false);
+  const [capture, setCapture] = useState<CaptureProgress | null>(null);
+  const [capturing, setCapturing] = useState(false);
+  const [remaining, setRemaining] = useState<number | null>(null);
 
   useEffect(
     () =>
@@ -22,6 +27,43 @@ export default function HarvestBar({ onNeedPanel, onFinished }: Props) {
       }),
     [onFinished],
   );
+
+  useEffect(
+    () =>
+      window.notebook.onCaptureProgress((next) => {
+        setCapture(next);
+        if (next.phase !== 'capturing') {
+          setCapturing(false);
+          if (typeof next.remaining === 'number') setRemaining(next.remaining);
+          onFinished();
+        }
+      }),
+    [onFinished],
+  );
+
+  useEffect(() => {
+    window.notebook.countChatsWithoutTurns().then(setRemaining);
+  }, []);
+
+  const startCapture = async () => {
+    setCapturing(true);
+    setCapture(null);
+    // Capture drives the real sidebar, so the panel has to be on screen for the
+    // same reason harvesting does.
+    onNeedPanel();
+    try {
+      await window.notebook.captureTurns(CAPTURE_BATCH);
+    } catch (err) {
+      setCapture({
+        phase: 'error',
+        done: 0,
+        total: 0,
+        errors: 1,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      setCapturing(false);
+    }
+  };
 
   const start = async () => {
     setBusy(true);
@@ -81,6 +123,33 @@ export default function HarvestBar({ onNeedPanel, onFinished }: Props) {
             </>
           )}
         </span>
+      )}
+
+      <span className="harvest-sep" />
+
+      <button type="button" onClick={startCapture} disabled={busy || capturing}>
+        {capturing ? 'Capturing…' : `Capture ${CAPTURE_BATCH} conversations`}
+      </button>
+      {capturing && (
+        <button type="button" onClick={() => window.notebook.cancelCapture()}>
+          Stop
+        </button>
+      )}
+      {capture ? (
+        <span className={capture.phase === 'error' ? 'harvest-status error' : 'harvest-status'}>
+          {capture.phase === 'error'
+            ? capture.error
+            : capture.phase === 'capturing'
+              ? `${capture.done}/${capture.total} · ${capture.current ?? ''}`
+              : `${capture.done} captured · ${capture.turns ?? 0} turns · ${
+                  capture.images ?? 0
+                } images${capture.errors ? ` · ${capture.errors} failed` : ''}${
+                  capture.remaining ? ` · ${capture.remaining} left` : ''
+                }`}
+        </span>
+      ) : (
+        remaining !== null &&
+        remaining > 0 && <span className="harvest-status">{remaining} not captured</span>
       )}
 
       {busy && progress?.expected ? (

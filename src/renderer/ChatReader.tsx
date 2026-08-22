@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ChatDetail } from '../shared/types';
 import { sanitizeHtml } from './sanitize';
 
@@ -10,6 +10,12 @@ interface Props {
 export default function ChatReader({ chat, onChange }: Props) {
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState('');
+  const [assetsBase, setAssetsBase] = useState<string>('');
+  const [recapturing, setRecapturing] = useState(false);
+
+  useEffect(() => {
+    window.notebook.getAssetsBaseUrl().then(setAssetsBase);
+  }, []);
 
   const commit = () => {
     setRenaming(false);
@@ -36,6 +42,25 @@ export default function ChatReader({ chat, onChange }: Props) {
         ) : (
           <>
             <h2 className={chat.title === '(untitled)' ? 'untitled' : undefined}>{chat.title}</h2>
+            {/* A parser fix cannot repair what is already stored, and the
+                capture queue deliberately skips conversations that have turns —
+                so re-reading one has to be reachable by hand. */}
+            <button
+              type="button"
+              disabled={recapturing}
+              title="Re-read this conversation from Google, replacing what is stored"
+              onClick={async () => {
+                setRecapturing(true);
+                try {
+                  await window.notebook.recaptureChat(chat.id);
+                  onChange();
+                } finally {
+                  setRecapturing(false);
+                }
+              }}
+            >
+              {recapturing ? 'Re-capturing…' : 'Re-capture'}
+            </button>
             <button
               type="button"
               onClick={() => {
@@ -64,7 +89,7 @@ export default function ChatReader({ chat, onChange }: Props) {
               // why this is not left to capture time alone.
               <div
                 className="turn-body"
-                dangerouslySetInnerHTML={{ __html: sanitizeHtml(message.html) }}
+                dangerouslySetInnerHTML={{ __html: sanitizeHtml(message.html, assetsBase) }}
               />
             ) : (
               <div className="turn-body">{message.text}</div>

@@ -47,18 +47,24 @@ import { getAiModeNavState, getAiModeWebContents } from './aiModeView';
 //   capturing from a stale copy. Every read asserts the container is visible
 //   and filters on offsetParent.
 //
-// RESUMING A THREAD — corrected
-// - The list buttons genuinely have no href, on the button or any ancestor or
-//   descendant. An earlier note concluded from that alone that Resume could
-//   only ever click. That was wrong.
-// - Once a thread is OPEN, the page URL carries it:
-//     /search?udm=50&mtid=<data-thread-id>&q=<original query>&aep=26...
-//   Verified: mtid=rMyIarywKpDRwcsPh6rA6AY matched that thread's
-//   data-thread-id exactly, and q= held its first query.
-// - So Resume most likely just navigates to that URL, and the click path is
-//   the fallback rather than the only option. NOT yet confirmed by actually
-//   navigating to a constructed URL — that is the one test still owed, and it
-//   decides how much of the harvester needs to drive the sidebar at all.
+// RESUMING A THREAD — mtid URLs DO NOT WORK, and trying is destructive
+// - The list buttons have no href anywhere. An open thread's URL does carry
+//   /search?udm=50&mtid=<data-thread-id>&q=<first query>, which looked like an
+//   address for that conversation. It is not.
+// - TESTED against the live app: navigating to a constructed
+//   ?udm=50&mtid=dRKJaoixPPWphvcPoYOp6QM&q=gpg+clearsign+specify+the+key did
+//   NOT reopen that thread. Google ignored the supplied mtid, ran q= as a
+//   fresh query, and issued a NEW thread id (Ij6Jau-DNIezhvcPmK_20Q4) — one
+//   turn pair, no history. So mtid is session-bound state (it travels with
+//   mstk), not a durable permalink.
+// - Consequence, and it is a big one: the ONLY way to open a stored thread is
+//   to click its button.qqMZif[data-thread-id] in the sidebar. Both turn
+//   capture and Resume have to drive the virtualised list — scroll until the
+//   row renders, then click. There is no URL shortcut.
+// - Worse than merely not working: following such a URL CREATES a duplicate
+//   conversation in the user's history. Doing it during the test added one.
+//   So a constructed mtid URL must never be stored anywhere a click could
+//   reach it, and must never be offered as "open in browser".
 //
 // SIDEBAR CONTROLS
 // - Open/close: `button.SbLVJc[aria-label="AI Mode history"]`, and
@@ -269,17 +275,57 @@ export async function findAiModeFrame(): Promise<WebFrameMain> {
   );
 }
 
+// BACKSLASHES MUST BE DOUBLED in every script below. These are TS template
+// literals, so a lone \s is not an escape JS recognises and collapses to a
+// bare "s" — /\s+/g shipped as /s+/g and silently replaced every letter s in
+// every captured message with a space ("Reset the AI's conversation state"
+// became "Re et the AI'  conver ation  tate"). It reads as a page-structure
+// problem, not a quoting one.
+//
 // Never throw inside injected code: executeJavaScript does not propagate the
 // real JS error across the boundary, only a generic "Script failed to execute"
 // wrapper. Every script below returns { ok, ... } and the real error is raised
 // in TS. (Lesson inherited from perchanceDriver.ts.)
-async function run<T>(script: string): Promise<T> {
+const SCRIPT_TIMEOUT_MS = 30_000;
+
+async function run<T>(script: string, timeoutMs = SCRIPT_TIMEOUT_MS): Promise<T> {
   const frame = await findAiModeFrame();
-  const result = (await frame.executeJavaScript(script)) as { ok: boolean; error?: string } & T;
-  if (!result.ok) {
-    throw new Error(result.error ?? 'Injected script failed');
+  // Time-bounded, because executeJavaScript can hang indefinitely rather than
+  // reject: if the page navigates while the script is awaiting, the execution
+  // context is torn down and the promise simply never settles. Without this a
+  // single navigation mid-script would wedge the harvester forever.
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const result = (await Promise.race([
+      frame.executeJavaScript(script),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Injected script timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ])) as { ok: boolean; error?: string } & T;
+    if (!result.ok) {
+      throw new Error(result.error ?? 'Injected script failed');
+    }
+    return result;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  return result;
+}
+
+/**
+ * Runs a script whose side effect is the point and whose result cannot be
+ * awaited — a click that navigates destroys the context before the promise
+ * resolves, so waiting for it is waiting for something that will never arrive.
+ * Gives the page a moment to act on it and moves on.
+ */
+async function fireAndForget(script: string, graceMs = 2500): Promise<void> {
+  const frame = await findAiModeFrame();
+  await Promise.race([
+    frame.executeJavaScript(script).catch(() => undefined),
+    new Promise((resolve) => setTimeout(resolve, graceMs)),
+  ]);
 }
 
 export interface ThreadListEntry {
@@ -378,10 +424,10 @@ const READ_THREADS_SCRIPT = `
         const overflow = row ? row.querySelector('button.fMed7[aria-label]') : null;
         const label = overflow ? overflow.getAttribute('aria-label') || '' : '';
         // The visible button text is clipped; this aria-label is not.
-        const full = label.replace(/^more options for\s*/i, '').trim();
+        const full = label.replace(/^more options for\\s*/i, '').trim();
         return {
           externalId: el.getAttribute('data-thread-id'),
-          title: full || (el.textContent || '').replace(/\s+/g, ' ').trim(),
+          title: full || (el.textContent || '').replace(/\\s+/g, ' ').trim(),
         };
       })
       .filter((t) => t.externalId);
@@ -446,4 +492,290 @@ export async function scrollListToTop(): Promise<void> {
       }
     })();
   `);
+}
+
+/* --------------------------------------------------- opening a conversation */
+
+// Threads can only be opened by clicking their sidebar row (see the mtid notes
+// above), and the list is virtualised, so the row may not exist in the DOM yet.
+//
+// Scrolling-to-find and clicking are deliberately SEPARATE steps. The click
+// navigates, which destroys the execution context — so if the click were part
+// of the same awaited script, that script's promise would never settle and the
+// caller would hang. Learned by hanging.
+const SCROLL_TO_THREAD_SCRIPT = (externalId: string) => `
+(async () => {
+  try {
+    const wanted = ${JSON.stringify(externalId)};
+    const scroller = document.querySelector(${JSON.stringify(THREAD_LIST_SCROLLER)});
+    if (!scroller) return { ok: false, error: 'Thread list scroller not found' };
+    if (getComputedStyle(scroller).display === 'none') {
+      return { ok: false, error: 'History sidebar is closed' };
+    }
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    // Quoted attribute selector: thread ids can begin with '-', which would be
+    // an invalid identifier unquoted.
+    const find = () => document.querySelector('button.qqMZif[data-thread-id="' + wanted + '"]');
+
+    // The sidebar animates open, and until it has laid out clientHeight is 0.
+    // Scrolling by 0.8 * 0 moves nothing, which an earlier version read as
+    // "reached the bottom" and gave up on the first iteration — reporting a row
+    // as missing while it sat in a list of 300. Wait for real geometry first.
+    for (let i = 0; i < 20 && scroller.clientHeight === 0; i += 1) await wait(250);
+    if (scroller.clientHeight === 0) {
+      return { ok: false, error: 'Thread list never laid out (clientHeight stayed 0)' };
+    }
+
+    // Two passes: first forward from wherever the list already is, then from
+    // the top. Captures run in list order, so the next thread is usually just
+    // below the last one — rewinding to the top every time re-walks the whole
+    // list and gets slower the deeper it goes. The wrap-around second pass is
+    // what keeps it correct regardless of starting position.
+    let steps = 0;
+    for (let pass = 0; pass < 2; pass += 1) {
+      if (pass === 1) {
+        scroller.scrollTop = 0;
+        await wait(400);
+      }
+      for (let step = 0; step < 220; step += 1) {
+        steps += 1;
+        const el = find();
+        if (el && el.offsetParent !== null) {
+          el.scrollIntoView({ block: 'center' });
+          await wait(150);
+          return { ok: true, steps: steps, pass: pass };
+        }
+        // Bottom detected from geometry, not from "the scroll didn't move".
+        // Those are different things, and conflating them is what broke this.
+        const atBottom =
+          scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8;
+        if (atBottom) {
+          // One last look: the final window may have rendered on this settle.
+          await wait(400);
+          const last = find();
+          if (last && last.offsetParent !== null) {
+            last.scrollIntoView({ block: 'center' });
+            await wait(150);
+            return { ok: true, steps: steps, pass: pass };
+          }
+          break;
+        }
+        scroller.scrollTop = Math.min(
+          scroller.scrollTop + scroller.clientHeight * 0.8,
+          scroller.scrollHeight,
+        );
+        await wait(350);
+      }
+    }
+    return { ok: false, error: 'Thread row never rendered: ' + wanted };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+})();
+`;
+
+const CLICK_THREAD_SCRIPT = (externalId: string) => `
+(() => {
+  const el = document.querySelector('button.qqMZif[data-thread-id="' + ${JSON.stringify(externalId)} + '"]');
+  if (el) el.click();
+  return { ok: true };
+})();
+`;
+
+export async function openThreadById(externalId: string): Promise<void> {
+  // Generous timeout: finding a row can mean scrolling most of a 300-row
+  // virtualised list, at ~350ms a step.
+  await run(SCROLL_TO_THREAD_SCRIPT(externalId), 120_000);
+  await fireAndForget(CLICK_THREAD_SCRIPT(externalId));
+}
+
+// Chrome that sits inside a turn and would otherwise be captured as part of the
+// message. Each was seen welded onto real text during recon — reading the outer
+// element yields "CopiedCopyEditможешь ей ноги..." and similar.
+const TURN_CHROME_SELECTORS = [
+  // Every control, by role rather than by class. This is the load-bearing rule:
+  // a turn's text should never contain a button's label, and Google ships the
+  // same Share/Download cluster under more than one class name — stripping
+  // div.NyIrK.wcKEcb removed one and left an identical one under
+  // div.h3dxKe.X0Xglb, so "ShareDownload" still landed in the captured answer.
+  // Chasing class names loses; chasing buttons does not.
+  'button',
+  '[role="button"]',
+  // Non-button chrome, which needs class names because it has no role.
+  'div.SK38Xc', // Copied / Copy / Edit wrapper
+  'div.NyIrK.wcKEcb', // Share / Download wrapper
+  'div.HvurC', // feedback widget ("Saved time / Helpful / ...")
+  'div.DBd2Wb', // AI disclaimer + share-link UI (877 chars of it)
+  'div.UYpEO', // the timestamp, captured separately
+];
+
+const READ_TURNS_SCRIPT = `
+(() => {
+  try {
+    const clean = (el) => (el ? (el.textContent || '').replace(/\\s+/g, ' ').trim() : '');
+    const pairs = Array.from(document.querySelectorAll('div.CKgc1d'));
+    if (pairs.length === 0) return { ok: false, error: 'No conversation turns rendered' };
+
+    const chromeSel = ${JSON.stringify(TURN_CHROME_SELECTORS.join(','))};
+    const imagesIn = (el) =>
+      Array.from(el.querySelectorAll('img'))
+        .map((img) => ({
+          src: img.currentSrc || img.getAttribute('src') || '',
+          alt: img.getAttribute('alt') || null,
+          width: img.naturalWidth,
+          height: img.naturalHeight,
+        }))
+        // Icons and spacers are not conversation content. 120px is above every
+        // UI glyph seen and below every real image.
+        .filter((i) => i.src && (i.width >= 120 || i.height >= 120));
+
+    // Strip chrome from a COPY, so the live page is never modified — this runs
+    // against the user's real session.
+    //
+    // script/style/noscript/template are removed too, and that is not
+    // defensive tidying: textContent includes the SOURCE of inline scripts, so
+    // without this a captured answer came back as
+    // "sn._setImageSrc('img-XNmJav...','https://lens.usercontent...')" —
+    // Google's own image-loading code stored as the AI's reply.
+    const isCode = (el) =>
+      el.tagName === 'SCRIPT' ||
+      el.tagName === 'STYLE' ||
+      el.tagName === 'NOSCRIPT' ||
+      el.tagName === 'TEMPLATE';
+
+    const stripped = (el) => {
+      // querySelectorAll never matches the root itself, so a root that IS a
+      // script would keep all of its source. Handle that case explicitly.
+      if (isCode(el)) return document.createElement('div');
+      const copy = el.cloneNode(true);
+      for (const junk of Array.from(copy.querySelectorAll(chromeSel))) junk.remove();
+      for (const code of Array.from(copy.querySelectorAll('script,style,noscript,template'))) {
+        code.remove();
+      }
+      return copy;
+    };
+
+    const turns = [];
+    pairs.forEach((pair) => {
+      const userEl = pair.querySelector('div.ilZyRc.R7mRQb');
+      if (userEl) {
+        const body = userEl.querySelector('div.tbIZh.wQN2Jd.Odbbif');
+        const copy = stripped(userEl);
+        turns.push({
+          role: 'user',
+          // Prefer the precise body element; fall back to the de-chromed block.
+          text: clean(body) || clean(copy),
+          // HTML is kept for user turns too, not just answers. A question can
+          // carry an uploaded reference image, and with html null its image had
+          // nowhere to render — the file was archived but invisible, which for
+          // an image-generation conversation loses the actual subject.
+          html: copy.innerHTML,
+          images: imagesIn(userEl),
+          stamp: clean(userEl.querySelector('div.UYpEO div.kwdzO')) || null,
+        });
+      }
+      // The AI answer is the pair's other child. It carries no class of its own,
+      // so it is identified by CONTENT: the sibling with the most real text
+      // once chrome and code are stripped.
+      //
+      // Code elements are excluded by tag, not just out-scored. A turn pair
+      // observed live had three children — the user div, a bare <script>
+      // carrying 357 characters of Google's image-loading source, and the real
+      // answer. Scoring alone picked the script, because stripping the 877-char
+      // disclaimer block out of the real answer dropped it BELOW the script.
+      const aiEl = Array.from(pair.children)
+        .filter((c) => c !== userEl && !isCode(c))
+        .map((c) => ({ el: c, score: clean(stripped(c)).length + c.querySelectorAll('img').length }))
+        .sort((a, b) => b.score - a.score)
+        .filter((c) => c.score > 0)
+        .map((c) => c.el)[0];
+      if (aiEl) {
+        const copy = stripped(aiEl);
+        turns.push({
+          role: 'ai',
+          text: clean(copy),
+          html: copy.innerHTML,
+          images: imagesIn(aiEl),
+          stamp: clean(aiEl.querySelector('div.UYpEO div.kwdzO')) || null,
+        });
+      }
+    });
+
+    return { ok: true, turns, pairCount: pairs.length, url: location.href };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+})();
+`;
+
+export interface CapturedImage {
+  src: string;
+  alt: string | null;
+  width: number;
+  height: number;
+}
+
+export interface CapturedTurn {
+  role: 'user' | 'ai';
+  text: string;
+  html: string | null;
+  images: CapturedImage[];
+  /** Display-only: "17:05" today, "August 21, 2026" older, often absent. */
+  stamp: string | null;
+}
+
+export async function readTurns(): Promise<{ turns: CapturedTurn[]; url: string }> {
+  const result = await run<{ turns: CapturedTurn[]; url: string }>(READ_TURNS_SCRIPT);
+  return { turns: result.turns, url: result.url };
+}
+
+/**
+ * Waits for a conversation to finish rendering after a click. Requires the turn
+ * count to hold steady, not merely be non-zero: turns stream in, and reading at
+ * the first sight of one captures a fragment.
+ */
+export async function waitForTurnsToSettle(timeoutMs = 60_000): Promise<number> {
+  const started = Date.now();
+  let last = -1;
+  let stableFor = 0;
+  // Four consecutive identical readings, not two. Conversations load slowly and
+  // turn by turn, so a count can sit unchanged for over a second while more is
+  // still arriving — which stored a 6-turn conversation as 1 turn and, because
+  // the queue skips anything with turns, never revisited it. Silent truncation
+  // is worse than a slow capture.
+  const requiredStablePolls = 4;
+  while (Date.now() - started < timeoutMs) {
+    let count = 0;
+    try {
+      count = (
+        await run<{ count: number }>(
+          `
+      (() => {
+        try {
+          return { ok: true, count: document.querySelectorAll('div.CKgc1d').length };
+        } catch (err) {
+          return { ok: false, error: String((err && err.message) || err) };
+        }
+      })();
+    `,
+          4000,
+        )
+      ).count;
+    } catch {
+      // Expected while the click's navigation is still in flight: the frame is
+      // being replaced, so the probe fails rather than returning zero. Keep
+      // polling instead of treating it as a failed capture.
+      count = -1;
+    }
+    if (count > 0 && count === last) {
+      stableFor += 1;
+      if (stableFor >= requiredStablePolls) return count;
+    } else {
+      stableFor = 0;
+    }
+    last = count;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  if (last > 0) return last;
+  throw new Error('Conversation did not render within the timeout');
 }
