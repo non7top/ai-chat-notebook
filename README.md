@@ -142,6 +142,42 @@ lazy-loading attributes.
 It assumes no selectors and clicks nothing. Chromium blocks the first paste
 into a DevTools console; type `allow pasting` at the prompt once if it refuses.
 
+To run the same probe over CDP instead of pasting it by hand, start the app
+with `--devtools-port=9222` and:
+
+```sh
+docker compose run --rm recon node scripts/cdp-recon.mjs
+```
+
+It evaluates in **every** execution context, not just the main frame —
+whether AI Mode renders its history in a subframe is one of the unknowns being
+probed, and a main-frame-only evaluate would report "found nothing" for a page
+that is actually full of content one frame down, indistinguishable from having
+the wrong selectors.
+
+Note the `recon` service, not `dev`: it shares the host's network namespace.
+A normal container has its own, so `127.0.0.1` inside it is the container
+rather than the host, and a debugging port on the host's loopback is invisible
+(verified — `dev` gets connection-refused where `recon` succeeds). Host
+networking is confined to this one service because it also removes the
+isolation that makes the default safe.
+
+### Reaching a Windows app's port from WSL
+
+Chromium binds the debugging port to `127.0.0.1`, and under WSL's default NAT
+networking that is a *different* loopback from the Windows host's — WSL sits on
+its own interface with the host as gateway, so it can reach ports bound to the
+host's LAN address but never one bound only to the host's loopback.
+
+The simplest fix is a reverse forward from Windows into WSL, so the port
+appears on WSL's own `127.0.0.1:9222` and the command above works unchanged.
+Avoid `netsh portproxy` onto `0.0.0.0`: that publishes an unauthenticated CDP
+endpoint controlling a logged-in Google session to the whole network.
+
+Alternatively, skip the networking entirely and run the app inside WSL —
+`/mnt/wslg` provides a display, so `npm start` works — at the cost of signing
+into Google again in that instance.
+
 ### Remote debugging (CDP)
 
 For driving the app from outside — including inspecting the live AI Mode page
