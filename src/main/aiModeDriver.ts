@@ -105,6 +105,57 @@ import { getAiModeWebContents } from './aiModeView';
 //   turns did not, so the conversation body may itself be lazily rendered.
 //   Unconfirmed, and it matters for capture completeness.
 //
+// CONTINUING A THREAD: UPDATES IN PLACE, DOES NOT DUPLICATE
+// - Observed on a thread with 3 user turns: the URL's q= and the sidebar title
+//   both equal the FIRST user turn, not the latest, and the later two turns do
+//   not appear as their own rows. So continuing appends to the same
+//   data-thread-id, and the title is derived from the opening query and stays
+//   put.
+// - That makes data-thread-id a safe primary key and the title safe to store.
+// - Caveat on how strongly to trust this: the list is virtualised, so "the
+//   later turns have no row of their own" was checked against the ~20 rendered
+//   rows, not all ~300. The title-equals-first-turn part is solid regardless.
+//
+// GOOGLE'S OWN DUPLICATES ARE REAL, AND THE PLAN'S content_key CATCHES THEM
+// - Among 20 rendered rows: two threads share a 209-character title prefix
+//   ("full-length character sprite of the identical athletic woman..."), three
+//   more share 36 characters, and another pair shares 44.
+// - A 209-character identical prefix is the same prompt submitted twice as two
+//   separate threads — distinct ids, near-identical openings. Exactly the case
+//   content_key (a hash of the normalised first user turn) is meant to flag for
+//   a manual merge, now confirmed present in real data rather than assumed.
+//
+// CHANGE DETECTION
+// - The list carries NO timestamp in the DOM. Checked every attribute: the row
+//   has only class=j8c53, and the button has id (a "BAyyLe" prefix plus the
+//   thread id), data-thread-id, class, and data-ved (an opaque tracking token).
+//   No datetime, no data-ts, no "Today"/"Yesterday" group headers.
+// - BUT the list is ordered by recent activity (per the app's owner, who has
+//   watched it behave that way — Google clearly holds the date server-side even
+//   though it never renders it). That is the signal, and it is a good one:
+//   anything new or updated surfaces at the TOP.
+// - So an incremental re-harvest does not need to re-open ~300 threads. Read
+//   the list from the top and treat the leading run as changed; stop once
+//   several consecutive already-known ids appear in their previous relative
+//   order, since everything below that is older and untouched.
+// - Design it to fail safe. If the ordering assumption is ever wrong the
+//   fallback must be a slower full sweep, never silently skipped updates — so
+//   pair it with a stored turn count and a hash of the last turn per chat, and
+//   re-verify those whenever a thread is opened anyway (Resume, or asking
+//   something new in it), which costs nothing extra.
+// - Two things deliberately NOT concluded:
+//     * Whether the sort updates live or only on reload. Opening two threads
+//       did not visibly move them to the top, but the virtualised render window
+//       makes any observed order unreliable, so the harvester should reload
+//       before trusting position rather than assume live re-sorting.
+//     * Whether "recent activity" means last turn or thread creation.
+// - If real timestamps ever become necessary, the page links to
+//   myactivity.google.com/search-services/history/search, which does render
+//   dates per item. A different page with its own DOM, so a separate job.
+// - The only per-turn date in AI Mode itself is div.UYpEO > div.kwdzO, and it
+//   is a date with no time ("August 21, 2026") — enough to notice a change on a
+//   different day, useless within one day.
+//
 // FRAMES / CONTEXTS
 // - Conversation and history both live in the TOP-LEVEL frame. The only child
 //   frame is an ogs.google.com account widget. So nodeIntegrationInSubFrames
