@@ -6,9 +6,16 @@ interface Props {
   onSelect: (id: number) => void;
 }
 
-function when(iso: string): string {
+// Only startedAt is a real conversation date. last_seen_at is when the
+// harvester last saw the thread, which for a bulk harvest is "today" for every
+// row — displaying that stamped the harvest date onto years of history and read
+// as though every conversation happened at once. AI Mode exposes no per-thread
+// date at all (see the notes in aiModeDriver.ts), so until myactivity is
+// scraped for real timestamps, showing nothing is the honest option.
+function when(iso: string | null): string | null {
+  if (!iso) return null;
   const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString();
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleDateString();
 }
 
 export default function ChatList({ chats, selectedId, onSelect }: Props) {
@@ -18,7 +25,9 @@ export default function ChatList({ chats, selectedId, onSelect }: Props) {
 
   return (
     <div className="chat-list">
-      {chats.map((chat) => (
+      {chats.map((chat) => {
+        const started = when(chat.startedAt);
+        return (
         <div
           key={chat.id}
           className={`chat-row${chat.id === selectedId ? ' selected' : ''}`}
@@ -30,17 +39,27 @@ export default function ChatList({ chats, selectedId, onSelect }: Props) {
             );
           }}
         >
-          <button type="button" className="chat-open" onClick={() => onSelect(chat.id)}>
+          <button
+            type="button"
+            className="chat-open"
+            onClick={() => onSelect(chat.id)}
+            // Titles are long and the pane is narrow, so the full text has to
+            // be reachable without opening the conversation.
+            title={chat.title}
+          >
             <span className={chat.title === '(untitled)' ? 'chat-title untitled' : 'chat-title'}>
               {chat.title}
             </span>
             <span className="chat-meta">
-              {when(chat.lastSeenAt)} · {chat.messageCount} turn
-              {chat.messageCount === 1 ? '' : 's'}
+              {started ? `${started} · ` : ''}
+              {chat.messageCount === 0
+                ? 'not captured yet'
+                : `${chat.messageCount} turn${chat.messageCount === 1 ? '' : 's'}`}
             </span>
           </button>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

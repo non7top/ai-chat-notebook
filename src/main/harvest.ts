@@ -90,8 +90,16 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
     const absorb = (entries: ThreadListEntry[]) => {
       for (const entry of entries) {
         if (seen.has(entry.externalId)) continue;
+        // seen.size before insertion is this thread's position in Google's
+        // own ordering, because the scroll walks the list from the top.
+        const rank = seen.size;
         seen.set(entry.externalId, entry.title);
-        const result = db.upsertThreadFromList(entry.externalId, entry.title, threadUrl(entry));
+        const result = db.upsertThreadFromList(
+          entry.externalId,
+          entry.title,
+          threadUrl(entry),
+          rank,
+        );
         if (result.created) {
           created += 1;
         } else if (known.has(entry.externalId)) {

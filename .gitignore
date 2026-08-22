@@ -107,3 +107,6 @@ core
 # to live in the repo because that is what the dev container mounts, but they
 # are scratch and must not be linted or committed.
 .q-*.js
+
+# CDP screenshots — local debugging output, not source
+.shots/
