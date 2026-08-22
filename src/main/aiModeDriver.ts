@@ -602,6 +602,13 @@ const TURN_CHROME_SELECTORS = [
   'button',
   '[role="button"]',
   // Non-button chrome, which needs class names because it has no role.
+  //
+  // h2.iMqumd is an accessibility summary — "You sent: 1 image and said: <the
+  // message>" — so rendering it repeats the message back with a prefix. It only
+  // became visible once user turns started storing HTML. Stripped for display,
+  // but still worth reading as a cross-check: it states how many images a turn
+  // should have.
+  'h2.iMqumd',
   'div.SK38Xc', // Copied / Copy / Edit wrapper
   'div.NyIrK.wcKEcb', // Share / Download wrapper
   'div.HvurC', // feedback widget ("Saved time / Helpful / ...")
