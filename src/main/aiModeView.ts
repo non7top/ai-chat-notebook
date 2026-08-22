@@ -10,7 +10,13 @@ import type { AiModeStatus } from '../shared/types';
 // pointing it at about:blank is also the quickest way to tell an app bug
 // apart from a Google-page bug, the same trick ../sprite-manager/README.md
 // documents for perchance.
-const AI_MODE_URL = process.env.NOTEBOOK_AI_MODE_URL ?? 'https://www.google.com/search?udm=50';
+export const AI_MODE_URL =
+  process.env.NOTEBOOK_AI_MODE_URL ?? 'https://www.google.com/search?udm=50';
+
+// udm=50 is what makes a Search URL an AI Mode URL, and it survives opening a
+// thread (which only adds mtid), so it is a reliable "are we on the right
+// page" test.
+const AI_MODE_URL_PATTERN = /[?&]udm=50\b/;
 
 // Unlike PromptLoom, the app's own UI is the main event here — reading an
 // archived conversation needs real width, and the live panel is only wanted
@@ -129,6 +135,53 @@ export function navigateAiMode(input: string): void {
   if (!trimmed) return;
   const url = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : `https://${trimmed}`;
   view.webContents.loadURL(url);
+}
+
+/**
+ * Puts the panel back on AI Mode if it has wandered — following a link to
+ * myactivity, say. The harvester depends on this page being loaded, and making
+ * it navigate itself is far better than failing with advice: the panel is a
+ * general browser now, so being somewhere else is normal, not user error.
+ *
+ * Returns true if it had to navigate.
+ */
+export function ensureOnAiMode(timeoutMs = 25000): Promise<boolean> {
+  if (!view) return Promise.reject(new Error('AI Mode view has not been created yet'));
+  const webContents = view.webContents;
+  if (AI_MODE_URL_PATTERN.test(webContents.getURL())) return Promise.resolve(false);
+
+  return new Promise<boolean>((resolve, reject) => {
+    const onLoaded = () => {
+      cleanup();
+      resolve(true);
+    };
+    const onFailed = (
+      _event: Electron.Event,
+      _errorCode: number,
+      errorDescription: string,
+      _validatedURL: string,
+      isMainFrame: boolean,
+    ) => {
+      // did-fail-load fires for any failed subresource; only the main frame
+      // failing means the navigation itself did not happen.
+      if (!isMainFrame) return;
+      cleanup();
+      reject(new Error(`Could not load AI Mode: ${errorDescription}`));
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out loading ${AI_MODE_URL}`));
+    }, timeoutMs);
+    function cleanup() {
+      clearTimeout(timer);
+      webContents.removeListener('did-finish-load', onLoaded);
+      webContents.removeListener('did-fail-load', onFailed);
+    }
+
+    webContents.on('did-finish-load', onLoaded);
+    webContents.on('did-fail-load', onFailed);
+    webContents.loadURL(AI_MODE_URL);
+  });
 }
 
 export function aiModeGoBack(): void {

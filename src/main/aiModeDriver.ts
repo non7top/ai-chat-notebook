@@ -1,5 +1,5 @@
 import type { WebFrameMain } from 'electron';
-import { getAiModeWebContents } from './aiModeView';
+import { getAiModeNavState, getAiModeWebContents } from './aiModeView';
 
 // Google AI Mode page structure, confirmed by hand against a live signed-in
 // session over CDP on 2026-08-21 (app 0.2.1, Chrome 150). Recorded here
@@ -260,10 +260,12 @@ export async function findAiModeFrame(): Promise<WebFrameMain> {
     // eslint-disable-next-line no-await-in-loop
     await new Promise((resolve) => setTimeout(resolve, FRAME_SEARCH_RETRY_DELAY_MS));
   }
+  // Naming the URL matters: the panel is a general browser, so "wrong page" is
+  // by far the likeliest cause and the least obvious from the symptom.
   throw new Error(
-    'No frame contains the AI Mode thread list. Either not signed in, the ' +
-      'history sidebar has never been opened in this session, or the page ' +
-      'structure has changed (see the notes at the top of this file).',
+    `No AI Mode thread list found. The panel is showing ${getAiModeNavState().url || '(nothing)'}. ` +
+      'Either it is not an AI Mode page, you are not signed in, or the page ' +
+      'structure has changed (see the notes at the top of aiModeDriver.ts).',
   );
 }
 

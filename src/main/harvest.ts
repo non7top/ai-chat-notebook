@@ -1,5 +1,6 @@
 import { BrowserWindow } from 'electron';
 import * as db from './db';
+import { ensureOnAiMode } from './aiModeView';
 import {
   ensureHistorySidebarOpen,
   getListGeometry,
@@ -71,6 +72,14 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
   cancelRequested = false;
 
   try {
+    // The panel doubles as a browser, so it may well be parked on myactivity or
+    // anywhere else. Go to AI Mode rather than failing with instructions.
+    const navigated = await ensureOnAiMode();
+    if (navigated) {
+      // A freshly loaded list is also a correctly ordered one — Google sorts by
+      // recent activity on load and never re-sorts live.
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
     await ensureHistorySidebarOpen();
     await scrollListToTop();
 
