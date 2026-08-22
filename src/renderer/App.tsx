@@ -15,6 +15,7 @@ export default function App() {
   const [status, setStatus] = useState<AiModeStatus>({ connected: false });
   const [panelVisible, setPanelVisible] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [uncaptured, setUncaptured] = useState(0);
 
   const reloadFolders = useCallback(async () => {
     setFolders(await window.notebook.listFolders());
@@ -28,15 +29,23 @@ export default function App() {
     setChat(selectedId === null ? null : await window.notebook.getChat(selectedId));
   }, [selectedId]);
 
+  const reloadUncaptured = useCallback(async () => {
+    setUncaptured(await window.notebook.countChatsWithoutTurns());
+  }, []);
+
   const reloadAll = useCallback(() => {
     reloadFolders();
     reloadChats();
     reloadChat();
-  }, [reloadFolders, reloadChats, reloadChat]);
+    reloadUncaptured();
+  }, [reloadFolders, reloadChats, reloadChat, reloadUncaptured]);
 
   useEffect(() => {
     reloadFolders();
   }, [reloadFolders]);
+  useEffect(() => {
+    reloadUncaptured();
+  }, [reloadUncaptured]);
   useEffect(() => {
     reloadChats();
   }, [reloadChats]);
@@ -71,7 +80,11 @@ export default function App() {
         </button>
       </div>
 
-      <HarvestBar onNeedPanel={() => setPanelVisible(true)} onFinished={reloadAll} />
+      <HarvestBar
+        onNeedPanel={() => setPanelVisible(true)}
+        onFinished={reloadAll}
+        uncaptured={uncaptured}
+      />
 
       {error && (
         <div className="banner error">
