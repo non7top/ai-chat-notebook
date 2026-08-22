@@ -48,6 +48,11 @@ const api: NotebookApi = {
   aiModeGoForward: () => ipcRenderer.invoke('aiMode:forward'),
   aiModeReload: () => ipcRenderer.invoke('aiMode:reload'),
   setAiModeHidden: (hidden) => ipcRenderer.invoke('aiMode:setHidden', hidden),
+  onAiModeVisibility: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, visible: boolean) => callback(visible);
+    ipcRenderer.on('aiMode:visibility', listener);
+    return () => ipcRenderer.removeListener('aiMode:visibility', listener);
+  },
   onAiModeStatus: (callback) => {
     // The view may have already fired its first load event before this
     // subscribes — fetch the cached status once up front so that event isn't

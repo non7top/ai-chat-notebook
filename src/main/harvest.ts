@@ -309,7 +309,14 @@ export async function recaptureChat(chatId: number): Promise<{ turns: number; im
   const chat = db.getChatForCapture(chatId);
   if (!chat) throw new Error(`No chat with id ${chatId}`);
   await ensureOnAiMode();
-  db.clearTurns(chatId);
+  // NOT cleared first. An earlier version deleted the stored turns before
+  // reading, so a re-capture that then failed — a slow load, a page that never
+  // settled — left the conversation with nothing at all. It destroyed the copy
+  // it was meant to improve.
+  //
+  // captureOneChat ends in replaceTurns, which deletes and inserts inside one
+  // transaction, so the old turns survive right up to the moment new ones exist
+  // to take their place.
   const result = await captureOneChat(chat);
   return { turns: result.turns, images: result.images };
 }

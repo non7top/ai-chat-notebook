@@ -45,6 +45,9 @@ export default function App() {
   }, [reloadChat]);
 
   useEffect(() => window.notebook.onAiModeStatus(setStatus), []);
+  // The main process reveals the panel when an operation needs it, so follow
+  // that rather than letting the toggle claim it is hidden while it is visible.
+  useEffect(() => window.notebook.onAiModeVisibility(setPanelVisible), []);
 
   useEffect(() => {
     // #app is static markup in index.html, outside this component's own root,

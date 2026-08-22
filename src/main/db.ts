@@ -440,14 +440,11 @@ export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetT
   }
 }
 
-/**
- * Drops a conversation's stored turns so it can be captured again. Assets
- * cascade with the messages; the files on disk are content-addressed and shared,
- * so they stay.
- */
-export function clearTurns(chatId: number): void {
-  db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
-}
+// There is deliberately no clearTurns(). Clearing before a re-capture is what
+// let a failed re-read wipe a conversation it was supposed to refresh —
+// replaceTurns already swaps old for new inside one transaction, so nothing
+// needs to delete first, and having the function around invites the same
+// mistake again.
 
 export function getChatForCapture(chatId: number): ChatToCapture | null {
   const row = db

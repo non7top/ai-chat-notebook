@@ -132,4 +132,6 @@ export interface NotebookApi {
   aiModeReload(): Promise<void>;
   setAiModeHidden(hidden: boolean): Promise<void>;
   onAiModeStatus(callback: (status: AiModeStatus) => void): () => void;
+  /** Fires when the main process reveals the panel because it needed it. */
+  onAiModeVisibility(callback: (visible: boolean) => void): () => void;
 }

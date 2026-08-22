@@ -12,6 +12,7 @@ export default function ChatReader({ chat, onChange }: Props) {
   const [draft, setDraft] = useState('');
   const [assetsBase, setAssetsBase] = useState<string>('');
   const [recapturing, setRecapturing] = useState(false);
+  const [recaptureError, setRecaptureError] = useState<string | null>(null);
 
   useEffect(() => {
     window.notebook.getAssetsBaseUrl().then(setAssetsBase);
@@ -51,9 +52,15 @@ export default function ChatReader({ chat, onChange }: Props) {
               title="Re-read this conversation from Google, replacing what is stored"
               onClick={async () => {
                 setRecapturing(true);
+                setRecaptureError(null);
                 try {
                   await window.notebook.recaptureChat(chat.id);
                   onChange();
+                } catch (err) {
+                  // Previously swallowed: a failed re-capture looked exactly
+                  // like a successful no-op, which is how an empty
+                  // conversation got mistaken for "nothing changed".
+                  setRecaptureError(err instanceof Error ? err.message : String(err));
                 } finally {
                   setRecapturing(false);
                 }
@@ -75,6 +82,10 @@ export default function ChatReader({ chat, onChange }: Props) {
           </>
         )}
       </div>
+
+      {recaptureError && (
+        <p className="status-line error">Re-capture failed: {recaptureError}</p>
+      )}
 
       {/* Clicks are swallowed at the container: stored HTML can contain real
           external links, and following one inside the app's own renderer
