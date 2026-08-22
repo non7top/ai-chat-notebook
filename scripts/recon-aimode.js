@@ -120,7 +120,11 @@
   const json = JSON.stringify(out, null, 2);
   console.log(json);
   try {
-    copy(out); // DevTools helper: puts it on the clipboard
+    // `copy` exists only in a DevTools console, not in any normal JS
+    // environment — reached via globalThis so it is a property access
+    // rather than an undeclared identifier, and guarded by the catch for
+    // the CDP path where it is absent.
+    globalThis.copy(out);
     console.log('%cCopied to clipboard — paste it back.', 'color:#0a0;font-weight:bold');
   } catch {
     console.log('Select the JSON above and copy it manually.');
