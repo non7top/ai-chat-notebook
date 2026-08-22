@@ -26,6 +26,10 @@ const api: NotebookApi = {
   deleteChat: (id) => ipcRenderer.invoke('chats:delete', id),
 
   getAiModeStatus: () => ipcRenderer.invoke('aiMode:getStatus'),
+  navigateAiMode: (url) => ipcRenderer.invoke('aiMode:navigate', url),
+  aiModeGoBack: () => ipcRenderer.invoke('aiMode:back'),
+  aiModeGoForward: () => ipcRenderer.invoke('aiMode:forward'),
+  aiModeReload: () => ipcRenderer.invoke('aiMode:reload'),
   setAiModeHidden: (hidden) => ipcRenderer.invoke('aiMode:setHidden', hidden),
   onAiModeStatus: (callback) => {
     // The view may have already fired its first load event before this

@@ -1,6 +1,13 @@
 import { BrowserWindow, dialog, ipcMain } from 'electron';
 import * as db from './db';
-import { getLastAiModeStatus, setAiModeViewHidden } from './aiModeView';
+import {
+  aiModeGoBack,
+  aiModeGoForward,
+  aiModeReload,
+  getLastAiModeStatus,
+  navigateAiMode,
+  setAiModeViewHidden,
+} from './aiModeView';
 import { cancelHarvest, harvestThreadList } from './harvest';
 import type { ChatScope } from '../shared/types';
 
@@ -55,4 +62,8 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('aiMode:getStatus', () => getLastAiModeStatus());
   ipcMain.handle('aiMode:setHidden', (_event, hidden: boolean) => setAiModeViewHidden(hidden));
+  ipcMain.handle('aiMode:navigate', (_event, url: string) => navigateAiMode(url));
+  ipcMain.handle('aiMode:back', () => aiModeGoBack());
+  ipcMain.handle('aiMode:forward', () => aiModeGoForward());
+  ipcMain.handle('aiMode:reload', () => aiModeReload());
 }

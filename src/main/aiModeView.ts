@@ -58,6 +58,16 @@ export function createAiModeView(mainWindow: BrowserWindow): WebContentsView {
   mainWindow.contentView.addChildView(newView);
   newView.webContents.loadURL(AI_MODE_URL);
 
+  // Google's own links open in new tabs — "See your Search history" is a
+  // target=_blank to myactivity. Left alone, Electron answers that with a bare
+  // BrowserWindow: no address bar, no back button, its own lifecycle, and
+  // outside the panel the driver and harvester know about. Navigate the panel
+  // instead, so there is exactly one browsing surface in this app.
+  newView.webContents.setWindowOpenHandler(({ url }) => {
+    newView.webContents.loadURL(url);
+    return { action: 'deny' };
+  });
+
   // Unlike a top-level BrowserWindow, a WebContentsView doesn't apply
   // Ctrl+scroll-wheel zoom automatically — 'zoom-changed' fires the request,
   // but applying it is left to the app.
@@ -88,6 +98,49 @@ export function setAiModeViewHidden(nextHidden: boolean): void {
 
 export function isAiModeViewHidden(): boolean {
   return hidden;
+}
+
+export interface AiModeNavState {
+  url: string;
+  canGoBack: boolean;
+  canGoForward: boolean;
+}
+
+export function getAiModeNavState(): AiModeNavState {
+  if (!view) return { url: '', canGoBack: false, canGoForward: false };
+  const { webContents } = view;
+  // navigationHistory rather than the webContents.canGoBack()/goBack() pair,
+  // which Electron deprecated.
+  return {
+    url: webContents.getURL(),
+    canGoBack: webContents.navigationHistory.canGoBack(),
+    canGoForward: webContents.navigationHistory.canGoForward(),
+  };
+}
+
+/**
+ * Points the panel somewhere. A bare host is assumed to be https — typing
+ * "myactivity.google.com/..." should just work, and Electron would otherwise
+ * treat it as a relative path and fail obscurely.
+ */
+export function navigateAiMode(input: string): void {
+  if (!view) return;
+  const trimmed = input.trim();
+  if (!trimmed) return;
+  const url = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  view.webContents.loadURL(url);
+}
+
+export function aiModeGoBack(): void {
+  view?.webContents.navigationHistory.goBack();
+}
+
+export function aiModeGoForward(): void {
+  view?.webContents.navigationHistory.goForward();
+}
+
+export function aiModeReload(): void {
+  view?.webContents.reload();
 }
 
 export function getAiModeWebContents(): WebContents {

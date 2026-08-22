@@ -2,6 +2,8 @@ export interface AiModeStatus {
   connected: boolean;
   url?: string;
   error?: string;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
 }
 
 export interface Folder {
@@ -88,6 +90,10 @@ export interface NotebookApi {
   deleteChat(id: number): Promise<void>;
 
   getAiModeStatus(): Promise<AiModeStatus>;
+  navigateAiMode(url: string): Promise<void>;
+  aiModeGoBack(): Promise<void>;
+  aiModeGoForward(): Promise<void>;
+  aiModeReload(): Promise<void>;
   setAiModeHidden(hidden: boolean): Promise<void>;
   onAiModeStatus(callback: (status: AiModeStatus) => void): () => void;
 }
