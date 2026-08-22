@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { AiModeStatus, HarvestProgress, NotebookApi } from './shared/types';
 
 const api: NotebookApi = {
+  confirm: (message, detail) => ipcRenderer.invoke('ui:confirm', message, detail),
+
   harvestThreadList: () => ipcRenderer.invoke('harvest:threadList'),
   cancelHarvest: () => ipcRenderer.invoke('harvest:cancel'),
   onHarvestProgress: (callback) => {

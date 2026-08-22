@@ -64,6 +64,12 @@ export interface HarvestSummary {
 }
 
 export interface NotebookApi {
+  /**
+   * Native confirmation dialog. Electron implements confirm() but NOT prompt(),
+   * so dialogs go through the main process and names are edited inline.
+   */
+  confirm(message: string, detail?: string): Promise<boolean>;
+
   harvestThreadList(): Promise<HarvestSummary>;
   cancelHarvest(): Promise<void>;
   onHarvestProgress(callback: (progress: HarvestProgress) => void): () => void;

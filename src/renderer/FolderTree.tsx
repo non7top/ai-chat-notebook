@@ -11,6 +11,16 @@ interface Props {
 
 type DragPayload = { kind: 'folder'; id: number } | { kind: 'chat'; id: number };
 
+// Naming is done with an inline input rather than window.prompt, which Electron
+// does not implement at all: calling it throws "prompt() is not supported."
+// straight out of the click handler, so creating or renaming a folder failed
+// silently and nothing could be filed anywhere.
+type Editing =
+  | { kind: 'root-new' }
+  | { kind: 'child-new'; parentId: number }
+  | { kind: 'rename'; id: number; current: string }
+  | null;
+
 function childrenOf(folders: Folder[], parentId: number | null): Folder[] {
   return folders.filter((folder) => folder.parentId === parentId);
 }
@@ -20,22 +30,73 @@ function sameScope(a: ChatScope, b: ChatScope): boolean {
   return a.kind !== 'folder' || b.kind !== 'folder' || a.id === b.id;
 }
 
+function NameInput({
+  initial,
+  placeholder,
+  onCommit,
+  onCancel,
+}: {
+  initial: string;
+  placeholder: string;
+  onCommit: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const commit = () => {
+    const trimmed = value.trim();
+    if (trimmed) {
+      onCommit(trimmed);
+    } else {
+      onCancel();
+    }
+  };
+  return (
+    <input
+      className="name-input"
+      // Focused on appearance: the field only exists because the user just
+      // asked to name something.
+      autoFocus
+      value={value}
+      placeholder={placeholder}
+      onChange={(e) => setValue(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commit();
+        if (e.key === 'Escape') onCancel();
+      }}
+      // Committing on blur rather than discarding: losing a typed name to a
+      // stray click is worse than creating a folder that can be renamed.
+      onBlur={commit}
+      onClick={(e) => e.stopPropagation()}
+    />
+  );
+}
+
 export default function FolderTree({ folders, scope, onScopeChange, onChange, onError }: Props) {
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
   const [dropTarget, setDropTarget] = useState<number | null | 'none'>('none');
+  const [editing, setEditing] = useState<Editing>(null);
 
   const roots = useMemo(() => childrenOf(folders, null), [folders]);
 
   const toggle = (id: number) =>
     setCollapsed((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
+
+  const run = (work: Promise<unknown>) => {
+    work
+      .then(() => {
+        setEditing(null);
+        onChange();
+      })
+      .catch((err: unknown) => {
+        setEditing(null);
+        onError(err instanceof Error ? err.message : String(err));
+      });
+  };
 
   const readPayload = (event: React.DragEvent): DragPayload | null => {
     try {
@@ -45,34 +106,37 @@ export default function FolderTree({ folders, scope, onScopeChange, onChange, on
     }
   };
 
-  // A single handler for both kinds of drop: folders reparent, chats refile.
-  // targetId null means the Unfiled root.
-  const handleDrop = async (event: React.DragEvent, targetId: number | null) => {
+  // One handler for both kinds of drop: folders reparent, chats refile.
+  // targetId null means Unfiled.
+  const handleDrop = (event: React.DragEvent, targetId: number | null) => {
     event.preventDefault();
     event.stopPropagation();
     setDropTarget('none');
     const payload = readPayload(event);
     if (!payload) return;
-
-    try {
-      if (payload.kind === 'folder') {
-        if (payload.id === targetId) return;
-        await window.notebook.moveFolder(payload.id, targetId);
-      } else {
-        await window.notebook.setChatFolder(payload.id, targetId);
-      }
-      onChange();
-    } catch (err) {
+    if (payload.kind === 'folder') {
+      if (payload.id === targetId) return;
       // The main process rejects a move into the folder's own subtree; that
-      // rejection has to be visible, or the drop just appears to do nothing.
-      onError(err instanceof Error ? err.message : String(err));
+      // rejection has to surface, or the drop just appears to do nothing.
+      run(window.notebook.moveFolder(payload.id, targetId));
+    } else {
+      run(window.notebook.setChatFolder(payload.id, targetId));
     }
+  };
+
+  const deleteFolder = async (folder: Folder) => {
+    const ok = await window.notebook.confirm(
+      `Delete folder "${folder.name}"?`,
+      'Conversations inside it are kept and become Unfiled.',
+    );
+    if (ok) run(window.notebook.deleteFolder(folder.id));
   };
 
   const renderFolder = (folder: Folder, depth: number) => {
     const kids = childrenOf(folders, folder.id);
     const isCollapsed = collapsed.has(folder.id);
     const isSelected = sameScope(scope, { kind: 'folder', id: folder.id });
+    const renaming = editing?.kind === 'rename' && editing.id === folder.id;
 
     return (
       <div key={folder.id}>
@@ -84,7 +148,7 @@ export default function FolderTree({ folders, scope, onScopeChange, onChange, on
             dropTarget === folder.id ? ' drop-target' : ''
           }`}
           style={{ paddingLeft: `${depth * 14 + 4}px` }}
-          draggable
+          draggable={!renaming}
           onDragStart={(event) => {
             event.stopPropagation();
             event.dataTransfer.setData(
@@ -112,49 +176,71 @@ export default function FolderTree({ folders, scope, onScopeChange, onChange, on
           >
             {kids.length === 0 ? '·' : isCollapsed ? '▸' : '▾'}
           </button>
-          <span className="tree-name">{folder.name}</span>
-          <button
-            type="button"
-            className="row-action"
-            title="Rename folder"
-            onClick={(event) => {
-              event.stopPropagation();
-              const name = window.prompt('Rename folder', folder.name);
-              if (name?.trim()) {
-                window.notebook.renameFolder(folder.id, name.trim()).then(onChange);
-              }
-            }}
-          >
-            ✎
-          </button>
-          <button
-            type="button"
-            className="row-action"
-            title="New subfolder"
-            onClick={(event) => {
-              event.stopPropagation();
-              const name = window.prompt('New subfolder name');
-              if (name?.trim()) {
-                window.notebook.createFolder(folder.id, name.trim()).then(onChange);
-              }
-            }}
-          >
-            ＋
-          </button>
-          <button
-            type="button"
-            className="row-action"
-            title="Delete folder (conversations inside become Unfiled)"
-            onClick={(event) => {
-              event.stopPropagation();
-              if (window.confirm(`Delete folder "${folder.name}"? Conversations inside it are kept and become Unfiled.`)) {
-                window.notebook.deleteFolder(folder.id).then(onChange);
-              }
-            }}
-          >
-            ✕
-          </button>
+
+          {renaming ? (
+            <NameInput
+              initial={folder.name}
+              placeholder="Folder name"
+              onCommit={(name) => run(window.notebook.renameFolder(folder.id, name))}
+              onCancel={() => setEditing(null)}
+            />
+          ) : (
+            <>
+              <span className="tree-name">{folder.name}</span>
+              <button
+                type="button"
+                className="row-action"
+                title="Rename folder"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setEditing({ kind: 'rename', id: folder.id, current: folder.name });
+                }}
+              >
+                ✎
+              </button>
+              <button
+                type="button"
+                className="row-action"
+                title="New subfolder"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setCollapsed((prev) => {
+                    const next = new Set(prev);
+                    next.delete(folder.id);
+                    return next;
+                  });
+                  setEditing({ kind: 'child-new', parentId: folder.id });
+                }}
+              >
+                ＋
+              </button>
+              <button
+                type="button"
+                className="row-action"
+                title="Delete folder (conversations inside become Unfiled)"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  deleteFolder(folder);
+                }}
+              >
+                ✕
+              </button>
+            </>
+          )}
         </div>
+
+        {editing?.kind === 'child-new' && editing.parentId === folder.id && (
+          <div className="tree-row" style={{ paddingLeft: `${(depth + 1) * 14 + 4}px` }}>
+            <span className="twisty-spacer" />
+            <NameInput
+              initial=""
+              placeholder="New subfolder"
+              onCommit={(name) => run(window.notebook.createFolder(folder.id, name))}
+              onCancel={() => setEditing(null)}
+            />
+          </div>
+        )}
+
         {!isCollapsed && kids.map((kid) => renderFolder(kid, depth + 1))}
       </div>
     );
@@ -188,18 +274,21 @@ export default function FolderTree({ folders, scope, onScopeChange, onChange, on
       <div className="tree-divider" />
       {roots.map((folder) => renderFolder(folder, 0))}
 
-      <button
-        type="button"
-        className="tree-add"
-        onClick={() => {
-          const name = window.prompt('New top-level folder name');
-          if (name?.trim()) {
-            window.notebook.createFolder(null, name.trim()).then(onChange);
-          }
-        }}
-      >
-        ＋ New folder
-      </button>
+      {editing?.kind === 'root-new' ? (
+        <div className="tree-row" style={{ paddingLeft: '4px' }}>
+          <span className="twisty-spacer" />
+          <NameInput
+            initial=""
+            placeholder="New folder"
+            onCommit={(name) => run(window.notebook.createFolder(null, name))}
+            onCancel={() => setEditing(null)}
+          />
+        </div>
+      ) : (
+        <button type="button" className="tree-add" onClick={() => setEditing({ kind: 'root-new' })}>
+          ＋ New folder
+        </button>
+      )}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron';
+import { BrowserWindow, dialog, ipcMain } from 'electron';
 import * as db from './db';
 import { getLastAiModeStatus, setAiModeViewHidden } from './aiModeView';
 import { cancelHarvest, harvestThreadList } from './harvest';
@@ -28,6 +28,27 @@ export function registerIpcHandlers(): void {
     db.setChatTitle(chatId, userTitle),
   );
   ipcMain.handle('chats:delete', (_event, id: number) => db.deleteChat(id));
+
+  // Routed through the main process rather than window.confirm. Electron does
+  // support confirm(), but it does NOT support prompt() — that threw
+  // "prompt() is not supported." out of the folder-create handler and made the
+  // whole tree unusable. Keeping both confirmations and names off the window
+  // dialogs entirely removes that class of surprise.
+  ipcMain.handle('ui:confirm', async (_event, message: string, detail?: string) => {
+    const window = BrowserWindow.getFocusedWindow();
+    const options = {
+      type: 'question' as const,
+      buttons: ['Cancel', 'Delete'],
+      defaultId: 0,
+      cancelId: 0,
+      message,
+      detail,
+    };
+    const { response } = window
+      ? await dialog.showMessageBox(window, options)
+      : await dialog.showMessageBox(options);
+    return response === 1;
+  });
 
   ipcMain.handle('harvest:threadList', () => harvestThreadList());
   ipcMain.handle('harvest:cancel', () => cancelHarvest());

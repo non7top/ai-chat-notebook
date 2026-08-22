@@ -384,3 +384,20 @@ button:disabled {
   background: #22c55e;
   transition: width 0.2s linear;
 }
+
+/* Inline naming, used everywhere a window.prompt would otherwise be — Electron
+   throws "prompt() is not supported." rather than showing one. */
+.name-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.1rem 0.3rem;
+  border: 1px solid #3b82f6;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.reader-name-input {
+  font-size: 1rem;
+}
