@@ -1,5 +1,5 @@
 import type { WebFrameMain } from 'electron';
-import { getAiModeWebContents } from './aiModeView';
+import { getAiModeNavState, getAiModeWebContents } from './aiModeView';
 
 // Google AI Mode page structure, confirmed by hand against a live signed-in
 // session over CDP on 2026-08-21 (app 0.2.1, Chrome 150). Recorded here
@@ -226,6 +226,7 @@ import { getAiModeWebContents } from './aiModeView';
 
 const THREAD_BUTTON_SELECTOR = 'button.qqMZif[data-thread-id]';
 const THREAD_LIST_SCROLLER = 'div.cIl10d';
+const HISTORY_TOGGLE_SELECTOR = 'button.SbLVJc[aria-label="AI Mode history"]';
 const FRAME_SEARCH_RETRIES = 10;
 const FRAME_SEARCH_RETRY_DELAY_MS = 500;
 
@@ -259,11 +260,26 @@ export async function findAiModeFrame(): Promise<WebFrameMain> {
     // eslint-disable-next-line no-await-in-loop
     await new Promise((resolve) => setTimeout(resolve, FRAME_SEARCH_RETRY_DELAY_MS));
   }
+  // Naming the URL matters: the panel is a general browser, so "wrong page" is
+  // by far the likeliest cause and the least obvious from the symptom.
   throw new Error(
-    'No frame contains the AI Mode thread list. Either not signed in, the ' +
-      'history sidebar has never been opened in this session, or the page ' +
-      'structure has changed (see the notes at the top of this file).',
+    `No AI Mode thread list found. The panel is showing ${getAiModeNavState().url || '(nothing)'}. ` +
+      'Either it is not an AI Mode page, you are not signed in, or the page ' +
+      'structure has changed (see the notes at the top of aiModeDriver.ts).',
   );
+}
+
+// Never throw inside injected code: executeJavaScript does not propagate the
+// real JS error across the boundary, only a generic "Script failed to execute"
+// wrapper. Every script below returns { ok, ... } and the real error is raised
+// in TS. (Lesson inherited from perchanceDriver.ts.)
+async function run<T>(script: string): Promise<T> {
+  const frame = await findAiModeFrame();
+  const result = (await frame.executeJavaScript(script)) as { ok: boolean; error?: string } & T;
+  if (!result.ok) {
+    throw new Error(result.error ?? 'Injected script failed');
+  }
+  return result;
 }
 
 export interface ThreadListEntry {
@@ -271,18 +287,86 @@ export interface ThreadListEntry {
   title: string;
 }
 
-// Never throw inside injected code: executeJavaScript does not propagate the
-// real JS error across the boundary, only a generic "Script failed to execute"
-// wrapper. Return a result object and raise in normal TS below. (Lesson
-// inherited from perchanceDriver.ts.)
-const LIST_THREADS_SCRIPT = `
+export interface ListGeometry {
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+  rowHeight: number;
+  /**
+   * How many threads the list should ultimately yield, from the container's
+   * pre-sized scroll height. The list is virtualised and never holds more than
+   * ~40 rows, so this is the only way to know a harvest finished rather than
+   * merely stopped producing new ids.
+   */
+  expectedTotal: number;
+}
+
+const OPEN_SIDEBAR_SCRIPT = `
+(() => {
+  try {
+    const scroller = document.querySelector(${JSON.stringify(THREAD_LIST_SCROLLER)});
+    const visible = scroller && getComputedStyle(scroller).display !== 'none';
+    if (visible) return { ok: true, alreadyOpen: true };
+    const toggle = document.querySelector(${JSON.stringify(HISTORY_TOGGLE_SELECTOR)});
+    if (!toggle) return { ok: false, error: 'History toggle button not found' };
+    toggle.click();
+    return { ok: true, alreadyOpen: false };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+})();
+`;
+
+/**
+ * The list stays in the DOM with the sidebar closed, so presence proves
+ * nothing — every read has to happen against a visible container or it silently
+ * scrapes a stale copy.
+ */
+export async function ensureHistorySidebarOpen(): Promise<boolean> {
+  const result = await run<{ alreadyOpen: boolean }>(OPEN_SIDEBAR_SCRIPT);
+  if (!result.alreadyOpen) {
+    // The panel animates in; the scroller has no usable geometry until it has.
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+  }
+  return result.alreadyOpen;
+}
+
+const GEOMETRY_SCRIPT = `
 (() => {
   try {
     const scroller = document.querySelector(${JSON.stringify(THREAD_LIST_SCROLLER)});
     if (!scroller) return { ok: false, error: 'Thread list scroller not found' };
-    // The list stays in the DOM with the sidebar closed, so presence proves
-    // nothing — refuse rather than return a stale, invisible list.
-    if (!scroller.offsetParent && getComputedStyle(scroller).display === 'none') {
+    if (getComputedStyle(scroller).display === 'none') {
+      return { ok: false, error: 'History sidebar is closed; the thread list in the DOM is stale' };
+    }
+    const row = document.querySelector(${JSON.stringify(THREAD_BUTTON_SELECTOR)});
+    const rowHeight = row ? Math.round(row.getBoundingClientRect().height) : 0;
+    return {
+      ok: true,
+      scrollTop: Math.round(scroller.scrollTop),
+      scrollHeight: scroller.scrollHeight,
+      clientHeight: scroller.clientHeight,
+      rowHeight,
+    };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+})();
+`;
+
+export async function getListGeometry(): Promise<ListGeometry> {
+  const g = await run<Omit<ListGeometry, 'expectedTotal'>>(GEOMETRY_SCRIPT);
+  // A rowHeight of 0 means nothing is laid out yet; refuse to invent a total
+  // rather than divide by zero and "expect" nothing.
+  const expectedTotal = g.rowHeight > 0 ? Math.round(g.scrollHeight / g.rowHeight) : 0;
+  return { ...g, expectedTotal };
+}
+
+const READ_THREADS_SCRIPT = `
+(() => {
+  try {
+    const scroller = document.querySelector(${JSON.stringify(THREAD_LIST_SCROLLER)});
+    if (!scroller || getComputedStyle(scroller).display === 'none') {
       return { ok: false, error: 'History sidebar is closed; the thread list in the DOM is stale' };
     }
     const threads = Array.from(
@@ -294,37 +378,72 @@ const LIST_THREADS_SCRIPT = `
         const overflow = row ? row.querySelector('button.fMed7[aria-label]') : null;
         const label = overflow ? overflow.getAttribute('aria-label') || '' : '';
         // The visible button text is clipped; this aria-label is not.
-        const full = label.replace(/^more options for\\s*/i, '').trim();
+        const full = label.replace(/^more options for\s*/i, '').trim();
         return {
           externalId: el.getAttribute('data-thread-id'),
-          title: full || (el.textContent || '').replace(/\\s+/g, ' ').trim(),
+          title: full || (el.textContent || '').replace(/\s+/g, ' ').trim(),
         };
       })
       .filter((t) => t.externalId);
-    return { ok: true, threads, scrollHeight: scroller.scrollHeight, clientHeight: scroller.clientHeight };
+    return { ok: true, threads };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
   }
 })();
 `;
 
-interface ListThreadsResult {
-  ok: boolean;
-  error?: string;
-  threads?: ThreadListEntry[];
-  scrollHeight?: number;
-  clientHeight?: number;
+/** Reads only what is currently rendered — see the virtualisation notes. */
+export async function readRenderedThreads(): Promise<ThreadListEntry[]> {
+  const result = await run<{ threads: ThreadListEntry[] }>(READ_THREADS_SCRIPT);
+  return result.threads;
 }
 
-/**
- * Reads the currently-loaded page of the history sidebar. Does not scroll or
- * paginate yet — see the "STILL UNKNOWN" notes above.
- */
-export async function listVisibleThreads(): Promise<ThreadListEntry[]> {
-  const frame = await findAiModeFrame();
-  const result = (await frame.executeJavaScript(LIST_THREADS_SCRIPT)) as ListThreadsResult;
-  if (!result.ok) {
-    throw new Error(result.error ?? 'Failed to read the AI Mode thread list');
+const SCROLL_STEP_SCRIPT_PREFIX = `
+(() => {
+  try {
+    const scroller = document.querySelector(${JSON.stringify(THREAD_LIST_SCROLLER)});
+    if (!scroller || getComputedStyle(scroller).display === 'none') {
+      return { ok: false, error: 'History sidebar closed mid-harvest' };
+    }
+    const before = scroller.scrollTop;
+    scroller.scrollTop = Math.min(before + `;
+
+const SCROLL_STEP_SCRIPT_SUFFIX = `, scroller.scrollHeight);
+    return {
+      ok: true,
+      scrollTop: Math.round(scroller.scrollTop),
+      moved: Math.round(scroller.scrollTop - before),
+      atBottom: scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8,
+    };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
   }
-  return result.threads ?? [];
+})();
+`;
+
+export interface ScrollStepResult {
+  scrollTop: number;
+  moved: number;
+  atBottom: boolean;
+}
+
+export async function scrollListBy(pixels: number): Promise<ScrollStepResult> {
+  return run<ScrollStepResult>(
+    SCROLL_STEP_SCRIPT_PREFIX + String(Math.round(pixels)) + SCROLL_STEP_SCRIPT_SUFFIX,
+  );
+}
+
+export async function scrollListToTop(): Promise<void> {
+  await run(`
+    (() => {
+      try {
+        const s = document.querySelector(${JSON.stringify(THREAD_LIST_SCROLLER)});
+        if (!s) return { ok: false, error: 'Thread list scroller not found' };
+        s.scrollTop = 0;
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: String((err && err.message) || err) };
+      }
+    })();
+  `);
 }

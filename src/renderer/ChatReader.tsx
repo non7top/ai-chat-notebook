@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { ChatDetail } from '../shared/types';
 import { sanitizeHtml } from './sanitize';
 
@@ -7,21 +8,47 @@ interface Props {
 }
 
 export default function ChatReader({ chat, onChange }: Props) {
+  const [renaming, setRenaming] = useState(false);
+  const [draft, setDraft] = useState('');
+
+  const commit = () => {
+    setRenaming(false);
+    window.notebook.setChatTitle(chat.id, draft.trim()).then(onChange);
+  };
+
   return (
     <div className="reader">
       <div className="reader-head">
-        <h2 className={chat.title === '(untitled)' ? 'untitled' : undefined}>{chat.title}</h2>
-        <button
-          type="button"
-          onClick={() => {
-            const name = window.prompt('Name this conversation', chat.title);
-            if (name !== null) {
-              window.notebook.setChatTitle(chat.id, name.trim()).then(onChange);
-            }
-          }}
-        >
-          Rename
-        </button>
+        {renaming ? (
+          <input
+            className="name-input reader-name-input"
+            // Focused on appearance: it only exists because Rename was just clicked.
+            autoFocus
+            value={draft}
+            placeholder="Name this conversation"
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commit();
+              if (e.key === 'Escape') setRenaming(false);
+            }}
+            onBlur={commit}
+          />
+        ) : (
+          <>
+            <h2 className={chat.title === '(untitled)' ? 'untitled' : undefined}>{chat.title}</h2>
+            <button
+              type="button"
+              onClick={() => {
+                // Starts from the current display title, but an empty commit
+                // clears user_title so the harvested one shows through again.
+                setDraft(chat.title === '(untitled)' ? '' : chat.title);
+                setRenaming(true);
+              }}
+            >
+              Rename
+            </button>
+          </>
+        )}
       </div>
 
       {/* Clicks are swallowed at the container: stored HTML can contain real

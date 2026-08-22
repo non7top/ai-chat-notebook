@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ChatDetail, ChatSummary, Folder, Message } from '../shared/types';
@@ -19,6 +20,13 @@ function probeFts5(database: DatabaseSync): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+function ensureColumn(table: string, column: string, ddl: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[];
+  if (!columns.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
   }
 }
 
@@ -95,6 +103,12 @@ export function initDb(userDataPath: string): void {
       value TEXT NOT NULL
     );
   `);
+
+  // Columns added after the first release need a real migration: the
+  // CREATE TABLE above is IF NOT EXISTS, so it does nothing to a database that
+  // already holds harvested rows.
+  ensureColumn('chats', 'list_rank', 'list_rank INTEGER');
+  db.exec('CREATE INDEX IF NOT EXISTS chats_list_rank ON chats(list_rank);');
 
   fts5Available = probeFts5(db);
   // Logged rather than assumed: which SQLite build Electron ships changes
@@ -215,7 +229,16 @@ export function listChats(scope: ChatScope): ChatSummary[] {
   // merged_into IS NULL everywhere: a chat merged away is kept (so the merge
   // stays undoable) but must not show up as a separate conversation.
   const base = `${CHAT_SUMMARY_SQL} WHERE c.merged_into IS NULL`;
-  const order = ' ORDER BY c.last_seen_at DESC';
+  // Google's sidebar is ordered by recent activity, and the harvester walks it
+  // top to bottom, so list_rank preserves that order — the only recency
+  // information that exists, since no timestamp is rendered anywhere.
+  //
+  // Ordering by last_seen_at instead looked random: a bulk harvest writes
+  // essentially the same timestamp to all 300 rows, leaving the sort with
+  // nothing to distinguish them. Rows with no rank yet (hand-seeded, or
+  // captured live) sort last rather than jumbling in among the ranked ones.
+  const order =
+    ' ORDER BY CASE WHEN c.list_rank IS NULL THEN 1 ELSE 0 END, c.list_rank ASC, c.last_seen_at DESC';
 
   if (scope.kind === 'all') {
     return (db.prepare(base + order).all() as unknown as ChatSummaryRow[]).map(toSummary);
@@ -276,6 +299,67 @@ export function setChatTitle(chatId: number, userTitle: string): void {
 
 export function deleteChat(id: number): void {
   db.prepare('DELETE FROM chats WHERE id = ?').run(id);
+}
+
+/* ---------------------------------------------------------------- harvest */
+
+export interface UpsertResult {
+  created: boolean;
+  /** True when a row existed and its title changed. */
+  titleChanged: boolean;
+}
+
+// The sidebar title IS the thread's opening query (confirmed during recon: a
+// thread with three turns showed its first turn as both the title and the URL's
+// q=). So it doubles as the content key for spotting Google's own duplicates —
+// two threads started from the same prompt, which this history really contains.
+function contentKeyFor(title: string): string {
+  const normalised = title.toLowerCase().replace(/\s+/g, ' ').trim();
+  return createHash('sha256').update(normalised).digest('hex');
+}
+
+/**
+ * Records a thread seen in the history list. Turns are not captured here — a
+ * list harvest only learns that a conversation exists and what it is called.
+ */
+export function upsertThreadFromList(
+  externalId: string,
+  title: string,
+  url: string | null,
+  listRank: number,
+): UpsertResult {
+  const now = new Date().toISOString();
+  const existing = db
+    .prepare('SELECT id, title FROM chats WHERE external_id = ?')
+    .get(externalId) as unknown as { id: number; title: string | null } | undefined;
+
+  if (existing) {
+    // last_seen_at moves on every sighting; title is refreshed in case Google
+    // ever revises it, but user_title is never touched — a name typed by hand
+    // must survive re-harvesting.
+    // list_rank is refreshed too: a thread that gained a turn moves to the top
+    // of Google's list, and that reordering is the whole change signal.
+    db.prepare(
+      'UPDATE chats SET title = ?, url = ?, last_seen_at = ?, list_rank = ? WHERE id = ?',
+    ).run(title, url, now, listRank, existing.id);
+    return { created: false, titleChanged: (existing.title ?? '') !== title };
+  }
+
+  db.prepare(
+    `INSERT INTO chats
+       (folder_id, external_id, content_key, url, title, started_at, last_seen_at, source,
+        raw_json, list_rank)
+     VALUES (NULL, ?, ?, ?, ?, NULL, ?, 'harvest', ?, ?)`,
+  ).run(externalId, contentKeyFor(title), url, title, now, JSON.stringify({ title }), listRank);
+  return { created: true, titleChanged: false };
+}
+
+/** external_ids already stored, so a harvest can tell new from seen. */
+export function knownExternalIds(): Set<string> {
+  const rows = db.prepare('SELECT external_id FROM chats').all() as unknown as {
+    external_id: string;
+  }[];
+  return new Set(rows.map((r) => r.external_id));
 }
 
 /* --------------------------------------------------------------- dev seed */

@@ -1,7 +1,18 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { AiModeStatus, NotebookApi } from './shared/types';
+import type { AiModeStatus, HarvestProgress, NotebookApi } from './shared/types';
 
 const api: NotebookApi = {
+  confirm: (message, detail) => ipcRenderer.invoke('ui:confirm', message, detail),
+
+  harvestThreadList: () => ipcRenderer.invoke('harvest:threadList'),
+  cancelHarvest: () => ipcRenderer.invoke('harvest:cancel'),
+  onHarvestProgress: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: HarvestProgress) =>
+      callback(progress);
+    ipcRenderer.on('harvest:progress', listener);
+    return () => ipcRenderer.removeListener('harvest:progress', listener);
+  },
+
   listFolders: () => ipcRenderer.invoke('folders:list'),
   createFolder: (parentId, name) => ipcRenderer.invoke('folders:create', parentId, name),
   renameFolder: (id, name) => ipcRenderer.invoke('folders:rename', id, name),
@@ -15,6 +26,10 @@ const api: NotebookApi = {
   deleteChat: (id) => ipcRenderer.invoke('chats:delete', id),
 
   getAiModeStatus: () => ipcRenderer.invoke('aiMode:getStatus'),
+  navigateAiMode: (url) => ipcRenderer.invoke('aiMode:navigate', url),
+  aiModeGoBack: () => ipcRenderer.invoke('aiMode:back'),
+  aiModeGoForward: () => ipcRenderer.invoke('aiMode:forward'),
+  aiModeReload: () => ipcRenderer.invoke('aiMode:reload'),
   setAiModeHidden: (hidden) => ipcRenderer.invoke('aiMode:setHidden', hidden),
   onAiModeStatus: (callback) => {
     // The view may have already fired its first load event before this

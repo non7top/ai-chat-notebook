@@ -3,6 +3,8 @@ import type { AiModeStatus, ChatDetail, ChatScope, ChatSummary, Folder } from '.
 import ChatList from './ChatList';
 import ChatReader from './ChatReader';
 import FolderTree from './FolderTree';
+import HarvestBar from './HarvestBar';
+import PanelBar from './PanelBar';
 
 export default function App() {
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -66,6 +68,8 @@ export default function App() {
         </button>
       </div>
 
+      <HarvestBar onNeedPanel={() => setPanelVisible(true)} onFinished={reloadAll} />
+
       {error && (
         <div className="banner error">
           {error}
@@ -75,14 +79,9 @@ export default function App() {
         </div>
       )}
 
-      {panelVisible && (
-        <p className={status.error ? 'status-line error' : 'status-line'}>
-          {status.error
-            ? `AI Mode panel failed to load: ${status.error}`
-            : status.connected
-              ? status.url
-              : 'Loading AI Mode…'}
-        </p>
+      {panelVisible && <PanelBar status={status} />}
+      {panelVisible && status.error && (
+        <p className="status-line error">AI Mode panel failed to load: {status.error}</p>
       )}
 
       <div className="panes">

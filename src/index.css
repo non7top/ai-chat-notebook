@@ -345,3 +345,93 @@ button:disabled {
   border: 1px solid var(--border);
   padding: 0.25rem 0.5rem;
 }
+
+/* --------------------------------------------------------------- harvesting */
+
+.harvest-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+  font-size: 0.78rem;
+}
+
+.harvest-status {
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.harvest-status.error {
+  color: #b00;
+}
+
+.harvest-track {
+  flex: 1;
+  height: 4px;
+  background: #e5e7eb;
+  border-radius: 2px;
+  overflow: hidden;
+  min-width: 60px;
+}
+
+.harvest-fill {
+  display: block;
+  height: 100%;
+  background: #22c55e;
+  transition: width 0.2s linear;
+}
+
+/* Inline naming, used everywhere a window.prompt would otherwise be — Electron
+   throws "prompt() is not supported." rather than showing one. */
+.name-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.1rem 0.3rem;
+  border: 1px solid #3b82f6;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.reader-name-input {
+  font-size: 1rem;
+}
+
+/* ------------------------------------------------------- embedded panel bar */
+
+.panel-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.3rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.panel-bar button {
+  padding: 0.15rem 0.4rem;
+  font-size: 0.8rem;
+  flex: none;
+}
+
+.panel-url {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #fff;
+}
+
+.panel-url:focus {
+  border-color: #3b82f6;
+  outline: none;
+}

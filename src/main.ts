@@ -5,6 +5,7 @@ import { initDb, seedDevData } from './main/db';
 import { registerIpcHandlers } from './main/ipc';
 import {
   createAiModeView,
+  getAiModeNavState,
   openAiModeDevTools,
   setLastAiModeStatus,
 } from './main/aiModeView';
@@ -124,9 +125,16 @@ const createWindow = () => {
     setLastAiModeStatus(status);
     mainWindow.webContents.send('aiMode:status', status);
   };
-  aiModeView.webContents.on('did-finish-load', () => {
-    sendStatus({ connected: true, url: aiModeView.webContents.getURL() });
-  });
+  const sendNavState = () => {
+    const nav = getAiModeNavState();
+    sendStatus({ connected: true, ...nav });
+  };
+  aiModeView.webContents.on('did-finish-load', sendNavState);
+  // AI Mode rewrites its own URL without a page load — that is how mtid
+  // appears when a thread is opened. Without this the address display would
+  // sit on the landing URL forever and look broken.
+  aiModeView.webContents.on('did-navigate', sendNavState);
+  aiModeView.webContents.on('did-navigate-in-page', sendNavState);
   aiModeView.webContents.on(
     'did-fail-load',
     (_event, _code, errorDescription, _url, isMainFrame) => {
