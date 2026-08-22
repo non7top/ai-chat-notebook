@@ -47,6 +47,39 @@ import { getAiModeNavState, getAiModeWebContents } from './aiModeView';
 //   capturing from a stale copy. Every read asserts the container is visible
 //   and filters on offsetParent.
 //
+// CONVERSATIONS *ARE* ADDRESSABLE — via mstk, not mtid (corrected 2026-08-22)
+// - A Google Takeout export of "My Activity > AI Mode" contains, per entry, a
+//   link of the form:
+//     https://www.google.com/?udm=50&mstk=<long token>&csuir=1&q=<query>&aep=146
+// - Navigating to one OPENS THE EXISTING CONVERSATION. Verified: loading a
+//   Takeout link produced mtid=_buEaoyBM8mUhvcP45aw2A4, and that id was already
+//   in the archive from the sidebar harvest, with exactly one matching title. It
+//   did not mint a new thread.
+// - So mstk is the durable handle. The note below concluding it was "session
+//   state" was wrong, and the failed experiment that produced it used the wrong
+//   URL shape: mtid= plus q= with NO mstk. mtid alone is not an address.
+//
+// WHAT THIS UNLOCKS, and it is a lot
+// - Capture can navigate straight to a conversation instead of scrolling a
+//   virtualised sidebar and clicking a row — removing the slowest and most
+//   fragile step in the pipeline.
+// - Resume becomes a navigation rather than a click-through.
+// - Takeout entries can be joined to harvested conversations EXACTLY rather
+//   than by query text: open the link, read the mtid it lands on, match on that.
+//   One page load per entry buys an exact key, which is what the five
+//   duplicate-prompt groups need — text matching cannot separate them.
+//
+// SECURITY: these links reportedly open WITHOUT authentication. If so an mstk
+// URL is a bearer capability for reading that conversation, so a Takeout export
+// is sensitive well beyond its text, and storing these URLs means storing
+// read-access tokens. Do not surface them in shareable output. (Reported by the
+// app's owner; not independently verified from a signed-out session.)
+//
+// SUPERSEDED — kept because the failure it describes is real and instructive:
+// constructing mtid= plus q= WITHOUT mstk does not reopen anything, and Google
+// runs q= as a fresh query, which adds a duplicate conversation to the user's
+// history. It did exactly that during testing. Never build that URL shape.
+//
 // RESUMING A THREAD — mtid URLs DO NOT WORK, and trying is destructive
 // - The list buttons have no href anywhere. An open thread's URL does carry
 //   /search?udm=50&mtid=<data-thread-id>&q=<first query>, which looked like an
