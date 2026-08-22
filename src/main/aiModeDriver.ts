@@ -665,7 +665,11 @@ const READ_TURNS_SCRIPT = `
           role: 'user',
           // Prefer the precise body element; fall back to the de-chromed block.
           text: clean(body) || clean(copy),
-          html: null,
+          // HTML is kept for user turns too, not just answers. A question can
+          // carry an uploaded reference image, and with html null its image had
+          // nowhere to render — the file was archived but invisible, which for
+          // an image-generation conversation loses the actual subject.
+          html: copy.innerHTML,
           images: imagesIn(userEl),
           stamp: clean(userEl.querySelector('div.UYpEO div.kwdzO')) || null,
         });
