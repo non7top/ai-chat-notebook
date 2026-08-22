@@ -128,6 +128,20 @@ contents. Use **Debug → Open AI Mode DevTools** in the app menu — that is th
 only way to see console output from injected scripts or to run diagnostic JS
 against the real page.
 
+### Mapping the AI Mode DOM
+
+The harvester is blocked on knowing the real page structure, and none of it
+should be guessed. `scripts/recon-aimode.js` is a read-only probe for that:
+open **Debug → Open AI Mode DevTools** while signed in and looking at your
+conversation history, paste the script into that console, and it prints (and
+copies) a JSON summary — candidate history controls, repeated `data-*`
+attributes that could carry a stable thread id, conversation-looking links,
+turn containers with their ancestor chains, and image hosts with their
+lazy-loading attributes.
+
+It assumes no selectors and clicks nothing. Chromium blocks the first paste
+into a DevTools console; type `allow pasting` at the prompt once if it refuses.
+
 ### Remote debugging (CDP)
 
 For driving the app from outside — including inspecting the live AI Mode page
