@@ -6,78 +6,96 @@ import { getAiModeWebContents } from './aiModeView';
 // because none of it is documented anywhere and all of it is guessable-wrong —
 // the same convention PromptLoom uses in perchanceDriver.ts.
 //
-// Page: https://www.google.com/search?udm=50 (the landing URL is right; the
-// live tab also carried &atvm=2, which appears incidental).
+// Page: https://www.google.com/search?udm=50
 //
 // THREAD LIST (the history sidebar)
 // - Each thread is `button.qqMZif[data-thread-id]`, inside `li.j8c53`, inside
-//   `ul.BqVL3e`.
-// - data-thread-id looks stable and opaque, e.g. "dRKJaoixPPWphvcPoYOp6QM".
-//   This is the dedupe key; no content hashing fallback is needed.
-// - The button's own text is TRUNCATED for display. The full title lives on a
-//   sibling `button.fMed7[aria-label]` as "more options for <full title>" —
-//   strip that prefix rather than reading the visibly-clipped text.
-// - THREADS HAVE NO href ANYWHERE. Not on the button, not on an ancestor, not
-//   on a descendant, and the page URL does not change to carry a thread id.
-//   So Resume cannot navigate by URL: it has to click
-//   `button.qqMZif[data-thread-id="..."]`. This was the single biggest open
-//   question in the plan and the answer is the expensive one.
+//   `ul.BqVL3e`. The scroll container is `div.cIl10d` (overflow-y: auto).
+// - data-thread-id is stable and opaque, e.g. "rMyIarywKpDRwcsPh6rA6AY".
+// - The button text is TRUNCATED. The full title is on a sibling
+//   `button.fMed7[aria-label]` as "more options for <full title>".
+// - Each row may also carry a thumbnail `img.RKMwI` from
+//   lens.usercontent.google.com. These are SIDEBAR THUMBNAILS displayed at
+//   24x24, not conversation content — an earlier pass mistook them for the
+//   conversation's own images.
 //
-// SCROLLING / PAGINATION
-// - The list's scroll container is `div.cIl10d` (overflow-y: auto). It is the
-//   only scrollable element on the page containing threads.
-// - 60 threads were in the DOM with the sidebar open, against a history of
-//   several hundred. So the list paginates and `div.cIl10d` is what to scroll.
+// THE LIST IS VIRTUALISED
+// - Measured with the sidebar open: clientHeight 459, scrollHeight 12052, and
+//   only ~20 thread buttons in the DOM. At ~40px per row that scroll height
+//   implies roughly 300 threads.
+// - The rendered count is a moving window, not a total: 10, then 60, then 20
+//   were observed at different moments on the same list.
+// - So the full list can never be read in one pass. Harvesting must scroll
+//   `div.cIl10d` and accumulate by data-thread-id across renders, and must not
+//   treat "no new ids this pass" as the end without also checking scrollTop
+//   against scrollHeight.
 //
 // VISIBILITY — the trap
-// - `div.cIl10d` is `display: none` while the sidebar is closed, and the 60
-//   thread buttons STAY IN THE DOM. querySelectorAll('[data-thread-id]')
-//   therefore returns a full list of elements with zero-size boxes and
-//   offsetParent === null, which reads as "found everything" while nothing is
-//   actually on screen.
-// - Observed live: 60 total, 0 visible. Every read must either assert the
-//   container is visible or filter on offsetParent !== null. A harvester that
-//   skipped this would appear to work and quietly capture from a stale,
-//   never-updating copy.
+// - `div.cIl10d` is `display: none` while the sidebar is closed, and the
+//   thread buttons STAY IN THE DOM with zero-size boxes and offsetParent null.
+//   Observed live as 60 total / 0 visible.
+// - A blind querySelectorAll therefore reads as "found everything" while
+//   capturing from a stale copy. Every read asserts the container is visible
+//   and filters on offsetParent.
+//
+// RESUMING A THREAD — corrected
+// - The list buttons genuinely have no href, on the button or any ancestor or
+//   descendant. An earlier note concluded from that alone that Resume could
+//   only ever click. That was wrong.
+// - Once a thread is OPEN, the page URL carries it:
+//     /search?udm=50&mtid=<data-thread-id>&q=<original query>&aep=26...
+//   Verified: mtid=rMyIarywKpDRwcsPh6rA6AY matched that thread's
+//   data-thread-id exactly, and q= held its first query.
+// - So Resume most likely just navigates to that URL, and the click path is
+//   the fallback rather than the only option. NOT yet confirmed by actually
+//   navigating to a constructed URL — that is the one test still owed, and it
+//   decides how much of the harvester needs to drive the sidebar at all.
 //
 // SIDEBAR CONTROLS
 // - Open/close: `button.SbLVJc[aria-label="AI Mode history"]`, and
 //   `a.ilLN6b.FyY3Xc[title=" AI Mode history "]` (note the padding spaces).
-//   Labels "Open sidebar" / "Close sidebar" appear on `.xYn6Gf` elements.
+//   "Open sidebar" / "Close sidebar" labels appear on `.xYn6Gf` elements.
 // - New conversation: `button.UTNPFf[aria-label="New thread"]`.
-// - Thread titles are also mirrored into `.Se0jFd` and `.xYn6Gf.sJ0xEf`
-//   inside the sidebar. These are NOT conversation turns — mistaking them for
-//   turns is easy, because a long first query becomes a long "title".
+// - Thread titles are mirrored into `.Se0jFd` and `.xYn6Gf.sJ0xEf` in the
+//   sidebar. These are NOT turns — a long first query reads as a long title,
+//   which is exactly how an earlier pass misidentified them.
 //
-// IMAGES
-// - Generated images are `img.RKMwI`, served from
-//   https://lens.usercontent.google.com/image?vsrid=...
-// - No `loading="lazy"`, no `data-src`, no srcset placeholder — the src is the
-//   real URL and is already loaded by the time the turn is rendered.
-// - Whether that host serves them without the session's cookies is NOT yet
-//   established; the asset pipeline must be tested against it rather than
-//   assumed (see the plan's note on fetching via net.fetch bound to the
-//   persist:google session).
+// IMAGES — three different kinds, three different problems
+// - User-uploaded (Lens) images: `img.taqkMe.Tbpky` with
+//   alt="Visually searched image", src is a `data:image/jpeg;base64,...` URI.
+//   These need no fetching at all; the bytes are already in the DOM.
+// - Embedded Google Maps tiles: `blob:https://www.google.com/<uuid>` inside
+//   `div.BOZmjd.Q6cQSe` wrappers ("Map data ©2026 Google").
+//   blob: URLs are scoped to the document that created them, so the main
+//   process CANNOT fetch these however the session is configured. They must be
+//   read in-page and pushed over the preload bridge as data URIs, or skipped
+//   as page furniture rather than conversation content.
+// - Generated images: seen only as sidebar thumbnails so far
+//   (lens.usercontent.google.com). Their form inside an open conversation has
+//   NOT been observed yet, so whether they are fetchable URLs or blobs is
+//   still unknown — and it decides whether the asset pipeline can use
+//   net.fetch at all.
+//
+// A USER TURN
+// - The query text appears in a bare `span` under
+//   `.VndcI.veK2kb` > `.sUKAcb` > `.AdmSkc` > `.tbIZh.wQN2Jd.Odbbif` > `.xEFZqe`.
+//   A lead, not a conclusion: the matching AI-answer container has not been
+//   pinned down.
 //
 // FRAMES / CONTEXTS
-// - The conversation and history both live in the TOP-LEVEL frame. The only
-//   child frame of interest is an ogs.google.com account widget, which is
-//   irrelevant. So nodeIntegrationInSubFrames stays off, unlike PromptLoom.
-// - CDP evaluation landed in "Electron Isolated Context #2" (the preload's
-//   isolated world) and could read the DOM fine, as expected — but page
-//   globals would not be visible from there. executeJavaScript from the main
-//   process runs in the main world, so this only matters for preload code.
+// - Conversation and history both live in the TOP-LEVEL frame. The only child
+//   frame is an ogs.google.com account widget. So nodeIntegrationInSubFrames
+//   stays off, unlike PromptLoom.
 //
 // STILL UNKNOWN — deliberately not guessed
-// - The per-turn DOM of an OPEN conversation: the wrapper element, and how a
-//   user turn is distinguished from an AI turn. Every attempt to capture this
-//   caught the page mid-change, and the classes that looked like turns
-//   (.Se0jFd, .xYn6Gf.sJ0xEf) turned out to be sidebar titles.
-// - Whether scrolling div.cIl10d actually appends more threads, and what the
-//   end-of-list signal is.
+// - The per-turn wrapper of an open conversation, and how a user turn is
+//   distinguished from an AI turn.
+// - What a generated image looks like inside a conversation (URL or blob).
+// - Whether navigating to a constructed ?mtid= URL really opens that thread.
 //
-// The harvester is not written until those two are answered, for exactly the
-// reason the visibility trap above demonstrates.
+// The harvester is not written until those are answered. The virtualisation
+// and visibility findings above are why: both would have produced a harvester
+// that looked like it worked while capturing a fraction of the data.
 
 const THREAD_BUTTON_SELECTOR = 'button.qqMZif[data-thread-id]';
 const THREAD_LIST_SCROLLER = 'div.cIl10d';

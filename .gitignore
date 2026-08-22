@@ -102,3 +102,8 @@ data/
 
 # Core dumps from crashed dev-container Electron processes
 core
+
+# Throwaway CDP probe queries (scripts/cdp-eval.mjs --file=.q-*.js). They have
+# to live in the repo because that is what the dev container mounts, but they
+# are scratch and must not be linted or committed.
+.q-*.js
