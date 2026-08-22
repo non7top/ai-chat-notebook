@@ -143,10 +143,14 @@ import { getAiModeWebContents } from './aiModeView';
 //   has only class=j8c53, and the button has id (a "BAyyLe" prefix plus the
 //   thread id), data-thread-id, class, and data-ved (an opaque tracking token).
 //   No datetime, no data-ts, no "Today"/"Yesterday" group headers.
-// - BUT the list is ordered by recent activity (per the app's owner, who has
-//   watched it behave that way — Google clearly holds the date server-side even
-//   though it never renders it). That is the signal, and it is a good one:
-//   anything new or updated surfaces at the TOP.
+// - BUT the list is ordered by recent activity, and that is the signal.
+//   CONFIRMED by experiment: a turn was added to thread
+//   -CKIasHWF62phvcP7bHs4Ak while it sat at rank 8; after an app restart and a
+//   fresh page load it was at rank 0, with every other thread keeping its
+//   relative order and shifting down by one.
+// - So "recent activity" means LAST TURN, not thread creation — that thread was
+//   older than several it overtook. Google holds the timestamp server-side and
+//   uses it to sort, while never rendering it (see TIMESTAMPS below).
 // - So an incremental re-harvest does not need to re-open ~300 threads. Read
 //   the list from the top and treat the leading run as changed; stop once
 //   several consecutive already-known ids appear in their previous relative
@@ -162,12 +166,17 @@ import { getAiModeWebContents } from './aiModeView';
 //   scrollTop 0 and an unchanged top row. Its data-thread-id and its q= were
 //   also unchanged, so the update landed in place — the list simply does not
 //   reflect it.
-// - Consequence: position is stale the moment anything is added. The recency
-//   ordering is only trustworthy on a freshly loaded list, so an incremental
-//   harvest must reload (or at least re-open the sidebar) before reading order,
-//   and must never infer "nothing changed" from a list it has been watching.
-// - Still not concluded: whether "recent activity" means last turn or thread
-//   creation, and whether a reload really does re-sort.
+// - Consequence: position is stale the moment anything is added, but a RELOAD
+//   fixes it. Both halves are measured — no live re-sort, correct order after a
+//   fresh load. So an incremental harvest must reload before reading order, and
+//   must never infer "nothing changed" from a list it has been sitting on.
+// - Which makes the incremental shortcut sound: reload, read from the top, and
+//   the new-or-updated threads are the leading prefix. Stop once several
+//   consecutive known ids appear in their previous relative order.
+// - Pair it with a stored turn count and last-turn hash anyway, re-verified
+//   free whenever a thread is opened (Resume, or a new question in it), so a
+//   future change in Google's ordering degrades to a slow full sweep rather
+//   than to silently missed updates.
 // - If real timestamps ever become necessary, the page links to
 //   myactivity.google.com/search-services/history/search, which does render
 //   dates per item. A different page with its own DOM, so a separate job.
@@ -209,9 +218,7 @@ import { getAiModeWebContents } from './aiModeView';
 // - Whether a long conversation's older turns are lazily rendered, which would
 //   mean scrolling the conversation too, not just the thread list. Suspected:
 //   in one conversation only the newest exchange had its images rendered.
-// - Whether a fresh page load re-sorts the list by recent activity. It
-//   demonstrably does not re-sort live (see below), so this is the only way the
-//   ordering signal is usable at all.
+//   (Both list ordering questions are now settled — see CHANGE DETECTION.)
 //
 // The harvester is not written until those are answered. The virtualisation
 // and visibility findings above are why: both would have produced a harvester
