@@ -510,6 +510,15 @@ const SCROLL_TO_THREAD_SCRIPT = (externalId: string) => `
     // an invalid identifier unquoted.
     const find = () => document.querySelector('button.qqMZif[data-thread-id="' + wanted + '"]');
 
+    // The sidebar animates open, and until it has laid out clientHeight is 0.
+    // Scrolling by 0.8 * 0 moves nothing, which an earlier version read as
+    // "reached the bottom" and gave up on the first iteration — reporting a row
+    // as missing while it sat in a list of 300. Wait for real geometry first.
+    for (let i = 0; i < 20 && scroller.clientHeight === 0; i += 1) await wait(250);
+    if (scroller.clientHeight === 0) {
+      return { ok: false, error: 'Thread list never laid out (clientHeight stayed 0)' };
+    }
+
     scroller.scrollTop = 0;
     await wait(400);
 
@@ -520,10 +529,25 @@ const SCROLL_TO_THREAD_SCRIPT = (externalId: string) => `
         await wait(150);
         return { ok: true, steps: step };
       }
-      const before = scroller.scrollTop;
-      scroller.scrollTop = Math.min(before + scroller.clientHeight * 0.8, scroller.scrollHeight);
-      // Bottom reached and still not found — report rather than spin.
-      if (scroller.scrollTop === before) break;
+      // Bottom detected from geometry, not from "the scroll didn't move".
+      // Those are different things, and conflating them is what broke this.
+      const atBottom =
+        scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8;
+      if (atBottom) {
+        // One last look: the final window may have rendered on this settle.
+        await wait(400);
+        const last = find();
+        if (last && last.offsetParent !== null) {
+          last.scrollIntoView({ block: 'center' });
+          await wait(150);
+          return { ok: true, steps: step };
+        }
+        break;
+      }
+      scroller.scrollTop = Math.min(
+        scroller.scrollTop + scroller.clientHeight * 0.8,
+        scroller.scrollHeight,
+      );
       await wait(350);
     }
     return { ok: false, error: 'Thread row never rendered: ' + wanted };
@@ -552,10 +576,19 @@ export async function openThreadById(externalId: string): Promise<void> {
 // message. Each was seen welded onto real text during recon — reading the outer
 // element yields "CopiedCopyEditможешь ей ноги..." and similar.
 const TURN_CHROME_SELECTORS = [
-  'div.SK38Xc', // Copied / Copy / Edit
-  'div.NyIrK.wcKEcb', // Share / Download
-  'div.HvurC', // feedback widget
-  'div.DBd2Wb', // AI disclaimer + share-link UI
+  // Every control, by role rather than by class. This is the load-bearing rule:
+  // a turn's text should never contain a button's label, and Google ships the
+  // same Share/Download cluster under more than one class name — stripping
+  // div.NyIrK.wcKEcb removed one and left an identical one under
+  // div.h3dxKe.X0Xglb, so "ShareDownload" still landed in the captured answer.
+  // Chasing class names loses; chasing buttons does not.
+  'button',
+  '[role="button"]',
+  // Non-button chrome, which needs class names because it has no role.
+  'div.SK38Xc', // Copied / Copy / Edit wrapper
+  'div.NyIrK.wcKEcb', // Share / Download wrapper
+  'div.HvurC', // feedback widget ("Saved time / Helpful / ...")
+  'div.DBd2Wb', // AI disclaimer + share-link UI (877 chars of it)
   'div.UYpEO', // the timestamp, captured separately
 ];
 
@@ -581,9 +614,27 @@ const READ_TURNS_SCRIPT = `
 
     // Strip chrome from a COPY, so the live page is never modified — this runs
     // against the user's real session.
+    //
+    // script/style/noscript/template are removed too, and that is not
+    // defensive tidying: textContent includes the SOURCE of inline scripts, so
+    // without this a captured answer came back as
+    // "sn._setImageSrc('img-XNmJav...','https://lens.usercontent...')" —
+    // Google's own image-loading code stored as the AI's reply.
+    const isCode = (el) =>
+      el.tagName === 'SCRIPT' ||
+      el.tagName === 'STYLE' ||
+      el.tagName === 'NOSCRIPT' ||
+      el.tagName === 'TEMPLATE';
+
     const stripped = (el) => {
+      // querySelectorAll never matches the root itself, so a root that IS a
+      // script would keep all of its source. Handle that case explicitly.
+      if (isCode(el)) return document.createElement('div');
       const copy = el.cloneNode(true);
       for (const junk of Array.from(copy.querySelectorAll(chromeSel))) junk.remove();
+      for (const code of Array.from(copy.querySelectorAll('script,style,noscript,template'))) {
+        code.remove();
+      }
       return copy;
     };
 
@@ -602,9 +653,21 @@ const READ_TURNS_SCRIPT = `
           stamp: clean(userEl.querySelector('div.UYpEO div.kwdzO')) || null,
         });
       }
-      // The AI answer is the pair's other child — unclassed, and identified by
-      // position rather than a class name, which is the only stable handle.
-      const aiEl = Array.from(pair.children).find((c) => c !== userEl && clean(c).length > 0);
+      // The AI answer is the pair's other child. It carries no class of its own,
+      // so it is identified by CONTENT: the sibling with the most real text
+      // once chrome and code are stripped.
+      //
+      // Code elements are excluded by tag, not just out-scored. A turn pair
+      // observed live had three children — the user div, a bare <script>
+      // carrying 357 characters of Google's image-loading source, and the real
+      // answer. Scoring alone picked the script, because stripping the 877-char
+      // disclaimer block out of the real answer dropped it BELOW the script.
+      const aiEl = Array.from(pair.children)
+        .filter((c) => c !== userEl && !isCode(c))
+        .map((c) => ({ el: c, score: clean(stripped(c)).length + c.querySelectorAll('img').length }))
+        .sort((a, b) => b.score - a.score)
+        .filter((c) => c.score > 0)
+        .map((c) => c.el)[0];
       if (aiEl) {
         const copy = stripped(aiEl);
         turns.push({
