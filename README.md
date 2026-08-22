@@ -183,8 +183,24 @@ into Google again in that instance.
 For driving the app from outside — including inspecting the live AI Mode page
 without sitting at the machine — start it with a debugging port:
 
+```powershell
+& "$env:LOCALAPPDATA\Programs\AI Chat Notebook\AIChatNotebook.exe" --devtools-port=9222
 ```
-"AI Chat Notebook.exe" --devtools-port=9222
+
+Two things that make the obvious version of that command fail:
+
+- The executable is `AIChatNotebook.exe`, **not** `AI Chat Notebook.exe`.
+  `electron-builder.yml` pins `executableName` separately from `productName`,
+  so the install *directory* has spaces and the binary does not.
+- PowerShell needs the `&` call operator. Without it a quoted path is parsed
+  as a string expression rather than a command, and `--devtools-port=9222`
+  then trips "The '--' operator works only on variables or on properties".
+  `cmd.exe` does not need `&`.
+
+If the install directory was changed at install time, locate it with:
+
+```powershell
+Get-ChildItem "$env:LOCALAPPDATA\Programs","$env:PROGRAMFILES" -Filter AIChatNotebook.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
 ```
 
 `NOTEBOOK_REMOTE_DEBUGGING_PORT=9222` does the same thing, for launches where
