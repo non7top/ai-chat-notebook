@@ -21,14 +21,23 @@ import { getAiModeWebContents } from './aiModeView';
 //
 // THE LIST IS VIRTUALISED
 // - Measured with the sidebar open: clientHeight 459, scrollHeight 12052, and
-//   only ~20 thread buttons in the DOM. At ~40px per row that scroll height
-//   implies roughly 300 threads.
-// - The rendered count is a moving window, not a total: 10, then 60, then 20
-//   were observed at different moments on the same list.
-// - So the full list can never be read in one pass. Harvesting must scroll
-//   `div.cIl10d` and accumulate by data-thread-id across renders, and must not
-//   treat "no new ids this pass" as the end without also checking scrollTop
-//   against scrollHeight.
+//   only ~20-40 thread buttons in the DOM at any instant. The rendered count is
+//   a moving window, not a total: 10, 20, 40 and 60 were all observed on the
+//   same list.
+// - CONFIRMED by scrolling it end to end (scripts/probe-paginate.js): stepping
+//   div.cIl10d down by 0.8 * clientHeight with ~700ms to settle, and
+//   accumulating a UNION of data-thread-id across steps, yielded exactly 300
+//   unique threads.
+// - It is pure DOM virtualisation, not server-side paging: scrollHeight was
+//   12052 at step 0 and still 12052 at the bottom, never growing. The container
+//   is sized for the whole history up front and rows are recycled through it.
+// - That gives a free completeness check, which matters more than it sounds:
+//   expected total ≈ scrollHeight / rowHeight (12052 / ~40 = 300). So the
+//   harvester can know how many threads it should end up with BEFORE it starts,
+//   and treat a short result as a failure rather than as "done". Without it the
+//   only stop signal is "no new ids for a while", which is exactly how a
+//   virtualised list quietly yields a fraction of itself.
+// - Accumulate by id across renders; never count what is rendered.
 //
 // VISIBILITY — the trap
 // - `div.cIl10d` is `display: none` while the sidebar is closed, and the
@@ -194,12 +203,15 @@ import { getAiModeWebContents } from './aiModeView';
 //   stays off, unlike PromptLoom.
 //
 // STILL UNKNOWN — deliberately not guessed
-// - Whether scrolling div.cIl10d actually appends more threads, and what the
-//   end-of-list signal is. This is the last thing blocking the harvester.
 // - Whether navigating to a constructed ?udm=50&mtid=<id>&q=<query> URL really
-//   opens that thread (it is what an opened thread's URL looks like).
+//   opens that thread (it is what an opened thread's URL looks like). Decides
+//   whether Resume navigates or has to drive the sidebar.
 // - Whether a long conversation's older turns are lazily rendered, which would
-//   mean scrolling the conversation too, not just the thread list.
+//   mean scrolling the conversation too, not just the thread list. Suspected:
+//   in one conversation only the newest exchange had its images rendered.
+// - Whether a fresh page load re-sorts the list by recent activity. It
+//   demonstrably does not re-sort live (see below), so this is the only way the
+//   ordering signal is usable at all.
 //
 // The harvester is not written until those are answered. The virtualisation
 // and visibility findings above are why: both would have produced a harvester
