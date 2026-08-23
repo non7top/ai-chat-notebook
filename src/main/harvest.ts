@@ -258,14 +258,31 @@ async function captureOneChat(chat: { id: number; externalId: string; title: str
  * identically, and a parallel implementation would drift on the first one of
  * them that changed.
  */
-async function storeRenderedThread(chatId: number): Promise<{
+async function storeRenderedThread(
+  chatId: number,
+  /**
+   * Turns already read from the page, when the caller has them.
+   *
+   * The link route verifies a reading against the export before storing
+   * anything, and without this it verified one reading and then took a SECOND
+   * one to store — two reads of a live page with a check in between, so what was
+   * approved and what was written were not guaranteed to be the same text. On a
+   * page still settling, or one midway through re-running a prompt, they would
+   * differ precisely when it matters. The reading that passed the check is the
+   * reading that gets stored.
+   */
+  alreadyRead?: CapturedTurn[],
+): Promise<{
   turns: number;
   images: number;
   skipped: number;
   failed: number;
 }> {
-  await waitForTurnsToSettle();
-  const { turns } = await readTurns();
+  let turns = alreadyRead;
+  if (!turns) {
+    await waitForTurnsToSettle();
+    turns = (await readTurns()).turns;
+  }
 
   // A conversation that shows user turns but no answer is still rendering, not a
   // conversation without answers. Refusing it leaves it in the queue for the
@@ -473,7 +490,8 @@ export async function captureFromEntryLink(entryId: number): Promise<LinkCapture
 
   // Only now is there a thread worth writing to.
   const chatId = entry.chatId ?? db.adoptSourceEntry(entry.id, null).chatId;
-  const stored = await storeRenderedThread(chatId);
+  // The very turns that were checked, not a fresh read of the page.
+  const stored = await storeRenderedThread(chatId, turns);
   db.noteChatSource(chatId, 'link');
   return { distance, rejected: null, chatId, turns: stored.turns, images: stored.images };
 }

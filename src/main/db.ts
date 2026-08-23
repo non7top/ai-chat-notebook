@@ -1145,6 +1145,12 @@ export interface EntryPlacement {
 export function placeEntry(
   row: TakeoutImportRow,
   openingCount: number,
+  /**
+   * The thread this entry was assigned in the whole-import pass, when its
+   * opening prompt is shared. Passed in rather than worked out here because the
+   * decision cannot be made one entry at a time: see resolveMatches.
+   */
+  resolved?: Map<string, { id: number; source: string }>,
 ): EntryPlacement {
   const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
   const key = contentKeyFor(opening);
@@ -1238,8 +1244,7 @@ export function placeEntry(
   // should.
   // Needs turns to compare: a Lens or blank record has no answer, so there is
   // nothing for the answer to decide with.
-  const byFingerprint =
-    ambiguous && row.turns.some((t) => t.role === 'ai') ? matchByFingerprint(key, row) : null;
+  const byFingerprint = ambiguous ? (resolved?.get(ref) ?? null) : null;
   if (byFingerprint) {
     return {
       ref,
@@ -1391,35 +1396,143 @@ export function planConversations(rows: TakeoutImportRow[]): ConversationPlan[] 
  */
 const MAX_MATCH_DISTANCE = 22;
 const REQUIRED_MARGIN = 6;
+/**
+ * The bound when there is only one candidate and therefore no second opinion.
+ *
+ * Tighter than MAX_MATCH_DISTANCE deliberately. With two or more candidates the
+ * decision rests on one being clearly closer than the others, which is evidence
+ * about this thread; with one candidate there is no comparison at all and the
+ * absolute number is doing the whole job. Measured on real material, the same
+ * thread read from two sources sat at 14 of 64 bits apart while unrelated
+ * threads sat at 24 — so 22 leaves room for a different conversation at 20 to be
+ * accepted on no evidence. 16 keeps the cross-source case and refuses that.
+ *
+ * Provisional, and known to be: those figures come from one pair, not a
+ * distribution. Until there is real paired data to calibrate against, the solo
+ * case is the one to be strict in, because getting it wrong attaches an entry to
+ * a conversation it has nothing to do with.
+ */
+const SOLO_MATCH_DISTANCE = 16;
 
-function matchByFingerprint(
-  key: string,
-  row: TakeoutImportRow,
-): { id: number; source: string } | null {
+interface ScoredCandidate {
+  id: number;
+  source: string;
+  distance: number;
+}
+
+/** Candidate threads for an opening, with their distance from one entry. */
+function scoreCandidates(key: string, row: TakeoutImportRow): ScoredCandidate[] {
   const mine = openingFingerprint(row.turns);
-  const candidates = db
-    .prepare(
-      `SELECT id, source, text_fingerprint FROM chats
-        WHERE content_key = ? AND merged_into IS NULL
-          AND text_fingerprint IS NOT NULL
-          AND external_id NOT LIKE 'takeout:%' AND external_id NOT LIKE 'entry:%'
-          AND NOT EXISTS (
-                SELECT 1 FROM chat_sources cs
-                  JOIN source_entries e ON e.id = cs.source_entry_id
-                 WHERE cs.chat_id = chats.id AND e.kind = 'takeout'
-              )`,
-    )
-    .all(key) as unknown as { id: number; source: string; text_fingerprint: string }[];
-  if (candidates.length === 0) return null;
-
-  const scored = candidates
-    .map((c) => ({ ...c, distance: hammingDistance(mine, c.text_fingerprint) }))
+  return (
+    db
+      .prepare(
+        `SELECT id, source, text_fingerprint FROM chats
+          WHERE content_key = ? AND merged_into IS NULL
+            AND text_fingerprint IS NOT NULL
+            AND external_id NOT LIKE 'takeout:%' AND external_id NOT LIKE 'entry:%'
+            AND NOT EXISTS (
+                  SELECT 1 FROM chat_sources cs
+                    JOIN source_entries e ON e.id = cs.source_entry_id
+                   WHERE cs.chat_id = chats.id AND e.kind = 'takeout'
+                )`,
+      )
+      .all(key) as unknown as { id: number; source: string; text_fingerprint: string }[]
+  )
+    .map((c) => ({
+      id: c.id,
+      source: c.source,
+      distance: hammingDistance(mine, c.text_fingerprint),
+    }))
     .sort((a, b) => a.distance - b.distance);
-  const best = scored[0];
-  if (best.distance > MAX_MATCH_DISTANCE) return null;
-  const runnerUp = scored[1];
-  if (runnerUp && runnerUp.distance - best.distance < REQUIRED_MARGIN) return null;
-  return { id: best.id, source: best.source };
+}
+
+/**
+ * Decides, for a whole import at once, which entry belongs to which thread.
+ *
+ * Done globally rather than per entry because per entry was order-dependent, and
+ * that is a bug rather than a rough edge: two entries sharing an opening prompt
+ * with one candidate thread were each placed on their own, so whichever the loop
+ * reached FIRST claimed the thread and the exclusion then pushed the other away.
+ * The closer entry did not win — the earlier one did. Which is precisely
+ * "confusing two threads that start the same way".
+ *
+ * Every (entry, thread) pair within a shared opening is scored, and the pairs are
+ * taken in order of distance: the most confident match is made first and removes
+ * both sides from consideration, so a merely-plausible pairing can never take a
+ * thread that a clearly better one wanted. A pair is only made when it also
+ * satisfies the margin — over the next-best thread for that entry, and over the
+ * next-best entry for that thread — so an ambiguous pairing is declined in both
+ * directions.
+ */
+export function resolveMatches(rows: TakeoutImportRow[]): Map<string, ScoredCandidate> {
+  const byKey = new Map<string, TakeoutImportRow[]>();
+  for (const row of rows) {
+    const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+    if (!opening.trim() || !row.turns.some((t) => t.role === 'ai')) continue;
+    const key = contentKeyFor(opening);
+    const group = byKey.get(key);
+    if (group) group.push(row);
+    else byKey.set(key, [row]);
+  }
+
+  const refOf = (row: TakeoutImportRow) => {
+    const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+    return takeoutEntryRef(
+      opening,
+      row.timestamp,
+      { turns: row.turns, images: row.imageFiles, href: row.href },
+      row.entryId,
+      row.fingerprints,
+    );
+  };
+
+  const decided = new Map<string, ScoredCandidate>();
+  for (const [key, group] of byKey) {
+    // Only entries competing for the same opening need this. A lone entry keeps
+    // the ordinary path, where the prompt itself is enough.
+    if (group.length < 2) continue;
+
+    const pairs: { ref: string; candidate: ScoredCandidate; rank: ScoredCandidate[] }[] = [];
+    for (const row of group) {
+      const scored = scoreCandidates(key, row);
+      for (const candidate of scored) pairs.push({ ref: refOf(row), candidate, rank: scored });
+    }
+    pairs.sort((a, b) => a.candidate.distance - b.candidate.distance);
+
+    const takenRefs = new Set<string>();
+    const takenChats = new Set<number>();
+    for (const pair of pairs) {
+      if (takenRefs.has(pair.ref) || takenChats.has(pair.candidate.id)) continue;
+      if (pair.candidate.distance > MAX_MATCH_DISTANCE) continue;
+
+      // Margin over this entry's next-best thread.
+      const nextForEntry = pair.rank.find(
+        (c) => c.id !== pair.candidate.id && !takenChats.has(c.id),
+      );
+      if (nextForEntry && nextForEntry.distance - pair.candidate.distance < REQUIRED_MARGIN) {
+        continue;
+      }
+      // Margin over the next-best entry for this thread — the direction that was
+      // missing entirely, and the one order-dependence hid.
+      const others = pairs.filter(
+        (p) => p.candidate.id === pair.candidate.id && p.ref !== pair.ref && !takenRefs.has(p.ref),
+      );
+      if (others.length > 0) {
+        const nextForChat = others[0].candidate.distance;
+        if (nextForChat - pair.candidate.distance < REQUIRED_MARGIN) continue;
+      }
+      // No second opinion in either direction: the absolute number is doing all
+      // the work, so it has to be a tighter one.
+      if (!nextForEntry && others.length === 0 && pair.candidate.distance > SOLO_MATCH_DISTANCE) {
+        continue;
+      }
+
+      decided.set(pair.ref, pair.candidate);
+      takenRefs.add(pair.ref);
+      takenChats.add(pair.candidate.id);
+    }
+  }
+  return decided;
 }
 
 /** How many entries in one import open with each prompt. */
@@ -1474,6 +1587,9 @@ export function previewTakeoutImport(rows: TakeoutImportRow[]): TakeoutPreview {
   const plans = planConversations(rows);
   const counts = new Map<string, number>();
   for (const plan of plans) counts.set(plan.key, (counts.get(plan.key) ?? 0) + 1);
+  // Resolved once for the whole import, so the sweep describes the assignment the
+  // import will actually make rather than a per-entry guess at it.
+  const resolved = resolveMatches(plans.map((p) => p.best));
 
   const preview: TakeoutPreview = {
     entries: rows.length,
@@ -1494,7 +1610,7 @@ export function previewTakeoutImport(rows: TakeoutImportRow[]): TakeoutPreview {
 
   const touched = new Set<number>();
   for (const plan of plans) {
-    const placement = placeEntry(plan.best, counts.get(plan.key) ?? 1);
+    const placement = placeEntry(plan.best, counts.get(plan.key) ?? 1, resolved);
     // Known when every snapshot of it is already stored; a conversation that has
     // grown since the last import is not "already known".
     if (placement.knownEntry) preview.alreadyKnown += 1;
@@ -1646,6 +1762,7 @@ export function importTakeoutConversations(
   // harvested thread.
   const counts = new Map<string, number>();
   for (const plan of plans) counts.set(plan.key, (counts.get(plan.key) ?? 0) + 1);
+  const resolved = resolveMatches(plans.map((p) => p.best));
 
   db.exec('BEGIN');
   try {
@@ -1659,7 +1776,7 @@ export function importTakeoutConversations(
 
       // One shared rule, so the sweep cannot promise an import that differs
       // from the one that runs.
-      const placement = placeEntry(row, counts.get(key) ?? 1);
+      const placement = placeEntry(row, counts.get(key) ?? 1, resolved);
       if (placement.ambiguous) result.ambiguousOpenings += 1;
 
       let chatId: number;
