@@ -71,6 +71,9 @@ jobs:
       - name: Check the source-entry model
         run: docker compose run --rm dev npm run check:sources
 
+      - name: Check title matching
+        run: docker compose run --rm dev npm run check:find
+
   build-windows:
     # electron-builder cross-builds its deb and rpm targets from Linux, but
     # not NSIS — that needs a real Windows host. (Established the hard way on

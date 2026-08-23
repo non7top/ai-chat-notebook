@@ -19,6 +19,7 @@ export default function App() {
   const [scope, setScope] = useState<ChatScope>({ kind: 'all' });
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [query, setQuery] = useState('');
   const [chat, setChat] = useState<ChatDetail | null>(null);
   const [status, setStatus] = useState<AiModeStatus>({ connected: false });
   const [panelVisible, setPanelVisible] = useState(false);
@@ -119,6 +120,9 @@ export default function App() {
             onScopeChange={(next) => {
               setScope(next);
               setSelectedId(null);
+              // Cleared with the scope: a filter left over from the last folder
+              // makes the new one look emptier than it is.
+              setQuery('');
             }}
             onChange={reloadAll}
             onError={setError}
@@ -134,7 +138,13 @@ export default function App() {
         ) : (
           <>
             <div className="pane pane-list">
-              <ChatList chats={chats} selectedId={selectedId} onSelect={setSelectedId} />
+              <ChatList
+                chats={chats}
+                selectedId={selectedId}
+                onSelect={setSelectedId}
+                query={query}
+                onQueryChange={setQuery}
+              />
             </div>
             <div className="pane pane-reader">
               {chat ? (

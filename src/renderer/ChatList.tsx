@@ -1,10 +1,14 @@
+import { useEffect, useMemo, useRef } from 'react';
 import type { ChatSummary } from '../shared/types';
 import { displayDate } from './dateDisplay';
+import { highlight, matchesTitle, termsOf } from './findTitles';
 
 interface Props {
   chats: ChatSummary[];
   selectedId: number | null;
   onSelect: (id: number) => void;
+  query: string;
+  onQueryChange: (query: string) => void;
 }
 
 // Only startedAt is a real conversation date. last_seen_at is when the
@@ -14,14 +18,71 @@ interface Props {
 // date at all (see the notes in aiModeDriver.ts), so a date appears only once
 // Takeout has supplied one.
 
-export default function ChatList({ chats, selectedId, onSelect }: Props) {
+export default function ChatList({ chats, selectedId, onSelect, query, onQueryChange }: Props) {
+  const box = useRef<HTMLInputElement>(null);
+  const terms = useMemo(() => termsOf(query), [query]);
+
+  // Ctrl+F reaches the box. Autofocusing it instead would take the keyboard
+  // away from the reader, which is where attention normally is.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === 'f') {
+        event.preventDefault();
+        box.current?.focus();
+        box.current?.select();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
+  const shown = useMemo(
+    () => (terms.length === 0 ? chats : chats.filter((c) => matchesTitle(c.title, terms))),
+    [chats, terms],
+  );
+
+  // Titles only, for now — and said out loud in the placeholder rather than
+  // left to be discovered, because a search that silently ignores the body text
+  // is worse than one that admits it does.
+  const find = (
+    <div className="find">
+      <input
+        ref={box}
+        className="find-input"
+        type="search"
+        value={query}
+        placeholder="Find in titles…"
+        onChange={(event) => onQueryChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            onQueryChange('');
+            box.current?.blur();
+          }
+        }}
+      />
+      {terms.length > 0 && (
+        <span className="find-count">
+          {shown.length} of {chats.length}
+        </span>
+      )}
+    </div>
+  );
+
   if (chats.length === 0) {
     return <p className="hint empty">No conversations here yet.</p>;
   }
 
   return (
     <div className="chat-list">
-      {chats.map((chat) => {
+      {find}
+      {/* Said explicitly. An empty list under a filled search box reads as "this
+          folder is empty", which is a different and more alarming claim. */}
+      {shown.length === 0 && (
+        <p className="hint empty">
+          No title matches “{query}”. {chats.length} conversation
+          {chats.length === 1 ? '' : 's'} here.
+        </p>
+      )}
+      {shown.map((chat) => {
         const started = displayDate(chat.startedAt);
         // Read from the live panel at some point, which is what separates a
         // conversation the app has really seen from one it only has the
@@ -51,7 +112,16 @@ export default function ChatList({ chats, selectedId, onSelect }: Props) {
             title={chat.title}
           >
             <span className={chat.title === '(untitled)' ? 'chat-title untitled' : 'chat-title'}>
-              {chat.title}
+              {/* Highlighted so it is obvious WHY a row survived the filter —
+                  with prompts this long, the matched words are often well past
+                  where the column is cut off. */}
+              {highlight(chat.title, terms).map((seg) =>
+                seg.hit ? (
+                  <mark key={`${seg.at}h`}>{seg.text}</mark>
+                ) : (
+                  <span key={seg.at}>{seg.text}</span>
+                ),
+              )}
             </span>
             <span className="chat-meta">
               {/* Prefixed and titled because every date here is INFERRED: it

@@ -662,3 +662,49 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ------------------------------------------------------------------- find */
+
+/* Sticky, because the list is hundreds of rows long and a search box that
+   scrolls away is unreachable exactly when the result set is large enough to
+   need narrowing. */
+.find {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.5rem;
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+}
+
+.find-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.find-input:focus {
+  border-color: #3b82f6;
+  outline: none;
+}
+
+.find-count {
+  font-size: 0.72rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* Underlined as well as tinted: the rows are dense and a background alone
+   reads as selection here. */
+.chat-title mark {
+  background: #fef08a;
+  color: inherit;
+  text-decoration: underline;
+}
