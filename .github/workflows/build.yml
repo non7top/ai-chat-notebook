@@ -84,6 +84,12 @@ jobs:
       - name: Check turn splitting
         run: docker compose run --rm dev npm run check:turns
 
+      # A simhash is only useful through its distance, so what is checked is an
+      # ordering: the same thread read from two sources must land closer than two
+      # different threads. Equality would prove nothing about that.
+      - name: Check the cross-source fingerprint
+        run: docker compose run --rm dev npm run check:fingerprint
+
       # The CDP proxy is the only authentication in front of an endpoint that
       # has none of its own. A lock that does not lock is worse than no lock,
       # because it invites forwarding a port in the belief that it is protected.

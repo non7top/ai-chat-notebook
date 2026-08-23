@@ -9,6 +9,8 @@
     "sourceMap": true,
     "outDir": "dist",
     "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
     "resolveJsonModule": true,
     "jsx": "react-jsx"
   },

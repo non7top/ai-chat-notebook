@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { openingFingerprint } from '../shared/fingerprint.ts';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -224,6 +225,13 @@ export function initDb(userDataPath: string): void {
   // preview would be worse than the over-count it replaces. Re-capturing a
   // conversation classifies its images properly.
   ensureColumn('assets', 'kind', 'kind TEXT');
+  // Simhash of the thread's opening exchange, for matching one thread across
+  // sources. Stored on both sides — written here for panel captures and kept on
+  // each entry for the export — but nothing matches on it yet: a threshold
+  // trades false matches against missed ones, and with ~300 threads still
+  // uncaptured there are no real pairs to choose one against. Collecting it now
+  // is what makes that choice possible later.
+  ensureColumn('chats', 'text_fingerprint', 'text_fingerprint TEXT');
   db.exec("UPDATE chats SET date_basis = 'takeout' WHERE started_at IS NOT NULL AND date_basis IS NULL");
   db.exec('CREATE INDEX IF NOT EXISTS chats_list_rank ON chats(list_rank);');
 
@@ -642,6 +650,12 @@ export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetT
           SET started_at = ?, date_basis = 'placeholder'
         WHERE id = ? AND started_at IS NULL`,
     ).run(new Date().toISOString(), chatId);
+    // Computed from the turns about to be written, so it describes what is
+    // stored rather than what was stored before.
+    db.prepare('UPDATE chats SET text_fingerprint = ? WHERE id = ?').run(
+      openingFingerprint(turns.map((t) => ({ role: t.role, text: t.text }))),
+      chatId,
+    );
     db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
     const insertMessage = db.prepare(
       'INSERT INTO messages (chat_id, seq, role, text, html) VALUES (?, ?, ?, ?, ?)',
@@ -1327,6 +1341,11 @@ export function importTakeoutConversations(
           // clone case by a factor of sixty-five.
           fingerprints: row.fingerprints ?? null,
           entryId: row.entryId ?? null,
+          // The cross-source key, computed the same way on both sides. See
+          // src/shared/fingerprint.ts for why it is text and not markup: an
+          // image arrives re-encoded and renamed, and the export's own token
+          // does not exist outside the export.
+          textFingerprint: openingFingerprint(row.turns),
         }),
         now,
       );
