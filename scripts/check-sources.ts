@@ -72,13 +72,23 @@ db.upsertThreadFromList(
 const summary = db.importTakeoutConversations(rows as never);
 console.log('import:', JSON.stringify(summary));
 
-const harvested = db.listChats({ kind: 'all' }).find((c) => c.title.startsWith('how do sprites'));
+// Identified by SOURCE, not by title. An imported thread takes its opening
+// prompt as its title, so the sidebar-listed thread and the imported one share
+// one — and .find then returned whichever the list happened to order first,
+// which made this check depend on the sort.
+const harvested = db.listChats({ kind: 'all' }).find((c) => c.sources.includes('harvest'));
 console.log(
   'harvested chat after import:',
   harvested && `${harvested.id}:${harvested.messageCount}t:${harvested.sources}`,
 );
 
-const chats = db.listChats({ kind: 'all' }).filter((c) => c.id !== harvested?.id);
+// Chosen by turn count, not by list position. Picking chats[0] made this check
+// depend on the list's ORDER BY, so changing the sort broke it while nothing
+// about gluing had changed.
+const chats = db
+  .listChats({ kind: 'all' })
+  .filter((c) => c.id !== harvested?.id)
+  .sort((a, b) => b.messageCount - a.messageCount);
 console.log('chats after import:', chats.length, chats.map((c) => `${c.id}:${c.messageCount}t`).join(' '));
 
 const first = chats[0];
@@ -95,15 +105,28 @@ console.log('similar to', first.id, '->', db.similarChats(first.id).map((c) => c
 // conversation with its own id and its own link, not as an orphan.
 const other = chats.find((c) => c.id !== first.id);
 if (!other) throw new Error('expected two conversations');
+const keeperEntriesBefore = db.sourceEntriesForChat(first.id).filter((e) => e.linked).length;
+const loserEntriesBefore = db.sourceEntriesForChat(other.id).filter((e) => e.linked).length;
 console.log('merge:', JSON.stringify(db.mergeChats(first.id, [other.id])));
 console.log('chats after glue:', db.listChats({ kind: 'all' }).length);
 
 // Gluing must move the loser's entries onto the keeper: a conversation with
 // three entries attached is what a glue of three IS, and the keeper's list is
 // the only place they can be reviewed or taken apart.
+// Asserted as a conservation law rather than a fixed number: whatever the two
+// threads held between them before the glue, the keeper holds afterwards. The
+// literal 2 encoded an assumption about which thread the list returned first,
+// so it broke when the sort changed while gluing itself was untouched.
 const both = db.sourceEntriesForChat(first.id).filter((e) => e.linked);
-console.log('keeper holds after glue:', both.map((e) => `#${e.id} chats=${e.chatCount}`));
-if (both.length !== 2) throw new Error(`glue did not move entries: keeper holds ${both.length}`);
+console.log(
+  `keeper held ${keeperEntriesBefore} + loser ${loserEntriesBefore} -> keeper holds`,
+  both.map((e) => `#${e.id} chats=${e.chatCount}`),
+);
+if (both.length !== keeperEntriesBefore + loserEntriesBefore) {
+  throw new Error(
+    `glue lost entries: ${keeperEntriesBefore} + ${loserEntriesBefore} became ${both.length}`,
+  );
+}
 
 // And unmerging must give them back, exactly.
 db.unmergeChat(other.id);

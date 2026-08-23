@@ -457,16 +457,29 @@ export function listChats(scope: ChatScope): ChatSummary[] {
   // merged_into IS NULL everywhere: a chat merged away is kept (so the merge
   // stays undoable) but must not show up as a separate conversation.
   const base = `${CHAT_SUMMARY_SQL} WHERE c.merged_into IS NULL`;
-  // Google's sidebar is ordered by recent activity, and the harvester walks it
-  // top to bottom, so list_rank preserves that order — the only recency
-  // information that exists, since no timestamp is rendered anywhere.
+  // Newest first, by the thread's own date — now that threads HAVE dates.
   //
-  // Ordering by last_seen_at instead looked random: a bulk harvest writes
-  // essentially the same timestamp to all 300 rows, leaving the sort with
-  // nothing to distinguish them. Rows with no rank yet (hand-seeded, or
-  // captured live) sort last rather than jumbling in among the ranked ones.
-  const order =
-    ' ORDER BY CASE WHEN c.list_rank IS NULL THEN 1 ELSE 0 END, c.list_rank ASC, c.last_seen_at DESC';
+  // This used to order by list_rank alone, Google's sidebar position, because
+  // that was the only recency signal in existence: no timestamp was rendered
+  // anywhere and a bulk harvest stamped last_seen_at identically across 300
+  // rows. Both premises are now false. The export dates a thread to the second,
+  // the panel to the day, and once dates are on screen an order that ignores
+  // them reads as sorted backwards — which is what it looked like.
+  //
+  // A placeholder date is excluded from the first key on purpose. It says only
+  // that the app saved the thread today, so sorting by it would float every
+  // undated thread to the top of the list and push the genuinely recent ones
+  // under it. Those fall through to sidebar position, which is still the best
+  // guess available for them.
+  const order = `
+    ORDER BY CASE
+               WHEN c.started_at IS NOT NULL AND COALESCE(c.date_basis, '') <> 'placeholder'
+                 THEN 0 ELSE 1
+             END,
+             c.started_at DESC,
+             CASE WHEN c.list_rank IS NULL THEN 1 ELSE 0 END,
+             c.list_rank ASC,
+             c.last_seen_at DESC`;
 
   if (scope.kind === 'all') {
     return (db.prepare(base + order).all() as unknown as ChatSummaryRow[]).map(toSummary);

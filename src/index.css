@@ -393,12 +393,30 @@ button:disabled {
   text-align: right;
 }
 
-/* The answer: plain, unadorned, and the full width of the pane — matching AI
-   Mode itself, where only the prompt is a bubble. An earlier version added a
-   left rule; that made every answer look like a blockquote and fought the
-   asymmetry that already distinguishes the two. */
+/* The answer: full width, but inside a container of its own.
+
+   It was unadorned, on the reasoning that AI Mode gives only the prompt a
+   bubble. True of AI Mode, and wrong here: a saved thread is read as a
+   transcript of many turns rather than one live exchange, and with the question
+   boxed and the answer bare the answers ran together and it stopped being
+   obvious where one ended. Kept deliberately quieter than the question — a
+   near-white ground and a hairline, no tint — so the asymmetry still says who
+   spoke. */
 .turn-ai .turn-body {
-  padding: 0;
+  background: #fcfcfd;
+  border: 1px solid #ececf0;
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+}
+
+/* The container supplies the outer spacing, so the first and last blocks inside
+   it must not add their own on top. */
+.turn-ai .turn-body > :first-child {
+  margin-top: 0;
+}
+
+.turn-ai .turn-body > :last-child {
+  margin-bottom: 0;
 }
 
 /* Captured markup carries no stylesheet of its own — these keep third-party
