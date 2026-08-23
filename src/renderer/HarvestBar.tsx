@@ -69,6 +69,9 @@ export default function HarvestBar({
   const [takeout, setTakeout] = useState<TakeoutPick | null>(null);
   const [takeoutNote, setTakeoutNote] = useState<string | null>(null);
   const [takeoutBusy, setTakeoutBusy] = useState(false);
+  // Only set while a run is in progress; the prop is the truth otherwise.
+  const [remainingOverride, setRemainingOverride] = useState<number | null>(null);
+  const remaining = remainingOverride ?? uncaptured;
 
   useEffect(
     () =>
@@ -86,8 +89,15 @@ export default function HarvestBar({
     () =>
       window.notebook.onCaptureProgress((next) => {
         setCapture(next);
+        // The button's own count is refreshed as the run proceeds. It used to be
+        // read once and then left alone until the run ended, so mid-run it named
+        // a number that had already been worked through — observed reading 186
+        // while the true remainder was 124. A count that is wrong for minutes at
+        // a time is worse than no count, because it looks live.
+        if (typeof next.remaining === 'number') setRemainingOverride(next.remaining);
         if (next.phase !== 'capturing') {
           setCapturing(false);
+          setRemainingOverride(null);
           // onFinished reloads the archive, which refreshes the count via props
           // rather than keeping a second copy of it here.
           onFinished();
@@ -312,7 +322,7 @@ export default function HarvestBar({
       {/* The backlog is hours long at ~30-60s per conversation, almost all of it
           Google's own load time. Clicking a 25-batch a dozen times is not a
           workflow, so this exists to be started and left. */}
-      {uncaptured > 0 && (
+      {remaining > 0 && (
         <button
           type="button"
           // NOT bounded by the displayed count. That number is a label, and a
@@ -323,7 +333,7 @@ export default function HarvestBar({
           disabled={busy || capturing}
           title="Works through everything not yet captured. Safe to leave running; Stop works at any point."
         >
-          Capture all ({uncaptured})
+          Capture all ({remaining})
         </button>
       )}
       {capturing && (
@@ -344,7 +354,7 @@ export default function HarvestBar({
                 }${capture.stoppedEarly ? ` — ${capture.stoppedEarly}` : ''}`}
         </span>
       ) : (
-        uncaptured > 0 && <span className="harvest-status">{uncaptured} not captured</span>
+        remaining > 0 && <span className="harvest-status">{remaining} not captured</span>
       )}
 
       {busy && progress?.expected ? (
