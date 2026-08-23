@@ -118,19 +118,40 @@ export interface TakeoutImportRow {
 
 export interface TakeoutImportSummary {
   entries: number;
-  created: number;
-  updated: number;
+  inserted: number;
+  duplicates: number;
   skipped: number;
+  matchedToChat: number;
+  matchedToTurn: number;
+  ambiguous: number;
+  orphans: number;
   imagesCopied: number;
   imagesMissing: number;
+}
+
+export interface ActivityMatchResult {
+  matchedToChat: number;
+  matchedToTurn: number;
+  ambiguous: number;
+  orphans: number;
+}
+
+export interface ActivityStats {
+  total: number;
+  matched: number;
+  orphans: number;
+  dated: number;
 }
 
 export interface NotebookApi {
   /** Reads the Takeout folder only — nothing is stored until applyTakeout. */
   pickTakeout(): Promise<TakeoutPick | null>;
   applyTakeout(folder: string, rows: TakeoutImportRow[]): Promise<TakeoutImportSummary>;
-  /** Removes everything a Takeout import created; harvested chats survive. */
+  /** Removes conversations a previous, broken import created; harvested chats survive. */
   undoTakeout(): Promise<{ deleted: number; reverted: number }>;
+  /** Re-runs matching. Worth doing after a capture, which adds turns to match against. */
+  rematchActivity(): Promise<ActivityMatchResult>;
+  activityStats(): Promise<ActivityStats>;
 
   /** file:// base for resolving the relative asset paths in stored HTML. */
   getAssetsBaseUrl(): Promise<string>;

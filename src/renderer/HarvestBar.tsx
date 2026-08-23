@@ -1,5 +1,10 @@
 import { useEffect, useState } from 'react';
-import type { CaptureProgress, HarvestProgress, TakeoutPick } from '../shared/types';
+import type {
+  ActivityStats,
+  CaptureProgress,
+  HarvestProgress,
+  TakeoutPick,
+} from '../shared/types';
 import { parseTakeoutHtml } from './parseTakeout';
 
 interface Props {
@@ -13,13 +18,18 @@ interface Props {
    * from the reader — left it silently stale.
    */
   uncaptured: number;
+  /**
+   * Activity totals, owned by the parent for the same reason as uncaptured:
+   * derived data kept in two places drifts.
+   */
+  activity: ActivityStats | null;
 }
 
 const CAPTURE_BATCH = 25;
 // Far above any plausible history, so "all" means all.
 const CAPTURE_ALL_LIMIT = 100_000;
 
-export default function HarvestBar({ onNeedPanel, onFinished, uncaptured }: Props) {
+export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activity }: Props) {
   const [progress, setProgress] = useState<HarvestProgress | null>(null);
   const [busy, setBusy] = useState(false);
   const [capture, setCapture] = useState<CaptureProgress | null>(null);
@@ -98,8 +108,11 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured }: Prop
         })),
       );
       setTakeoutNote(
-        `imported ${summary.entries}: ${summary.created} new, ${summary.updated} updated, ` +
-          `${summary.skipped} skipped · images ${summary.imagesCopied} copied, ${summary.imagesMissing} missing`,
+        `${summary.entries} entries → ${summary.inserted} recorded ` +
+          `(${summary.duplicates} already known, ${summary.skipped} no query) · ` +
+          `matched ${summary.matchedToChat} by title, ${summary.matchedToTurn} by turn · ` +
+          `${summary.ambiguous} ambiguous · ${summary.orphans} orphaned · ` +
+          `images ${summary.imagesCopied} copied`,
       );
       setTakeout(null);
       onFinished();
@@ -218,6 +231,15 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured }: Prop
       >
         Undo import
       </button>
+      {/* Orphans are the point of keeping activity at all: prompts whose
+          conversation Google no longer lists. Shown permanently rather than
+          only after an import, since the number falls as capture progresses. */}
+      {activity && activity.total > 0 && !takeoutNote && (
+        <span className="harvest-status">
+          {activity.total} activity · {activity.matched} matched ·{' '}
+          <span className="orphan-count">{activity.orphans} orphaned</span>
+        </span>
+      )}
       {takeoutNote && <span className="harvest-status">{takeoutNote}</span>}
 
       <span className="harvest-sep" />

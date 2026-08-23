@@ -98,6 +98,36 @@ export function initDb(userDataPath: string): void {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS assets_chat_sha ON assets(chat_id, sha256);
 
+    -- Takeout entries. Deliberately NOT chats: an export carries no thread id,
+    -- so nothing in it can identify a conversation, and an importer that
+    -- created chats from it invented 736 of them out of 981 entries — mostly
+    -- individual turns wearing a conversation's clothes.
+    --
+    -- These are records of "a prompt was submitted at this exact time", which
+    -- is all Takeout actually knows. They then get matched to real
+    -- conversations where possible, and the ones that never match are the
+    -- interesting residue: prompts whose conversation Google has dropped.
+    CREATE TABLE IF NOT EXISTS activity (
+      id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+      query              TEXT NOT NULL,
+      -- Normalised hash of the query, the same function chats use, so the two
+      -- can be compared at all.
+      query_key          TEXT NOT NULL,
+      -- Keeps its original UTC offset. Normalising to UTC moved late-evening
+      -- conversations across midnight and showed the wrong day.
+      occurred_at        TEXT,
+      href               TEXT,
+      -- Where it landed, if anywhere. Both null means an orphan.
+      matched_chat_id    INTEGER REFERENCES chats(id) ON DELETE SET NULL,
+      matched_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+      -- How the match was made, so a weak one can be told from a strong one.
+      match_kind         TEXT,
+      -- One row per submission: the same prompt sent twice is two events.
+      UNIQUE(query_key, occurred_at)
+    );
+    CREATE INDEX IF NOT EXISTS activity_query_key ON activity(query_key);
+    CREATE INDEX IF NOT EXISTS activity_chat ON activity(matched_chat_id);
+
     CREATE TABLE IF NOT EXISTS settings (
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -540,70 +570,36 @@ export interface TakeoutImportResult {
   skipped: number;
 }
 
-/**
- * Imports Takeout entries as conversations.
- *
- * Takeout carries no thread id, so identity comes from the normalised query
- * plus the exact timestamp — which, unlike query text alone, separates the
- * duplicate-prompt groups this history contains, because two submissions of the
- * same prompt happened at different times.
- *
- * Existing sidebar-harvested conversations are matched by content_key and given
- * their text and real timestamp, without touching external_id or user_title.
- */
-export function importTakeoutEntries(rows: TakeoutImportRow[]): TakeoutImportResult {
-  const result: TakeoutImportResult = { created: 0, updatedText: 0, skipped: 0 };
-  const findByKey = db.prepare('SELECT id, source FROM chats WHERE content_key = ? LIMIT 2');
-  const findByExternal = db.prepare('SELECT id FROM chats WHERE external_id = ?');
+export interface ActivityImportResult {
+  inserted: number;
+  duplicates: number;
+  skipped: number;
+}
 
+/**
+ * Records Takeout entries as activity. Creates no conversations, renames
+ * nothing, and cannot pollute the archive — so a wrong parse costs nothing and
+ * needs no undo.
+ */
+export function importActivity(rows: TakeoutImportRow[]): ActivityImportResult {
+  const result: ActivityImportResult = { inserted: 0, duplicates: 0, skipped: 0 };
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO activity (query, query_key, occurred_at, href)
+     VALUES (?, ?, ?, ?)`,
+  );
   db.exec('BEGIN');
   try {
     for (const row of rows) {
-      if (!row.query.trim()) {
+      const query = row.query.trim();
+      if (!query) {
+        // An entry with no query is still evidence that something happened, but
+        // there is nothing to match it on, so it is counted rather than stored.
         result.skipped += 1;
         continue;
       }
-      const key = contentKeyFor(row.query);
-      // Synthetic and stable, so re-importing the same export updates rather
-      // than duplicating. The timestamp is what makes it unique per submission.
-      const externalId = `takeout:${key.slice(0, 16)}:${row.timestamp ?? 'unknown'}`;
-
-      const existingSynthetic = findByExternal.get(externalId) as unknown as
-        | { id: number }
-        | undefined;
-      const candidates = findByKey.all(key) as unknown as { id: number; source: string }[];
-      // Only adopt a harvested conversation when the match is unambiguous;
-      // otherwise create a Takeout record of its own rather than guess which of
-      // several same-prompt conversations this was.
-      const harvested = candidates.length === 1 ? candidates[0] : undefined;
-      const targetId = existingSynthetic?.id ?? harvested?.id;
-
-      if (targetId) {
-        db.prepare(
-          `UPDATE chats
-             SET started_at = COALESCE(?, started_at),
-                 raw_json = ?,
-                 source = CASE WHEN source = 'capture' THEN source ELSE 'takeout' END
-           WHERE id = ?`,
-        ).run(row.timestamp, JSON.stringify({ takeout: { href: row.href } }), targetId);
-        result.updatedText += 1;
-        continue;
-      }
-
-      db.prepare(
-        `INSERT INTO chats
-           (folder_id, external_id, content_key, url, title, started_at, last_seen_at,
-            source, raw_json, list_rank)
-         VALUES (NULL, ?, ?, NULL, ?, ?, ?, 'takeout', ?, NULL)`,
-      ).run(
-        externalId,
-        key,
-        row.query,
-        row.timestamp,
-        new Date().toISOString(),
-        JSON.stringify({ takeout: { href: row.href } }),
-      );
-      result.created += 1;
+      const changes = insert.run(query, contentKeyFor(query), row.timestamp, row.href).changes;
+      if (Number(changes) > 0) result.inserted += 1;
+      else result.duplicates += 1;
     }
     db.exec('COMMIT');
   } catch (error) {
@@ -611,6 +607,128 @@ export function importTakeoutEntries(rows: TakeoutImportRow[]): TakeoutImportRes
     throw error;
   }
   return result;
+}
+
+export interface ActivityMatchResult {
+  matchedToChat: number;
+  matchedToTurn: number;
+  ambiguous: number;
+  orphans: number;
+}
+
+/**
+ * Matches activity to real conversations, strongest evidence first, and dates
+ * what it can.
+ *
+ * Rerunnable and purely additive: matching improves as capture progresses,
+ * because a conversation with turns offers far more to match against than a
+ * title alone.
+ */
+export function matchActivity(): ActivityMatchResult {
+  db.exec('BEGIN');
+  try {
+    db.exec('UPDATE activity SET matched_chat_id = NULL, matched_message_id = NULL, match_kind = NULL');
+
+    // 1. Query equals a conversation's opening query, which is its title. Only
+    //    when exactly one conversation matches — the duplicate-prompt groups
+    //    match several by construction and must stay unresolved rather than be
+    //    attributed by coin flip.
+    db.exec(`
+      UPDATE activity
+         SET matched_chat_id = (
+               SELECT c.id FROM chats c
+                WHERE c.content_key = activity.query_key AND c.merged_into IS NULL
+             ),
+             match_kind = 'title'
+       WHERE matched_chat_id IS NULL
+         AND (
+           SELECT COUNT(*) FROM chats c
+            WHERE c.content_key = activity.query_key AND c.merged_into IS NULL
+         ) = 1
+    `);
+
+    // 2. Query equals the text of a captured user turn. This is where Takeout
+    //    earns its place: it dates individual turns, which AI Mode renders
+    //    nowhere.
+    db.exec(`
+      UPDATE activity
+         SET matched_message_id = (
+               SELECT m.id FROM messages m
+                WHERE m.role = 'user' AND TRIM(LOWER(m.text)) = TRIM(LOWER(activity.query))
+             ),
+             matched_chat_id = COALESCE(matched_chat_id, (
+               SELECT m.chat_id FROM messages m
+                WHERE m.role = 'user' AND TRIM(LOWER(m.text)) = TRIM(LOWER(activity.query))
+             )),
+             match_kind = COALESCE(match_kind, 'turn')
+       WHERE matched_message_id IS NULL
+         AND (
+           SELECT COUNT(*) FROM messages m
+            WHERE m.role = 'user' AND TRIM(LOWER(m.text)) = TRIM(LOWER(activity.query))
+         ) = 1
+    `);
+
+    // 3. A matched conversation with no date of its own inherits the earliest
+    //    activity time that points at it — its opening turn.
+    db.exec(`
+      UPDATE chats
+         SET started_at = (
+               SELECT MIN(a.occurred_at) FROM activity a
+                WHERE a.matched_chat_id = chats.id AND a.occurred_at IS NOT NULL
+             )
+       WHERE started_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM activity a
+            WHERE a.matched_chat_id = chats.id AND a.occurred_at IS NOT NULL
+         )
+    `);
+
+    const one = (sql: string) => Number((db.prepare(sql).get() as unknown as { n: number }).n);
+    const result: ActivityMatchResult = {
+      matchedToChat: one("SELECT COUNT(*) AS n FROM activity WHERE match_kind = 'title'"),
+      matchedToTurn: one("SELECT COUNT(*) AS n FROM activity WHERE match_kind = 'turn'"),
+      ambiguous: one(`
+        SELECT COUNT(*) AS n FROM activity a
+         WHERE a.matched_chat_id IS NULL
+           AND (SELECT COUNT(*) FROM chats c WHERE c.content_key = a.query_key) > 1
+      `),
+      orphans: one(`
+        SELECT COUNT(*) AS n FROM activity a
+         WHERE a.matched_chat_id IS NULL
+           AND (SELECT COUNT(*) FROM chats c WHERE c.content_key = a.query_key) = 0
+      `),
+    };
+    db.exec('COMMIT');
+    return result;
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+export interface ActivityStats {
+  total: number;
+  matched: number;
+  orphans: number;
+  dated: number;
+}
+
+export function activityStats(): ActivityStats {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN matched_chat_id IS NOT NULL THEN 1 ELSE 0 END) AS matched,
+              SUM(CASE WHEN matched_chat_id IS NULL THEN 1 ELSE 0 END) AS orphans,
+              SUM(CASE WHEN occurred_at IS NOT NULL THEN 1 ELSE 0 END) AS dated
+         FROM activity`,
+    )
+    .get() as unknown as { total: number; matched: number; orphans: number; dated: number };
+  return {
+    total: row.total ?? 0,
+    matched: row.matched ?? 0,
+    orphans: row.orphans ?? 0,
+    dated: row.dated ?? 0,
+  };
 }
 
 /**

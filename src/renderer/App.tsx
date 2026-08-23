@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { AiModeStatus, ChatDetail, ChatScope, ChatSummary, Folder } from '../shared/types';
+import type {
+  ActivityStats,
+  AiModeStatus,
+  ChatDetail,
+  ChatScope,
+  ChatSummary,
+  Folder,
+} from '../shared/types';
 import ChatList from './ChatList';
 import ChatReader from './ChatReader';
 import FolderTree from './FolderTree';
@@ -16,6 +23,7 @@ export default function App() {
   const [panelVisible, setPanelVisible] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [uncaptured, setUncaptured] = useState(0);
+  const [activity, setActivity] = useState<ActivityStats | null>(null);
 
   const reloadFolders = useCallback(async () => {
     setFolders(await window.notebook.listFolders());
@@ -31,6 +39,7 @@ export default function App() {
 
   const reloadUncaptured = useCallback(async () => {
     setUncaptured(await window.notebook.countChatsWithoutTurns());
+    setActivity(await window.notebook.activityStats());
   }, []);
 
   const reloadAll = useCallback(() => {
@@ -84,6 +93,7 @@ export default function App() {
         onNeedPanel={() => setPanelVisible(true)}
         onFinished={reloadAll}
         uncaptured={uncaptured}
+        activity={activity}
       />
 
       {error && (

@@ -97,7 +97,12 @@ export default function ChatReader({ chat, onChange }: Props) {
               ? 'listed in the sidebar, not yet captured'
               : `source: ${chat.source}`}
         </span>
-        {chat.startedAt && <span> · {displayDateTime(chat.startedAt)}</span>}
+        {chat.startedAt && (
+          <span title="Inferred by matching the Takeout prompt text, not from a thread id">
+            {' · ~'}
+            {displayDateTime(chat.startedAt)} (inferred)
+          </span>
+        )}
         <span className="provenance-id"> · {chat.externalId || 'no id'}</span>
         {!chat.externalId.startsWith('takeout:') && (
           <button

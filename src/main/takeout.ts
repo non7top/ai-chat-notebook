@@ -15,9 +15,13 @@ import { getAssetsDir } from './db';
  */
 export interface TakeoutImportSummary {
   entries: number;
-  created: number;
-  updated: number;
+  inserted: number;
+  duplicates: number;
   skipped: number;
+  matchedToChat: number;
+  matchedToTurn: number;
+  ambiguous: number;
+  orphans: number;
   imagesCopied: number;
   imagesMissing: number;
 }
@@ -51,16 +55,20 @@ export function importTakeout(
   folder: string,
   rows: db.TakeoutImportRow[],
 ): TakeoutImportSummary {
-  const stored = db.importTakeoutEntries(rows);
+  // Activity first, then matching. Nothing here creates a conversation: an
+  // export has no thread id, so it cannot identify one, and the version that
+  // tried invented 736 conversations from 981 entries.
+  const stored = db.importActivity(rows);
+  const matched = db.matchActivity();
+
   let imagesCopied = 0;
   let imagesMissing = 0;
-
   for (const row of rows) {
     for (const name of row.imageFiles) {
       const candidate = path.join(folder, name);
       if (!fs.existsSync(candidate)) {
-        // Recorded rather than thrown: an export that references an image it
-        // does not contain is normal here, and the text still matters.
+        // Counted, not thrown: an export referencing images it does not contain
+        // is normal here, and the text is what matters.
         imagesMissing += 1;
         continue;
       }
@@ -71,10 +79,19 @@ export function importTakeout(
 
   return {
     entries: rows.length,
-    created: stored.created,
-    updated: stored.updatedText,
+    inserted: stored.inserted,
+    duplicates: stored.duplicates,
     skipped: stored.skipped,
+    matchedToChat: matched.matchedToChat,
+    matchedToTurn: matched.matchedToTurn,
+    ambiguous: matched.ambiguous,
+    orphans: matched.orphans,
     imagesCopied,
     imagesMissing,
   };
+}
+
+/** Re-runs matching alone. Worth doing after a capture, which gives turns to match against. */
+export function rematchActivity(): db.ActivityMatchResult {
+  return db.matchActivity();
 }

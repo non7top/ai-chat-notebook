@@ -515,3 +515,12 @@ button:disabled {
   margin-left: auto;
   flex: none;
 }
+
+/* Inferred values read differently from known ones, deliberately. */
+.date-inferred {
+  color: #92400e;
+}
+
+.orphan-count {
+  color: #b45309;
+}

@@ -47,7 +47,22 @@ export default function ChatList({ chats, selectedId, onSelect }: Props) {
               {chat.title}
             </span>
             <span className="chat-meta">
-              {started ? `${started} · ` : ''}
+              {/* Prefixed and titled because every date here is INFERRED: it
+                  comes from matching a Takeout prompt against this
+                  conversation's title or a captured turn, and that match is
+                  textual, not an id. Presenting it as plain fact would overstate
+                  what is known. */}
+              {started ? (
+                <span
+                  className="date-inferred"
+                  title="Inferred by matching the Takeout prompt text — not from a thread id"
+                >
+                  ~{started}
+                  {' · '}
+                </span>
+              ) : (
+                ''
+              )}
               {chat.messageCount === 0 ? (
                 // A conversation that has been tried and failed looked exactly
                 // like one never attempted, so a stuck one was invisible.

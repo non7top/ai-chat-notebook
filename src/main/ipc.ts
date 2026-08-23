@@ -11,7 +11,7 @@ import {
   navigateAiMode,
   setAiModeViewHidden,
 } from './aiModeView';
-import { importTakeout } from './takeout';
+import { importTakeout, rematchActivity } from './takeout';
 import {
   cancelCapture,
   cancelHarvest,
@@ -109,6 +109,8 @@ export function registerIpcHandlers(): void {
   );
 
   ipcMain.handle('takeout:undo', () => db.undoTakeoutImport());
+  ipcMain.handle('takeout:rematch', () => rematchActivity());
+  ipcMain.handle('takeout:stats', () => db.activityStats());
 
   ipcMain.handle('capture:turns', (_event, limit: number) => captureTurns(limit));
   ipcMain.handle('capture:cancel', () => cancelCapture());
