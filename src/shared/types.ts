@@ -35,6 +35,12 @@ export interface ChatSummary {
    * used to report "17 img", which is not what the reader was being told.
    */
   previewCount: number;
+  /**
+   * The conversation's first image, as a relative "assets/..." path, or null.
+   * Most of this archive is image generation, so the picture a conversation
+   * opened with identifies it far faster than 300 characters of prompt.
+   */
+  titleImage: string | null;
   /** Failed capture attempts — distinguishes "failed" from "never tried". */
   captureAttempts: number;
   /**

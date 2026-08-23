@@ -250,6 +250,23 @@ function noteSource(chatId: number, source: string): void {
   db.prepare('UPDATE chats SET sources = ? WHERE id = ?').run([...set].join(','), chatId);
 }
 
+/**
+ * A stored asset as a relative "assets/..." path, or null.
+ *
+ * Returns null for anything not actually inside the assets directory. Such a
+ * path would come back with leading ".." segments and, resolved against the
+ * assets base in the renderer, would point outside the archive entirely — so
+ * the answer to "where is this image" becomes "somewhere else on this disk".
+ * Nothing should produce one; that is the reason to refuse it here rather than
+ * assume it cannot happen.
+ */
+function assetHrefFor(localPath: string | null): string | null {
+  if (!localPath) return null;
+  const relative = path.relative(getAssetsDir(), localPath).split(path.sep).join('/');
+  if (relative === '' || relative.startsWith('../')) return null;
+  return `assets/${relative}`;
+}
+
 export function getAssetsDir(): string {
   return assetsDir;
 }
@@ -329,6 +346,7 @@ interface ChatSummaryRow {
   message_count: number;
   image_count: number;
   preview_count: number;
+  title_image: string | null;
   capture_attempts: number;
   source: string;
   sources: string;
@@ -362,7 +380,22 @@ const CHAT_SUMMARY_SQL = `
          -- Rich previews and source thumbnails. Kept, since nothing is
          -- discarded, but counted apart so 17 previews never read as 17 images.
          (SELECT COUNT(DISTINCT a.sha256) FROM assets a
-           WHERE a.chat_id = c.id AND a.kind = 'other') AS preview_count
+           WHERE a.chat_id = c.id AND a.kind = 'other') AS preview_count,
+         -- The conversation's own first image, for the list thumbnail. Ordered
+         -- by turn and then by insertion, so it is the image the conversation
+         -- opened with — an upload the question came with, or the first picture
+         -- generated in answer to it. Export images have no turn to sit in and
+         -- sort first, which is right: an entry that shipped one image is
+         -- exactly the case this is for.
+         --
+         -- Previews are excluded outright. A source-card thumbnail as the face
+         -- of a conversation would be worse than no thumbnail at all.
+         (SELECT a.local_path FROM assets a
+            LEFT JOIN messages m ON m.id = a.message_id
+           WHERE a.chat_id = c.id
+             AND (a.kind IS NULL OR a.kind IN ('generated', 'upload', 'takeout'))
+           ORDER BY COALESCE(m.seq, -1) ASC, a.id ASC
+           LIMIT 1) AS title_image
   FROM chats c
 `;
 
@@ -377,6 +410,9 @@ function toSummary(row: ChatSummaryRow): ChatSummary {
     messageCount: row.message_count,
     imageCount: row.image_count,
     previewCount: row.preview_count,
+    // Relative, matching what is stored in turn HTML, so the renderer resolves
+    // both the same way against the real assets directory.
+    titleImage: assetHrefFor(row.title_image),
     captureAttempts: row.capture_attempts,
     source: row.source,
     sources: row.sources,

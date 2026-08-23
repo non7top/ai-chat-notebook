@@ -432,10 +432,14 @@ repairScenario(true);
   if (chatId === null) throw new Error('an entry could not be found again by its own ref');
 
   const before = db.listChats({ kind: 'all' })[0];
+  // Inside the real assets directory, because a path outside it is deliberately
+  // refused — resolved against the assets base in the renderer it would point
+  // somewhere else on the disk entirely.
+  const inStore = (name: string) => path.join(db.getAssetsDir(), name.slice(0, 2), name);
   db.attachExportImage(chatId, {
     sha256: 'a'.repeat(64),
     mime: 'image/png',
-    localPath: '/nowhere/a.png',
+    localPath: inStore(`${'a'.repeat(64)}.png`),
     bytes: 1234,
   });
   const after = db.listChats({ kind: 'all' })[0];
@@ -445,6 +449,25 @@ repairScenario(true);
   }
   // Counted as a real image, not as page furniture.
   if (after.previewCount !== 0) throw new Error('an export image was counted as a preview');
+
+  // And it becomes the row's thumbnail, as a relative path the renderer can
+  // resolve the same way it resolves images inside stored turn HTML.
+  console.log('  title image:', after.titleImage);
+  if (!after.titleImage?.startsWith('assets/') || after.titleImage.includes('..')) {
+    throw new Error(`title image should be a relative assets/ path, got ${after.titleImage}`);
+  }
+
+  // A preview must never become the face of a conversation.
+  db.attachExportImage(chatId, {
+    sha256: 'b'.repeat(64),
+    mime: 'image/png',
+    localPath: inStore(`${'b'.repeat(64)}.png`),
+    bytes: 1,
+  });
+  const stable = db.listChats({ kind: 'all' })[0];
+  if (stable.titleImage !== after.titleImage) {
+    throw new Error('the thumbnail moved when a later image was added');
+  }
   fs.rmSync(scratch, { recursive: true, force: true });
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatSummary } from '../shared/types';
 import { displayDate } from './dateDisplay';
 import { highlight, matchesTitle, termsOf } from './findTitles';
@@ -20,6 +20,14 @@ interface Props {
 
 export default function ChatList({ chats, selectedId, onSelect, query, onQueryChange }: Props) {
   const box = useRef<HTMLInputElement>(null);
+  const [assetsBase, setAssetsBase] = useState('');
+
+  // Thumbnails are stored as relative "assets/..." paths so the archive can be
+  // moved; the renderer lives inside the app bundle and would otherwise look
+  // for them there. Same resolution the reader does — see sanitize.ts.
+  useEffect(() => {
+    window.notebook.getAssetsBaseUrl().then(setAssetsBase);
+  }, []);
   const terms = useMemo(() => termsOf(query), [query]);
 
   // Ctrl+F reaches the box. Autofocusing it instead would take the keyboard
@@ -111,6 +119,22 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
             // be reachable without opening the conversation.
             title={chat.title}
           >
+            {/* A column of its own, because most of this archive is image
+                generation and the picture a conversation opened with identifies
+                it far faster than 300 characters of prompt. Absent for
+                text-only conversations, and the column collapses rather than
+                leaving a hole. */}
+            {chat.titleImage && assetsBase && (
+              <img
+                className="chat-thumb"
+                src={assetsBase + chat.titleImage.slice('assets/'.length)}
+                alt=""
+                // Hundreds of rows, so decoding every thumbnail up front would
+                // stall the list; the browser fetches them as they scroll in.
+                loading="lazy"
+              />
+            )}
+            <span className="chat-text">
             <span className={chat.title === '(untitled)' ? 'chat-title untitled' : 'chat-title'}>
               {/* Highlighted so it is obvious WHY a row survived the filter —
                   with prompts this long, the matched words are often well past
@@ -233,6 +257,7 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
                   {chat.previewCount} preview{chat.previewCount === 1 ? '' : 's'}
                 </span>
               )}
+            </span>
             </span>
           </button>
         </div>

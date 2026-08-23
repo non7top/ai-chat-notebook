@@ -270,6 +270,29 @@ button:disabled {
   background: #f2f2f2;
 }
 
+/* A row is now two columns: the thumbnail, then the text. */
+.chat-open {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.chat-text {
+  /* min-width: 0 is what lets the title ellipsis work at all — without it a
+     flex item refuses to shrink below its content and the row grows instead. */
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-thumb {
+  flex: none;
+  width: 2.25rem;
+  height: 2.25rem;
+  object-fit: cover;
+  border-radius: 3px;
+  background: var(--panel);
+}
+
 .chat-title {
   display: block;
   overflow: hidden;
