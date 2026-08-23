@@ -170,6 +170,19 @@ import { getAiModeNavState, getAiModeWebContents } from './aiModeView';
 //   they are map chrome, not conversation content.
 // - Sidebar row thumbnails are `img.RKMwI` at 24x24 from the same
 //   lens.usercontent.google.com host. Not conversation content.
+// - Source-citation favicons are `img.IpiY3d`, and they are the reason a thread
+//   reported seventeen images with none of them the pictures it was about: 100x100
+//   in the file, 18x18 on screen. One thread carried 173. The chip around one is
+//   `div.S9OuHf`, holding the icon and the site's name — that is what AI Mode
+//   draws as "YouTube Music +1" inline in the answer.
+// - Hovering that chip opens `div.jR6h WaKIwf Q1xFeb HIe7pd FEKEgc` with
+//   role="dialog", around 360x237, several links and images: the rich source card.
+//   Not captured, and not worth capturing — it is a UI affordance over links the
+//   answer text already names.
+// - The lesson from all of the above: judge an image by the size the PAGE gives
+//   it, not the size of the file. Every one of these is large in the file and
+//   small on screen. Class names are minified and get reissued; a rendered box
+//   does not lie and does not churn.
 //
 // TURN STRUCTURE
 // - `div.CKgc1d` is a turn-pair block; several exist per conversation.
@@ -707,6 +720,23 @@ const READ_TURNS_SCRIPT = `
     // alt="AI generated image" for generated, img.taqkMe for uploads — and
     // anything else is called 'other' rather than guessed at.
     const kindOf = (img) => {
+      // FIRST, and that placement is the whole point: what the page itself drew
+      // small is decoration whatever it is called. Measured live — a
+      // source-citation favicon is img.IpiY3d, 100x100 in the file and 18x18 on
+      // screen, and one thread carried 173 of them. Judging the FILE's size let
+      // every one through.
+      //
+      // Deliberately not a class check, and deliberately ahead of the class
+      // checks below. Those names are minified and Google reissues them; when
+      // img.IpiY3d becomes something else this still holds, because it asks what
+      // the page did rather than what it called the element. A zero-width box
+      // means not laid out — the sidebar, a hidden turn — and says nothing about
+      // the image, so it falls through to the names.
+      const box = img.getBoundingClientRect();
+      if (box.width > 0 && box.width < 64 && box.height > 0 && box.height < 64) {
+        return 'other';
+      }
+
       const cls = img.className || '';
       const alt = img.getAttribute('alt') || '';
       if (cls.indexOf('HkNHyd') !== -1 || alt === 'AI generated image') return 'generated';
