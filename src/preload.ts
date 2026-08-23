@@ -59,6 +59,7 @@ const api: NotebookApi = {
   adoptSourceEntry: (entryId, folderId) =>
     ipcRenderer.invoke('entries:adopt', entryId, folderId),
   captureFromEntryLink: (entryId) => ipcRenderer.invoke('entries:openLink', entryId),
+  suspectCopies: () => ipcRenderer.invoke('chats:suspectCopies'),
   similarChats: (chatId) => ipcRenderer.invoke('chats:similar', chatId),
   mergeChats: (keepId, mergeIds) => ipcRenderer.invoke('chats:merge', keepId, mergeIds),
   unmergeChat: (chatId) => ipcRenderer.invoke('chats:unmerge', chatId),

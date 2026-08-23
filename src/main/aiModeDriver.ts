@@ -661,6 +661,27 @@ const SCROLL_TO_THREAD_SCRIPT = (externalId: string) => `
 })();
 `;
 
+/**
+ * Is the row there at all? Asked separately, and awaited, before the click.
+ *
+ * The click itself cannot be awaited — it navigates, which tears down the
+ * execution context so the promise never settles; that is why fireAndForget
+ * exists. But something had to be awaited, because the old code clicked blind
+ * and reported success either way, and that was the most damaging bug in this
+ * file: a thread Google has rotated out of the sidebar has no row, so the click
+ * did nothing, the panel went on showing the PREVIOUS thread, and the caller
+ * read that and stored it under this thread's id. No error, no sign — one
+ * thread quietly holding another thread's conversation.
+ *
+ * A query navigates nothing, so this one is safe to wait for.
+ */
+const FIND_THREAD_ROW_SCRIPT = (externalId: string) => `
+(() => {
+  const el = document.querySelector('button.qqMZif[data-thread-id="' + ${JSON.stringify(externalId)} + '"]');
+  return { ok: true, found: !!el };
+})();
+`;
+
 const CLICK_THREAD_SCRIPT = (externalId: string) => `
 (() => {
   const el = document.querySelector('button.qqMZif[data-thread-id="' + ${JSON.stringify(externalId)} + '"]');
@@ -669,10 +690,25 @@ const CLICK_THREAD_SCRIPT = (externalId: string) => `
 })();
 `;
 
+/** Thrown when the thread has no row in the sidebar — Google no longer lists it. */
+export class ThreadNotListedError extends Error {
+  constructor(externalId: string) {
+    super(
+      `Google no longer lists this thread in the sidebar (${externalId}), so the panel ` +
+        'cannot open it.',
+    );
+    this.name = 'ThreadNotListedError';
+  }
+}
+
 export async function openThreadById(externalId: string): Promise<void> {
   // Generous timeout: finding a row can mean scrolling most of a 300-row
   // virtualised list, at ~350ms a step.
   await run(SCROLL_TO_THREAD_SCRIPT(externalId), 120_000);
+  // Checked before clicking, and this is not defensive tidying: without it the
+  // caller stores whatever thread the panel happens to be showing.
+  const { found } = await run<{ found: boolean }>(FIND_THREAD_ROW_SCRIPT(externalId), 15_000);
+  if (!found) throw new ThreadNotListedError(externalId);
   await fireAndForget(CLICK_THREAD_SCRIPT(externalId));
 }
 

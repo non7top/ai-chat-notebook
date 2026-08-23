@@ -146,6 +146,8 @@ export interface CaptureProgress {
   done: number;
   total: number;
   errors: number;
+  /** Threads Google no longer lists — not failures, and not retryable. */
+  unlisted?: number;
   current?: string;
   stoppedEarly?: string;
   turns?: number;
@@ -157,6 +159,13 @@ export interface CaptureProgress {
 export interface CaptureSummary {
   attempted: number;
   captured: number;
+  /**
+   * Threads Google no longer lists in the sidebar, so the panel cannot open
+   * them. Counted apart from errors because nothing is wrong and nothing can be
+   * retried — the thread has rotated out of the history and only an export still
+   * holds it.
+   */
+  unlisted: number;
   turns: number;
   images: number;
   errors: number;
@@ -401,6 +410,12 @@ export interface NotebookApi {
    * is what a re-run prompt looks like, and reports the distance either way.
    */
   captureFromEntryLink(entryId: number): Promise<LinkCaptureResult>;
+  /**
+   * Threads holding identical conversations. Detects the damage from a bug where
+   * clicking a missing sidebar row silently stored the previously shown thread
+   * under a different thread's id.
+   */
+  suspectCopies(): Promise<{ fingerprint: string; chatIds: number[]; titles: string[] }[]>;
   similarChats(chatId: number): Promise<ChatSummary[]>;
   mergeChats(keepId: number, mergeIds: number[]): Promise<{ merged: number }>;
   unmergeChat(chatId: number): Promise<void>;

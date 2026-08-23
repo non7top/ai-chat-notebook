@@ -65,6 +65,7 @@ export function registerIpcHandlers(): void {
   // captureFromEntryLink checks the page against the export's own reading before
   // storing anything; see the note on it.
   ipcMain.handle('entries:openLink', (_event, entryId: number) => captureFromEntryLink(entryId));
+  ipcMain.handle('chats:suspectCopies', () => db.suspectCopies());
   ipcMain.handle('chats:similar', (_event, id: number) => db.similarChats(id));
   ipcMain.handle('chats:merge', (_event, keepId: number, mergeIds: number[]) =>
     db.mergeChats(keepId, mergeIds),

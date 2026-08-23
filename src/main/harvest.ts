@@ -10,6 +10,7 @@ import {
   scrollListBy,
   scrollListToTop,
   openThreadById,
+  ThreadNotListedError,
   readTurns,
   waitForTurnsToSettle,
   type CapturedTurn,
@@ -493,6 +494,8 @@ export async function openChatInPanel(chatId: number): Promise<void> {
 export interface CaptureSummary {
   attempted: number;
   captured: number;
+  /** Threads Google no longer lists; see the note in shared/types.ts. */
+  unlisted: number;
   turns: number;
   images: number;
   errors: number;
@@ -518,6 +521,7 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
   const summary: CaptureSummary = {
     attempted: 0,
     captured: 0,
+    unlisted: 0,
     turns: 0,
     images: 0,
     errors: 0,
@@ -550,6 +554,7 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
         done: summary.captured,
         total: queue.length + retryable.length,
         errors: summary.errors,
+        unlisted: summary.unlisted,
         current: `${isRetry ? 'retry: ' : ''}${chat.title.slice(0, 60)}`,
       });
       try {
@@ -565,12 +570,26 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
         // whereas knowing they were all load timeouts points straight at the
         // fix.
         summary.errors += 1;
-        consecutiveFailures += 1;
         db.recordCaptureFailure(chat.id);
         summary.failures.push({
           title: chat.title.slice(0, 60),
           reason: error instanceof Error ? error.message : String(error),
         });
+
+        // A thread Google no longer lists is a permanent fact about that thread,
+        // not evidence that anything is broken — so it must not count toward the
+        // systemic-failure abort and must not be retried. These arrive in runs,
+        // because the queue is ordered by recency and the oldest threads are
+        // exactly the ones rotated out, so ten in a row is the NORMAL shape of
+        // reaching the end of what the sidebar still holds. Counting them
+        // stopped a run with 123 threads left, most of which were capturable.
+        if (error instanceof ThreadNotListedError) {
+          summary.unlisted += 1;
+          await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS));
+          continue;
+        }
+
+        consecutiveFailures += 1;
         if (!isRetry) retryable.push(chat);
         if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
           summary.stoppedEarly =
@@ -603,6 +622,7 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
       done: summary.captured,
       total: summary.attempted,
       errors: summary.errors,
+      unlisted: summary.unlisted,
       turns: summary.turns,
       images: summary.images,
       remaining: summary.remaining,

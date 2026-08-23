@@ -2189,6 +2189,49 @@ export function attachExportImage(
  * because it is precise to the second while this is precise to the day, and a
  * coarser fact must not overwrite a finer one.
  */
+export interface SuspectCopy {
+  fingerprint: string;
+  chatIds: number[];
+  titles: string[];
+}
+
+/**
+ * Threads holding identical conversations, which should be impossible.
+ *
+ * Written to detect the damage from a specific bug: clicking a sidebar row that
+ * does not exist did nothing and reported success, so a thread Google had
+ * rotated out was stored with whatever the panel was still showing — the
+ * previously captured thread. The result is two thread rows with byte-identical
+ * turns and different ids, and nothing on screen to suggest it.
+ *
+ * text_fingerprint makes it findable after the fact. Two threads genuinely
+ * having the same opening exchange is possible — the same question asked twice —
+ * so this reports candidates rather than a verdict; a run of them appearing
+ * together, all captured in the same pass, is the signature.
+ */
+export function suspectCopies(): SuspectCopy[] {
+  return (
+    db
+      .prepare(
+        `SELECT c.text_fingerprint AS fingerprint,
+                GROUP_CONCAT(c.id) AS ids,
+                GROUP_CONCAT(${CHAT_TITLE_SQL}, ' ||| ') AS titles
+           FROM chats c
+          WHERE c.text_fingerprint IS NOT NULL
+            AND c.text_fingerprint <> '0000000000000000'
+            AND c.merged_into IS NULL
+          GROUP BY c.text_fingerprint
+         HAVING COUNT(*) > 1
+          ORDER BY COUNT(*) DESC`,
+      )
+      .all() as unknown as { fingerprint: string; ids: string; titles: string }[]
+  ).map((row) => ({
+    fingerprint: row.fingerprint,
+    chatIds: row.ids.split(',').map(Number),
+    titles: row.titles.split(' ||| '),
+  }));
+}
+
 export function setPanelDate(chatId: number, isoDate: string): void {
   db.prepare(
     `UPDATE chats

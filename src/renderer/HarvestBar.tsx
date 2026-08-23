@@ -349,7 +349,13 @@ export default function HarvestBar({
               ? `${capture.done}/${capture.total} · ${capture.current ?? ''}`
               : `${capture.done} captured · ${capture.turns ?? 0} turns · ${
                   capture.images ?? 0
-                } images${capture.errors ? ` · ${capture.errors} failed` : ''}${
+                } images${
+                  // Reported apart from failures: a thread Google no longer
+                  // lists is not a failure, it is a thread that has left the
+                  // history, and calling it an error invites retrying something
+                  // that can never work.
+                  capture.unlisted ? ` · ${capture.unlisted} no longer listed` : ''
+                }${capture.errors ? ` · ${capture.errors} failed` : ''}${
                   capture.remaining ? ` · ${capture.remaining} left` : ''
                 }${capture.stoppedEarly ? ` — ${capture.stoppedEarly}` : ''}`}
         </span>
