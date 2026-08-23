@@ -754,9 +754,6 @@ repairScenario(true);
   // Two threads captured from the panel, same question, different answers.
   db.upsertThreadFromList('thread-A', ask, null, 0);
   db.upsertThreadFromList('thread-B', ask, null, 1);
-  const idOf = (ext: string) =>
-    (db.listChats({ kind: 'all' }).find((c) => c.title === ask && c.messageCount === 0)?.id ??
-      0) as number;
   const chatA = db.listChats({ kind: 'all' })[0].id;
   db.replaceTurns(chatA, [
     { seq: 0, role: 'user', text: ask, html: null },
