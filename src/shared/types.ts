@@ -166,6 +166,18 @@ export interface TakeoutImportRow {
    */
   timestampText: string | null;
   href: string | null;
+  /**
+   * Google's own identifier for this record, from the link's mstk parameter.
+   * Unique per cell where present; null for records with no link.
+   */
+  entryId: string | null;
+  /**
+   * Three fingerprints at three scopes. `long` is exact identity for the records
+   * with no mstk token; `short` covers only the opening exchange, so it spots a
+   * thread Google split and continued in a copy; `empty` is the timestamp and
+   * image filenames, which for a Lens or blank record is all there is.
+   */
+  fingerprints: { long: string; short: string; empty: string };
   /** The conversation, split on Google's own "Your prompt:" / "Search's response:" labels. */
   turns: { role: 'user' | 'ai'; text: string; html: string }[];
   imageFiles: string[];

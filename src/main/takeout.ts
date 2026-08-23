@@ -37,11 +37,13 @@ const EXTENSION_MIME: Record<string, string> = {
  */
 function entryRefFor(row: db.TakeoutImportRow): string {
   const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
-  return db.takeoutEntryRef(opening, row.timestamp, {
-    turns: row.turns,
-    images: row.imageFiles,
-    href: row.href,
-  });
+  return db.takeoutEntryRef(
+    opening,
+    row.timestamp,
+    { turns: row.turns, images: row.imageFiles, href: row.href },
+    row.entryId,
+    row.fingerprints,
+  );
 }
 
 function copyIntoAssetStore(sourcePath: string): { sha256: string; localPath: string; bytes: number; mime: string } | null {

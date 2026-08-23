@@ -61,6 +61,61 @@ export function countTimestamps(text: string): number {
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 /** The labels Google uses to delimit turns inside an entry. */
+/**
+ * A cell's fingerprint: a cheap hash of the markup Google wrote for it.
+ *
+ * Needed because 1059 records in a real export carry no mstk token, and they
+ * still have to be told apart — including the wholly empty ones whose only
+ * distinguishing feature is a date. Measured on that export: the timestamp alone
+ * collides on 6 records, so 6 would be lost on every import; the timestamp
+ * together with this hash collides on none of the 3085.
+ *
+ * The RAW markup, deliberately, not the parsed text and not a sample of it. A
+ * fingerprint taken from parsed content moves whenever the parser changes — which
+ * has happened twice here — and renames every record with it, so the next import
+ * duplicates the archive instead of updating it. What Google wrote does not move.
+ *
+ * Not cryptographic and does not need to be: it distinguishes a few thousand
+ * records that already differ. FNV-1a over two lanes, so the result behaves like
+ * a 64-bit value without needing BigInt in the renderer.
+ */
+export function fingerprintOf(markup: string): string {
+  const text = markup.replace(/\s+/g, ' ').trim();
+  let a = 0x811c9dc5;
+  let b = 0x01000193;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text.charCodeAt(i);
+    a = (a ^ c) >>> 0;
+    a = (a * 0x01000193) >>> 0;
+    b = (b + c) >>> 0;
+    b = (b * 0x85ebca6b) >>> 0;
+  }
+  return (a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * The opening exchange's markup: up to the first two labelled paragraphs.
+ *
+ * Deliberately the paragraphs Google labelled rather than the turns this file
+ * splits out, so the value does not shift when the splitter is corrected. Two
+ * records with the same opening and different endings are the case worth
+ * spotting — one thread continued in a copy — and it is a candidate to review,
+ * never an identity.
+ */
+function openingMarkupOf(bodyCell: Element | null | undefined): string {
+  if (!bodyCell) return '';
+  const parts: string[] = [];
+  for (const child of Array.from(bodyCell.children)) {
+    const lead = child.tagName === 'P' ? child.firstElementChild : null;
+    if (lead?.tagName !== 'STRONG') continue;
+    const label = clean(lead.textContent);
+    if (!USER_LABEL.test(label) && !AI_LABEL.test(label)) continue;
+    parts.push(child.outerHTML);
+    if (parts.length === 2) break;
+  }
+  return parts.join('');
+}
+
 const LENS_ACTIVITY = /searched with google lens/i;
 
 const USER_LABEL = /^your prompt:?$/i;
@@ -85,6 +140,40 @@ export interface TakeoutEntry {
   timestampText: string | null;
   /** Provenance only. Following it re-runs the prompt, so it is never a link. */
   href: string | null;
+  /**
+   * The link's mstk token — Google's own identifier for this record.
+   *
+   * Measured across a real export: 2026 records carry one and all 2026 are
+   * distinct, so it names a cell exactly. This is what the export was thought
+   * not to have, and it is worth more than a content hash for one specific
+   * reason: a hash of the parsed content changes whenever the parser changes, so
+   * fixing a parsing bug silently renames every entry and a re-import
+   * duplicates the lot instead of updating it. This does not move.
+   *
+   * Null for records with no link — Lens searches and the blank ones — which
+   * still need the content-derived fallback.
+   */
+  entryId: string | null;
+  /**
+   * Three fingerprints at three scopes, because one cannot do both jobs.
+   *
+   * long  — the whole cell's markup. Exact identity: unique across all 3085
+   *         records of a real export when paired with the timestamp, where the
+   *         timestamp alone loses six.
+   * short — the opening exchange only, first prompt and first response. This is
+   *         what finds a thread that Google split and continued in a copy: the
+   *         copy shares its opening and diverges after it, so `long` sees two
+   *         unrelated records and `short` sees the relationship.
+   * empty — the timestamp and the image filenames, which for a Lens or blank
+   *         record is everything there is. It is the only handle those have, and
+   *         they must still be told apart from each other.
+   *
+   * All three are taken from what Google wrote, never from parsed text: a
+   * fingerprint over parsed content moves whenever the parser changes — twice so
+   * far — and renames every record, so the next import duplicates the archive
+   * rather than updating it.
+   */
+  fingerprints: { long: string; short: string; empty: string };
   /** Local image file names, gathered across the whole entry. */
   images: string[];
   /** The conversation, split on Google's own turn labels. */
@@ -298,7 +387,8 @@ export function turnsFrom(cell: Element): TakeoutTurn[] {
   return turns.filter((t) => t.text.length > 0 || t.html.length > 0);
 }
 
-function entryFrom(cell: Element): TakeoutEntry {
+/** Exported for scripts/probe-takeout.ts, so the probe measures shipped code. */
+export function entryFrom(cell: Element): TakeoutEntry {
   const product = clean(cell.querySelector('.header-cell')?.textContent);
   // The first content-cell is the conversation; later ones are the image and
   // the "Why is this here?" caption.
@@ -308,9 +398,12 @@ function entryFrom(cell: Element): TakeoutEntry {
 
   const link = bodyCell?.querySelector('a[href]')?.getAttribute('href') ?? null;
   let query = '';
+  let entryId: string | null = null;
   if (link) {
     try {
-      query = new URL(link, 'https://www.google.com').searchParams.get('q') ?? '';
+      const parsed = new URL(link, 'https://www.google.com');
+      query = parsed.searchParams.get('q') ?? '';
+      entryId = parsed.searchParams.get('mstk');
     } catch {
       query = '';
     }
@@ -331,6 +424,17 @@ function entryFrom(cell: Element): TakeoutEntry {
     timestamp: iso,
     timestampText: raw,
     href: link,
+    entryId,
+    fingerprints: {
+      long: fingerprintOf(cell.innerHTML),
+      // The first pair of labelled paragraphs as Google wrote them. Taken from
+      // markup rather than the split turns so it survives a change to the
+      // splitter.
+      short: fingerprintOf(openingMarkupOf(bodyCell)),
+      empty: fingerprintOf(
+        `${raw ?? ''}|${[...new Set(images)].sort().join(',')}`,
+      ),
+    },
     images: [...new Set(images)],
     turns: bodyCell ? turnsFrom(bodyCell) : [],
     product,

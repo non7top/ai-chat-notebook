@@ -48,6 +48,8 @@ function importRows(entries: TakeoutEntry[]): TakeoutImportRow[] {
     timestamp: e.timestamp,
     timestampText: e.timestampText,
     href: e.href,
+    entryId: e.entryId,
+    fingerprints: e.fingerprints,
     turns: e.turns,
     imageFiles: e.images,
   }));

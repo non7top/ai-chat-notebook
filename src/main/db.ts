@@ -868,7 +868,21 @@ export function takeoutEntryRef(
   opening: string,
   timestamp: string | null,
   payload: { turns: unknown; images: unknown; href: unknown },
+  entryId?: string | null,
+  fingerprints?: { long: string; short: string; empty: string },
 ): string {
+  // Google's own token when the record has one. Preferred over anything derived
+  // from the content for a reason that has already bitten: a content hash moves
+  // whenever the parser changes, so fixing a parsing bug renames every entry and
+  // the next import duplicates all of them rather than updating them. The turn
+  // splitter changed exactly that way.
+  if (entryId) return `mstk:${entryId}`;
+  // The cell's own markup, for the records with no token. Measured on a real
+  // export: unique across all 1059 of them when paired with the timestamp, where
+  // the timestamp alone loses six. Preferred over anything derived from the
+  // parsed content for the same reason the token is — it does not move when the
+  // parser is fixed.
+  if (fingerprints?.long) return `cell:${timestamp ?? 'nodate'}:${fingerprints.long}`;
   if (opening.trim()) return `${contentKeyFor(opening)}@${timestamp ?? 'nodate'}`;
   // The timestamp is part of the identity, not decoration. An empty cell — no
   // prompt, no turns, no images — has a payload identical to every other empty
@@ -917,11 +931,16 @@ export function placeEntry(
 ): EntryPlacement {
   const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
   const key = contentKeyFor(opening);
-  const ref = takeoutEntryRef(opening, row.timestamp, {
-    turns: row.turns,
-    images: row.imageFiles,
-    href: row.href,
-  });
+  // Must be computed exactly as the storing loop computes it, token included.
+  // A ref that differs between the two would make every entry look unknown, so
+  // nothing would ever be recognised as already imported.
+  const ref = takeoutEntryRef(
+    opening,
+    row.timestamp,
+    { turns: row.turns, images: row.imageFiles, href: row.href },
+    row.entryId,
+    row.fingerprints,
+  );
   const ambiguous = openingCount > 1;
 
   const known =
@@ -1277,11 +1296,13 @@ export function importTakeoutConversations(
       // opening to key on and every such entry would otherwise collide with
       // every other. Content-addressed, so re-importing the same export
       // recognises them instead of piling up copies.
-      const ref = takeoutEntryRef(opening, row.timestamp, {
-        turns: row.turns,
-        images: row.imageFiles,
-        href: row.href,
-      });
+      const ref = takeoutEntryRef(
+    opening,
+    row.timestamp,
+    { turns: row.turns, images: row.imageFiles, href: row.href },
+    row.entryId,
+    row.fingerprints,
+  );
       if (!opening.trim()) result.orphaned += 1;
       // A row with date text but no parsed timestamp is a parser failure, not
       // a gap in the export, and the two need different responses — so it is
@@ -1298,6 +1319,14 @@ export function importTakeoutConversations(
           turns: row.turns,
           images: row.imageFiles,
           timestampText: row.timestampText ?? null,
+          // Kept on the entry so the openings can be compared later without
+          // re-parsing the export — and so a future matching pass can use the
+          // opening EXCHANGE rather than the opening prompt. Measured on a real
+          // export: 132 records share an opening prompt while only 2 share an
+          // opening prompt AND its answer, so the prompt alone over-reports the
+          // clone case by a factor of sixty-five.
+          fingerprints: row.fingerprints ?? null,
+          entryId: row.entryId ?? null,
         }),
         now,
       );
@@ -1447,11 +1476,17 @@ export function importTakeoutConversations(
             const opening =
               snapshot.turns.find((t) => t.role === 'user')?.text ?? snapshot.query;
             return entryIdByRef.get(
-              takeoutEntryRef(opening, snapshot.timestamp, {
-                turns: snapshot.turns,
-                images: snapshot.imageFiles,
-                href: snapshot.href,
-              }),
+              takeoutEntryRef(
+                opening,
+                snapshot.timestamp,
+                {
+                  turns: snapshot.turns,
+                  images: snapshot.imageFiles,
+                  href: snapshot.href,
+                },
+                snapshot.entryId,
+                snapshot.fingerprints,
+              ),
             );
           })
           .filter((id): id is number => id !== undefined);
