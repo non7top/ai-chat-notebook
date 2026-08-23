@@ -63,6 +63,14 @@ jobs:
       - name: Check bundle externals
         run: docker compose run --rm dev npm run check:bundle
 
+      # Exercises import, glue, unmerge, unglue, adopt and the orphan listing
+      # against a real SQLite database. It earns its place: it found three
+      # separate ways the import silently destroyed a conversation's turns, none
+      # of which lint, tsc or a bundle check can see, and all of which look like
+      # ordinary success from the outside.
+      - name: Check the source-entry model
+        run: docker compose run --rm dev npm run check:sources
+
   build-windows:
     # electron-builder cross-builds its deb and rpm targets from Linux, but
     # not NSIS — that needs a real Windows host. (Established the hard way on
