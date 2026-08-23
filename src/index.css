@@ -848,6 +848,12 @@ button:disabled {
   color: var(--muted);
 }
 
+/* An aside that carries bad news still reads as an aside, but not a neutral
+   one. */
+.report-aside.bad {
+  color: #b91c1c;
+}
+
 .report-note {
   margin: 0.4rem 0 0;
   font-size: 0.8rem;

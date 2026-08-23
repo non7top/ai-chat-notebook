@@ -125,6 +125,19 @@ export interface TakeoutScan {
    */
   nestedCells: number;
   /**
+   * An independent count of records, from the product-title paragraph rather
+   * than the container.
+   *
+   * Takeout writes exactly one p.mdl-typography--title per activity, so this and
+   * entryCount are two ways of counting the same thing and must agree. They are
+   * measured separately on purpose: when the cell count looked three times too
+   * large, nothing in the app could say whether the container was wrong or the
+   * expectation was, and it took counting titles by hand to settle it. A
+   * disagreement here means div.outer-cell is no longer one-per-record and every
+   * figure derived from it is measuring something else.
+   */
+  titleCount: number;
+  /**
    * Entries whose cell contains more than one timestamp.
    *
    * A submission carries exactly one, so a cell with several holds several
@@ -317,6 +330,7 @@ export function parseTakeoutHtml(html: string): { entries: TakeoutEntry[]; scan:
   // the entry count tripled between two exports and only the previous total's
   // worth of entries had dates, which is the shape over-counting makes.
   const nested = cells.filter((cell) => cell.parentElement?.closest('div.outer-cell')).length;
+  const titles = doc.querySelectorAll('p.mdl-typography--title').length;
 
   // How many submissions each cell actually holds. Counted from timestamps
   // because a submission has exactly one, and from search links because it also
@@ -357,6 +371,7 @@ export function parseTakeoutHtml(html: string): { entries: TakeoutEntry[]; scan:
       },
       multiTurnEntries: entries.filter((e) => e.turns.length > 2).length,
       nestedCells: nested,
+      titleCount: titles,
       multiStampEntries: perCell.filter((c) => c.stamps > 1).length,
       maxStamps: perCell.reduce((most, c) => Math.max(most, c.stamps), 0),
       largestEntry: biggest,

@@ -105,6 +105,21 @@ export default function TakeoutReport({ report, busy, onApply, onClose }: Props)
           <dt>Entries</dt>
           <dd>
             {scan.entryCount} cells, {scan.aiModeEntries} of them AI Mode
+            {/* Two independent counts of the same thing. Agreement is what says
+                the container being counted really is one per record — the
+                question that cost a round trip to answer by hand. */}
+            {scan.titleCount === scan.entryCount ? (
+              <span className="report-aside">
+                {' '}
+                — matching {scan.titleCount} record titles, so each cell is one record
+              </span>
+            ) : (
+              <span className="report-aside bad">
+                {' '}
+                — but {scan.titleCount} record titles. They must agree; div.outer-cell is
+                not one per record, so every figure here is measuring the wrong thing.
+              </span>
+            )}
           </dd>
           <dt>Kinds</dt>
           <dd>
