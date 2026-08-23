@@ -43,6 +43,14 @@ export interface TakeoutScan {
   containerDescription: string;
   /** Text length distribution — long entries mean full conversations, not just prompts. */
   textLengths: { min: number; median: number; max: number };
+  /** Shape of a sampled entry, so a wrong container choice is visible. */
+  structure: {
+    sampled: number;
+    descendantsPerEntry: string;
+    anchorsInSample: number;
+    imgsInSample: number;
+    localImageHrefsInSample: number;
+  };
   /** Structural labels seen inside entries, to find turn boundaries. */
   repeatedLabels: string[];
 }
@@ -112,12 +120,18 @@ function entryFrom(el: Element): TakeoutEntry {
     }
   }
 
-  const images = Array.from(el.querySelectorAll('img[src]'))
-    .map((img) => img.getAttribute('src') || '')
-    // Local files only. A remote src would be a tracking pixel, and this import
-    // must not reach the network.
-    .filter((src) => src && !/^https?:|^data:/i.test(src))
-    .map((src) => src.split('/').pop() || src);
+  // Both <img src> and <a href> are checked: a first pass over a real export
+  // found zero images looking only at <img>, and Takeout is as likely to link a
+  // file as embed it. Local files only — a remote src would be a tracking pixel,
+  // and this import must not reach the network.
+  const imageRefs = [
+    ...Array.from(el.querySelectorAll('img[src]')).map((n) => n.getAttribute('src') || ''),
+    ...Array.from(el.querySelectorAll('a[href]')).map((n) => n.getAttribute('href') || ''),
+  ];
+  const images = imageRefs
+    .filter((ref) => ref && !/^https?:|^data:/i.test(ref))
+    .filter((ref) => /\.(jpe?g|png|webp|gif)$/i.test(ref.split('?')[0]))
+    .map((ref) => decodeURIComponent(ref.split('?')[0].split('/').pop() || ref));
 
   return { query, timestamp: iso, timestampText: raw, href, images, text };
 }
@@ -150,6 +164,32 @@ export function parseTakeoutHtml(html: string): { entries: TakeoutEntry[]; scan:
         median: lengths[Math.floor(lengths.length / 2)] ?? 0,
         max: lengths[lengths.length - 1] ?? 0,
       },
+      // Sanity signals for the container choice: an entry holding a whole
+      // conversation should contain several elements and some markup, not a
+      // single line of text.
+      structure: (() => {
+        const sample = elements.slice(0, 40);
+        const childCounts = sample.map((el) => el.querySelectorAll('*').length);
+        const anchors = sample.reduce((n, el) => n + el.querySelectorAll('a').length, 0);
+        const imgs = sample.reduce((n, el) => n + el.querySelectorAll('img').length, 0);
+        const localFileRefs = sample.reduce(
+          (n, el) =>
+            n +
+            Array.from(el.querySelectorAll('a[href]')).filter((a) =>
+              /\.(jpe?g|png|webp|gif)$/i.test((a.getAttribute('href') || '').split('?')[0]),
+            ).length,
+          0,
+        );
+        return {
+          sampled: sample.length,
+          descendantsPerEntry: childCounts.length
+            ? `${Math.min(...childCounts)}/${childCounts[Math.floor(childCounts.length / 2)]}/${Math.max(...childCounts)}`
+            : 'n/a',
+          anchorsInSample: anchors,
+          imgsInSample: imgs,
+          localImageHrefsInSample: localFileRefs,
+        };
+      })(),
       repeatedLabels: [...labelCounts.entries()]
         .filter(([, n]) => n >= Math.max(3, entries.length * 0.1))
         .sort((a, b) => b[1] - a[1])

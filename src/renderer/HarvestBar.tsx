@@ -69,6 +69,9 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured }: Prop
         `${scan.entryCount} entries · ${scan.withTimestamp} dated · ${scan.withQuery} titled · ` +
           `${scan.withImages} with images (${scan.imageRefsTotal} refs) · ` +
           `text ${scan.textLengths.min}/${scan.textLengths.median}/${scan.textLengths.max} chars · ` +
+          `nodes ${scan.structure.descendantsPerEntry} · ` +
+          `a=${scan.structure.anchorsInSample} img=${scan.structure.imgsInSample} ` +
+          `imgHref=${scan.structure.localImageHrefsInSample} · ` +
           `container ${scan.containerDescription}` +
           (scan.repeatedLabels.length ? ` · labels ${scan.repeatedLabels.join(', ')}` : ''),
       );
