@@ -99,6 +99,7 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activi
         entries.map((e) => ({
           query: e.query,
           timestamp: e.timestamp,
+          timestampText: e.timestampText,
           href: e.href,
           turns: e.turns,
           imageFiles: e.images,
@@ -109,6 +110,9 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activi
           `(${summary.createdChats} new, ${summary.extendedChats} extended, ` +
           `${summary.datedHarvested} dated, ${summary.ambiguousOpenings} left to glue, ` +
           `${summary.regrouped} regrouped) · ` +
+          (summary.unreadableDates > 0
+            ? `${summary.unreadableDates} dates unreadable · `
+            : '') +
           `${summary.turnsWritten} turns · ` +
           `${summary.inserted} activity recorded ` +
           `(${summary.duplicates} already known, ${summary.skipped} no query) · ` +

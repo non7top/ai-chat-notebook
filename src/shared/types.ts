@@ -134,6 +134,12 @@ export interface TakeoutPick {
 export interface TakeoutImportRow {
   query: string;
   timestamp: string | null;
+  /**
+   * The date exactly as the export wrote it, kept even when it could not be
+   * parsed. A row with no date is otherwise ambiguous between "the export had
+   * none" and "we failed to read it", and those need different responses.
+   */
+  timestampText: string | null;
   href: string | null;
   /** The conversation, split on Google's own "Your prompt:" / "Search's response:" labels. */
   turns: { role: 'user' | 'ai'; text: string; html: string }[];
@@ -154,6 +160,11 @@ export interface TakeoutImportSummary {
   ambiguousOpenings: number;
   /** Wrong groupings from an earlier import that this run repaired. */
   regrouped: number;
+  /**
+   * Entries carrying date text the parser could not read — a bug here, not a
+   * gap in the export, and reported separately so the two are not confused.
+   */
+  unreadableDates: number;
   turnsWritten: number;
   inserted: number;
   duplicates: number;
@@ -191,6 +202,11 @@ export interface SourceEntryView {
   linked: boolean;
   /** Conversations this entry is attached to — the link is many-to-many. */
   chatCount: number;
+  /**
+   * The date as the export wrote it, present only when it could not be parsed —
+   * so an entry with no date says which kind of no-date it is.
+   */
+  dateText: string | null;
 }
 
 export interface NotebookApi {

@@ -28,6 +28,10 @@
 const TIMESTAMP_RE =
   /\b([A-Z][a-z]{2}) (\d{1,2}), (\d{4}), (\d{1,2}):(\d{2}):(\d{2})\s?(AM|PM)\s*(GMT[+-]\d{2}:\d{2})?/;
 
+// Deliberately permissive: it only has to recognise "this is meant to be a
+// date" well enough to quote it back, not to parse it.
+const LOOSE_TIMESTAMP_RE = /[A-Za-z]{3,}\s+\d{1,2},?\s+(19|20)\d{2}[^<\n]{0,40}/;
+
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 /** The labels Google uses to delimit turns inside an entry. */
@@ -76,7 +80,16 @@ export interface TakeoutScan {
 
 function parseTimestamp(text: string): { iso: string | null; raw: string | null } {
   const m = TIMESTAMP_RE.exec(text);
-  if (!m) return { iso: null, raw: null };
+  if (!m) {
+    // Keep whatever date-like text was there. Without this, a date the parser
+    // cannot read is indistinguishable from an entry that never had one, and
+    // both show up as a row with no date — so a parse failure looks like
+    // missing data in the export instead of a bug here. The strict pattern
+    // above insists on AM/PM and English month names, neither of which every
+    // export is guaranteed to use.
+    const loose = LOOSE_TIMESTAMP_RE.exec(text);
+    return { iso: null, raw: loose ? loose[0].trim() : null };
+  }
   const [raw, mon, day, year, hourRaw, minute, second, meridiem, zone] = m;
   const monthIndex = MONTHS.indexOf(mon);
   if (monthIndex < 0) return { iso: null, raw };

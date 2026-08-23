@@ -23,10 +23,17 @@ export default function ChatList({ chats, selectedId, onSelect }: Props) {
     <div className="chat-list">
       {chats.map((chat) => {
         const started = displayDate(chat.startedAt);
+        // Read from the live panel at some point, which is what separates a
+        // conversation the app has really seen from one it only has the
+        // export's account of.
+        const enriched = chat.sources.split(',').includes('capture');
         return (
         <div
           key={chat.id}
-          className={`chat-row${chat.id === selectedId ? ' selected' : ''}`}
+          className={`chat-row${enriched ? ' enriched' : ''}${
+            chat.id === selectedId ? ' selected' : ''
+          }`}
+          title={enriched ? 'Enriched from the panel — has the full text and real images' : undefined}
           draggable
           onDragStart={(event) => {
             event.dataTransfer.setData(

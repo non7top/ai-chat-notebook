@@ -37,6 +37,7 @@ const rows = [
   {
     query: 'how do sprites get generated',
     timestamp: '2026-08-19T03:09:33+07:00',
+    timestampText: 'Aug 19, 2026, 3:09:33 AM GMT+07:00',
     href: 'https://www.google.com/?udm=50&q=a',
     turns: [turn('user', 'how do sprites get generated'), turn('ai', 'first answer')],
     imageFiles: [],
@@ -44,6 +45,7 @@ const rows = [
   {
     query: 'how do sprites get generated',
     timestamp: '2026-08-20T11:00:00+07:00',
+    timestampText: 'Aug 20, 2026, 11:00:00 AM GMT+07:00',
     href: 'https://www.google.com/?udm=50&q=b',
     turns: [
       turn('user', 'how do sprites get generated'),

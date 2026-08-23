@@ -2,7 +2,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { ChatDetail, ChatScope, ChatSummary, Folder, Message } from '../shared/types';
+import type {
+  ChatDetail,
+  ChatScope,
+  ChatSummary,
+  Folder,
+  Message,
+  TakeoutImportRow,
+} from '../shared/types';
 
 let db: DatabaseSync;
 let assetsDir: string;
@@ -652,13 +659,11 @@ export function countChatsWithoutTurns(): number {
 
 /* ---------------------------------------------------------------- takeout */
 
-export interface TakeoutImportRow {
-  query: string;
-  timestamp: string | null;
-  href: string | null;
-  turns: { role: 'user' | 'ai'; text: string; html: string }[];
-  imageFiles: string[];
-}
+// Third copy of a shared type found this session, re-exported rather than
+// redeclared for the same reason as the other two: the renderer parses these
+// rows and the main process consumes them, so a member added on one side and
+// missing on the other is invisible to the type checker across the IPC hop.
+export type { TakeoutImportRow };
 
 export interface TakeoutImportResult {
   created: number;
@@ -724,6 +729,8 @@ export interface TakeoutConversationResult {
    * doing quietly.
    */
   regrouped: number;
+  /** Entries whose date text the parser could not read. */
+  unreadableDates: number;
   turnsWritten: number;
 }
 
@@ -756,6 +763,7 @@ export function importTakeoutConversations(
     mergedIntoHarvested: 0,
     ambiguousOpenings: 0,
     regrouped: 0,
+    unreadableDates: 0,
     turnsWritten: 0,
   };
 
@@ -797,13 +805,22 @@ export function importTakeoutConversations(
       const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
       if (!opening.trim()) continue;
       const ref = `${contentKeyFor(opening)}@${row.timestamp ?? 'nodate'}`;
+      // A row with date text but no parsed timestamp is a parser failure, not
+      // a gap in the export, and the two need different responses — so it is
+      // counted separately and the raw text is kept on the entry so it can be
+      // read back and the pattern fixed.
+      if (row.timestamp === null && row.timestampText) result.unreadableDates += 1;
       keepEntry.run(
         ref,
         row.query,
         contentKeyFor(opening),
         row.timestamp,
         row.href,
-        JSON.stringify({ turns: row.turns, images: row.imageFiles }),
+        JSON.stringify({
+          turns: row.turns,
+          images: row.imageFiles,
+          timestampText: row.timestampText ?? null,
+        }),
         now,
       );
       const found = findEntry.get(ref) as unknown as { id: number } | undefined;
@@ -1131,6 +1148,12 @@ export interface SourceEntryView {
    * a corruption to repair.
    */
   chatCount: number;
+  /**
+   * The date as the export wrote it, kept when it could not be parsed. Present
+   * only in that case, so an entry showing no date says which kind of no-date
+   * it is: nothing to read, or something we failed to read.
+   */
+  dateText: string | null;
 }
 
 /**
@@ -1174,13 +1197,16 @@ export function sourceEntriesForChat(chatId: number): SourceEntryView[] {
   return rows.map((row) => {
     let turnCount = 0;
     let imageCount = 0;
+    let dateText: string | null = null;
     try {
       const payload = JSON.parse(row.payload_json) as {
         turns?: unknown[];
         images?: unknown[];
+        timestampText?: string | null;
       };
       turnCount = payload.turns?.length ?? 0;
       imageCount = payload.images?.length ?? 0;
+      dateText = payload.timestampText ?? null;
     } catch {
       // A payload that will not parse is still worth listing: its existence is
       // the point, and hiding it would make the record look complete.
@@ -1195,6 +1221,7 @@ export function sourceEntriesForChat(chatId: number): SourceEntryView[] {
       imageCount,
       linked: row.linked === 1,
       chatCount: row.chat_count,
+      dateText,
     };
   });
 }
@@ -1409,10 +1436,16 @@ export function orphanSourceEntries(): SourceEntryView[] {
   return rows.map((row) => {
     let turnCount = 0;
     let imageCount = 0;
+    let dateText: string | null = null;
     try {
-      const payload = JSON.parse(row.payload_json) as { turns?: unknown[]; images?: unknown[] };
+      const payload = JSON.parse(row.payload_json) as {
+        turns?: unknown[];
+        images?: unknown[];
+        timestampText?: string | null;
+      };
       turnCount = payload.turns?.length ?? 0;
       imageCount = payload.images?.length ?? 0;
+      dateText = payload.timestampText ?? null;
     } catch {
       // Listed regardless — see sourceEntriesForChat.
     }
@@ -1426,6 +1459,7 @@ export function orphanSourceEntries(): SourceEntryView[] {
       imageCount,
       linked: false,
       chatCount: 0,
+      dateText,
     };
   });
 }

@@ -56,7 +56,11 @@ export default function OrphanEntries({ onChange }: Props) {
               {openId === entry.id ? '▾' : '▸'} {entry.query || '(no prompt)'}
             </button>
             <span className="source-facts">
-              {entry.occurredAt ? displayDateTime(entry.occurredAt) : 'no date'}
+              {entry.occurredAt
+                ? displayDateTime(entry.occurredAt)
+                : entry.dateText
+                  ? `date unread: ${entry.dateText}`
+                  : 'no date'}
               {' · '}
               {entry.turnCount} {entry.turnCount === 1 ? 'turn' : 'turns'}
               {' · '}

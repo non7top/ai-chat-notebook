@@ -199,7 +199,21 @@ export default function ChatReader({ chat, onChange }: Props) {
                   {/* Only what this entry actually carries — a field it is
                       missing is said to be missing rather than filled in from
                       a sibling, which is how a gap gets noticed. */}
-                  {entry.occurredAt ? displayDateTime(entry.occurredAt) : 'no date'}
+                  {entry.occurredAt ? (
+                    displayDateTime(entry.occurredAt)
+                  ) : entry.dateText ? (
+                    // The export did carry a date; this parser could not read
+                    // it. Quoted verbatim, because that text is what the
+                    // pattern has to be fixed against.
+                    <span
+                      className="date-unread"
+                      title="The export carried this date but it could not be parsed"
+                    >
+                      date unread: {entry.dateText}
+                    </span>
+                  ) : (
+                    'no date'
+                  )}
                   {' · '}
                   {entry.turnCount} {entry.turnCount === 1 ? 'turn' : 'turns'}
                   {' · '}
