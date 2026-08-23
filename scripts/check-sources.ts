@@ -399,5 +399,54 @@ repairScenario(true);
   fs.rmSync(scratch, { recursive: true, force: true });
 }
 
+// ---------------------------------------------------------------------------
+// An export image reaches its conversation.
+//
+// The bytes were being copied into the asset store and then abandoned: no row
+// pointed at them, so the app could not count them, show them, or find them
+// again. A file on disk that nothing references is lost in every sense that
+// matters, and the count said zero images for a conversation that had one.
+{
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'notebook-images-'));
+  db.initDb(scratch);
+
+  const withImage = {
+    query: 'draw me a sprite',
+    timestamp: '2026-08-17T09:00:00+07:00',
+    timestampText: 'Aug 17, 2026, 9:00:00 AM GMT+07:00',
+    href: null,
+    turns: [turn('user', 'draw me a sprite'), turn('ai', "here's your generated image")],
+    imageFiles: ['sprite.png'],
+  };
+  db.importTakeoutConversations([withImage] as never);
+
+  // The ref must be derivable from the row alone — that is what lets an image
+  // find its entry after the import has finished.
+  const ref = db.takeoutEntryRef(withImage.turns[0].text, withImage.timestamp, {
+    turns: withImage.turns,
+    images: withImage.imageFiles,
+    href: withImage.href,
+  });
+  const chatId = db.chatIdForEntry(ref);
+  console.log('\nexport image — entry resolves to chat:', chatId);
+  if (chatId === null) throw new Error('an entry could not be found again by its own ref');
+
+  const before = db.listChats({ kind: 'all' })[0];
+  db.attachExportImage(chatId, {
+    sha256: 'a'.repeat(64),
+    mime: 'image/png',
+    localPath: '/nowhere/a.png',
+    bytes: 1234,
+  });
+  const after = db.listChats({ kind: 'all' })[0];
+  console.log(`  image count ${before.imageCount} -> ${after.imageCount}`);
+  if (after.imageCount !== before.imageCount + 1) {
+    throw new Error('an attached export image was not counted');
+  }
+  // Counted as a real image, not as page furniture.
+  if (after.previewCount !== 0) throw new Error('an export image was counted as a preview');
+  fs.rmSync(scratch, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('OK');

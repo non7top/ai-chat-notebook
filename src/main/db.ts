@@ -214,6 +214,16 @@ export function initDb(userDataPath: string): void {
   // or the activity log, and 'takeout' is the honest default for them: nothing
   // else could have written one before this column existed.
   ensureColumn('chats', 'date_basis', 'date_basis TEXT');
+  // What an image is: 'generated', 'upload', or 'other' for a rich link
+  // preview, a source-card thumbnail, or anything else the page put inline.
+  //
+  // Left NULL for everything captured before this existed, and NULL counts as
+  // an image rather than as furniture. Backfilling it would mean guessing from
+  // the URL, and both uploads and freshly generated images arrive as data: URIs
+  // with no host to guess from — mislabelling a real generated image as a
+  // preview would be worse than the over-count it replaces. Re-capturing a
+  // conversation classifies its images properly.
+  ensureColumn('assets', 'kind', 'kind TEXT');
   db.exec("UPDATE chats SET date_basis = 'takeout' WHERE started_at IS NOT NULL AND date_basis IS NULL");
   db.exec('CREATE INDEX IF NOT EXISTS chats_list_rank ON chats(list_rank);');
 
@@ -318,6 +328,7 @@ interface ChatSummaryRow {
   last_seen_at: string;
   message_count: number;
   image_count: number;
+  preview_count: number;
   capture_attempts: number;
   source: string;
   sources: string;
@@ -342,7 +353,16 @@ const CHAT_SUMMARY_SQL = `
          (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count,
          -- DISTINCT sha256, not row count: every image is rendered twice by the
          -- page, so counting asset rows would report double.
-         (SELECT COUNT(DISTINCT a.sha256) FROM assets a WHERE a.chat_id = c.id) AS image_count
+         -- The conversation's own images. NULL kind is included: it means
+         -- "captured before kinds existed", not "furniture".
+         (SELECT COUNT(DISTINCT a.sha256) FROM assets a
+           WHERE a.chat_id = c.id
+             AND (a.kind IS NULL OR a.kind IN ('generated', 'upload', 'takeout')))
+           AS image_count,
+         -- Rich previews and source thumbnails. Kept, since nothing is
+         -- discarded, but counted apart so 17 previews never read as 17 images.
+         (SELECT COUNT(DISTINCT a.sha256) FROM assets a
+           WHERE a.chat_id = c.id AND a.kind = 'other') AS preview_count
   FROM chats c
 `;
 
@@ -356,6 +376,7 @@ function toSummary(row: ChatSummaryRow): ChatSummary {
     lastSeenAt: row.last_seen_at,
     messageCount: row.message_count,
     imageCount: row.image_count,
+    previewCount: row.preview_count,
     captureAttempts: row.capture_attempts,
     source: row.source,
     sources: row.sources,
@@ -523,6 +544,8 @@ export interface TurnToSave {
 
 export interface AssetToSave {
   messageSeq: number;
+  /** 'generated' | 'upload' | 'other' — see the assets.kind note in initDb. */
+  kind: string | null;
   originalUrl: string | null;
   sha256: string;
   mime: string;
@@ -575,8 +598,8 @@ export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetT
 
     const insertAsset = db.prepare(
       `INSERT OR IGNORE INTO assets
-         (chat_id, message_id, original_url, sha256, mime, local_path, bytes)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         (chat_id, message_id, original_url, sha256, mime, local_path, bytes, kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const asset of assets) {
       insertAsset.run(
@@ -587,6 +610,7 @@ export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetT
         asset.mime,
         asset.localPath,
         asset.bytes,
+        asset.kind,
       );
     }
 
@@ -765,6 +789,29 @@ export interface TakeoutConversationResult {
   turnsWritten: number;
 }
 
+/**
+ * An export entry's identity — the one place this shape is written down.
+ *
+ * Three places need it: the loop that stores entries, the placement decision,
+ * and the image attachment that has to find the entry again afterwards. Three
+ * copies of the arithmetic would eventually disagree, and the symptom would be
+ * an image silently attaching to nothing.
+ *
+ * Keyed on the opening prompt plus the timestamp, so two conversations that
+ * begin identically at different times stay distinct. An entry with no opening
+ * prompt is keyed on its payload instead: there is nothing to identify it by, so
+ * every one of them would otherwise collide with every other.
+ */
+export function takeoutEntryRef(
+  opening: string,
+  timestamp: string | null,
+  payload: { turns: unknown; images: unknown; href: unknown },
+): string {
+  return opening.trim()
+    ? `${contentKeyFor(opening)}@${timestamp ?? 'nodate'}`
+    : `payload:${contentKeyFor(JSON.stringify(payload))}`;
+}
+
 /** Where one entry would land, decided without writing anything. */
 export interface EntryPlacement {
   /** Identity of the raw entry: opening prompt plus its timestamp. */
@@ -801,7 +848,11 @@ export function placeEntry(
 ): EntryPlacement {
   const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
   const key = contentKeyFor(opening);
-  const ref = `${key}@${row.timestamp ?? 'nodate'}`;
+  const ref = takeoutEntryRef(opening, row.timestamp, {
+    turns: row.turns,
+    images: row.imageFiles,
+    href: row.href,
+  });
   const ambiguous = openingCount > 1;
 
   const known =
@@ -1069,11 +1120,11 @@ export function importTakeoutConversations(
       // opening to key on and every such entry would otherwise collide with
       // every other. Content-addressed, so re-importing the same export
       // recognises them instead of piling up copies.
-      const ref = opening.trim()
-        ? `${contentKeyFor(opening)}@${row.timestamp ?? 'nodate'}`
-        : `payload:${contentKeyFor(
-            JSON.stringify({ turns: row.turns, images: row.imageFiles, href: row.href }),
-          )}`;
+      const ref = takeoutEntryRef(opening, row.timestamp, {
+        turns: row.turns,
+        images: row.imageFiles,
+        href: row.href,
+      });
       if (!opening.trim()) result.orphaned += 1;
       // A row with date text but no parsed timestamp is a parser failure, not
       // a gap in the export, and the two need different responses — so it is
@@ -1620,6 +1671,49 @@ function adoptEntry(entryId: number, folderId: number | null, from?: number): nu
   noteSource(chatId, entry.kind);
   noteSource(chatId, from === undefined ? 'adopted' : 'unglued');
   return chatId;
+}
+
+/**
+ * The conversation an entry is attached to, by the entry's own reference.
+ *
+ * Uses the link table, so it answers the question the same way the rest of the
+ * app does rather than re-deriving it from the entry's contents.
+ */
+export function chatIdForEntry(ref: string): number | null {
+  const row = db
+    .prepare(
+      `SELECT cs.chat_id AS id FROM source_entries e
+         JOIN chat_sources cs ON cs.source_entry_id = e.id
+         JOIN chats c ON c.id = cs.chat_id
+        WHERE e.kind = 'takeout' AND e.external_ref = ? AND c.merged_into IS NULL
+        ORDER BY CASE cs.linked_by WHEN 'import' THEN 0 ELSE 1 END
+        LIMIT 1`,
+    )
+    .get(ref) as { id: number } | undefined;
+  return row?.id ?? null;
+}
+
+/**
+ * Records an image shipped in the export against its conversation.
+ *
+ * Without this the export's images were copied into the asset store and then
+ * abandoned: files on disk with no row pointing at them, so the app could not
+ * count them, show them, or find them again. Bytes kept and knowledge of them
+ * thrown away, which is the same loss as deleting them.
+ *
+ * message_id is null: the export puts its images in a cell of their own, beside
+ * the conversation rather than inside a turn, so there is no turn to attribute
+ * them to without guessing.
+ */
+export function attachExportImage(
+  chatId: number,
+  asset: { sha256: string; mime: string; localPath: string; bytes: number },
+): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO assets
+       (chat_id, message_id, original_url, sha256, mime, local_path, bytes, kind)
+     VALUES (?, NULL, NULL, ?, ?, ?, ?, 'takeout')`,
+  ).run(chatId, asset.sha256, asset.mime, asset.localPath, asset.bytes);
 }
 
 /** Gives an orphan entry a conversation of its own. */

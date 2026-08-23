@@ -519,6 +519,12 @@ button:disabled {
   color: #047857;
 }
 
+/* Page furniture, not content: muted rather than green, so it never competes
+   with the real image count for attention. */
+.chat-previews {
+  color: var(--muted);
+}
+
 /* Provenance: quiet by default, since it answers a question you only
    occasionally ask, but always present so the answer exists. */
 .chat-source {

@@ -273,6 +273,7 @@ async function captureOneChat(chat: { id: number; externalId: string; title: str
         replacements.set(image.src, assetHref(outcome.asset));
         assets.push({
           messageSeq: index,
+          kind: image.kind,
           // A data: URI is the payload itself, so recording it as the "original
           // URL" would duplicate the whole image into the database.
           originalUrl: image.src.startsWith('data:') ? null : image.src,

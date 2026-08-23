@@ -699,6 +699,25 @@ const READ_TURNS_SCRIPT = `
 
     const chromeSel = ${JSON.stringify(TURN_CHROME_SELECTORS.join(','))};
     // Defined before stripped(), which depends on it.
+    // What an image IS, not merely how big it is. Size alone was the whole
+    // rule, and it let every rich link preview and source-card thumbnail
+    // through: a conversation reported 17 images of which none were the
+    // generated pictures the conversation was about. Classified from the
+    // markers recorded in the findings above — img.HkNHyd with
+    // alt="AI generated image" for generated, img.taqkMe for uploads — and
+    // anything else is called 'other' rather than guessed at.
+    const kindOf = (img) => {
+      const cls = img.className || '';
+      const alt = img.getAttribute('alt') || '';
+      if (cls.indexOf('HkNHyd') !== -1 || alt === 'AI generated image') return 'generated';
+      if (cls.indexOf('taqkMe') !== -1 || alt === 'Visually searched image') return 'upload';
+      // img.fRm5F is the second copy of a real image, rendered outside the
+      // controls. Same picture, so it is content — the store is
+      // content-addressed and will collapse the duplicate.
+      if (cls.indexOf('fRm5F') !== -1) return 'generated';
+      return 'other';
+    };
+
     const imagesIn = (el) =>
       Array.from(el.querySelectorAll('img'))
         .map((img) => ({
@@ -706,9 +725,11 @@ const READ_TURNS_SCRIPT = `
           alt: img.getAttribute('alt') || null,
           width: img.naturalWidth,
           height: img.naturalHeight,
+          kind: kindOf(img),
         }))
         // Icons and spacers are not conversation content. 120px is above every
-        // UI glyph seen and below every real image.
+        // UI glyph seen and below every real image. Kept as a floor even with
+        // kinds, since an unclassified image still has to clear it.
         .filter((i) => i.src && (i.width >= 120 || i.height >= 120));
 
     // Strip chrome from a COPY, so the live page is never modified — this runs
@@ -812,6 +833,12 @@ const READ_TURNS_SCRIPT = `
 `;
 
 export interface CapturedImage {
+  /**
+   * 'generated' | 'upload' | 'other'. 'other' is a rich link preview, a source
+   * card thumbnail or anything else the page put inline — stored, because
+   * nothing is discarded, but not counted as one of the conversation's images.
+   */
+  kind: string;
   src: string;
   alt: string | null;
   width: number;

@@ -29,6 +29,12 @@ export interface ChatSummary {
   messageCount: number;
   /** Distinct images archived, so an image-heavy conversation is findable. */
   imageCount: number;
+  /**
+   * Rich link previews and source-card thumbnails. Stored like anything else,
+   * but counted apart: a conversation with 17 of these and no generated image
+   * used to report "17 img", which is not what the reader was being told.
+   */
+  previewCount: number;
   /** Failed capture attempts — distinguishes "failed" from "never tried". */
   captureAttempts: number;
   /**
@@ -182,6 +188,12 @@ export interface TakeoutImportSummary {
   orphans: number;
   imagesCopied: number;
   imagesMissing: number;
+  /**
+   * Images copied but attached to no conversation, because their entry was not
+   * placed. Non-zero means the bytes are kept and nothing points at them, which
+   * is worth seeing rather than discovering later.
+   */
+  imagesOrphaned: number;
 }
 
 export interface ActivityMatchResult {

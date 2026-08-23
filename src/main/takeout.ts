@@ -28,6 +28,22 @@ const EXTENSION_MIME: Record<string, string> = {
   '.gif': 'image/gif',
 };
 
+/**
+ * An entry's own reference, matching the one the import writes.
+ *
+ * Duplicated arithmetic would be a bug waiting to happen, so this exists to be
+ * the one place the shape is written down outside db.ts — the import derives the
+ * same string, and if they ever disagree an image silently attaches to nothing.
+ */
+function entryRefFor(row: db.TakeoutImportRow): string {
+  const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+  return db.takeoutEntryRef(opening, row.timestamp, {
+    turns: row.turns,
+    images: row.imageFiles,
+    href: row.href,
+  });
+}
+
 function copyIntoAssetStore(sourcePath: string): { sha256: string; localPath: string; bytes: number; mime: string } | null {
   try {
     const buffer = fs.readFileSync(sourcePath);
@@ -60,7 +76,12 @@ export function importTakeout(
 
   let imagesCopied = 0;
   let imagesMissing = 0;
+  let imagesOrphaned = 0;
   for (const row of rows) {
+    if (row.imageFiles.length === 0) continue;
+    // Which conversation this entry landed on, asked of the link table rather
+    // than re-derived, so an image follows its entry wherever the entry went.
+    const chatId = db.chatIdForEntry(entryRefFor(row));
     for (const name of row.imageFiles) {
       const candidate = path.join(folder, name);
       if (!fs.existsSync(candidate)) {
@@ -69,8 +90,17 @@ export function importTakeout(
         imagesMissing += 1;
         continue;
       }
-      if (copyIntoAssetStore(candidate)) imagesCopied += 1;
-      else imagesMissing += 1;
+      const asset = copyIntoAssetStore(candidate);
+      if (!asset) {
+        imagesMissing += 1;
+        continue;
+      }
+      imagesCopied += 1;
+      // The bytes used to be written and then abandoned — no row pointed at
+      // them, so the app could neither count nor show them. A file on disk that
+      // nothing references is lost in every sense that matters.
+      if (chatId !== null) db.attachExportImage(chatId, asset);
+      else imagesOrphaned += 1;
     }
   }
 
@@ -93,6 +123,7 @@ export function importTakeout(
     orphans: matched.orphans,
     imagesCopied,
     imagesMissing,
+    imagesOrphaned,
   };
 }
 

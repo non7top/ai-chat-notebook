@@ -151,7 +151,10 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activi
           `(${summary.duplicates} already known, ${summary.skipped} no query) · ` +
           `matched ${summary.matchedToChat} by title, ${summary.matchedToTurn} by turn · ` +
           `${summary.ambiguous} ambiguous · ${summary.orphans} orphaned · ` +
-          `images ${summary.imagesCopied} copied`,
+          `images ${summary.imagesCopied} copied` +
+          (summary.imagesOrphaned > 0
+            ? `, ${summary.imagesOrphaned} attached to nothing`
+            : ''),
       );
       setTakeout(null);
       onFinished();

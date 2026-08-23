@@ -221,6 +221,18 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
                   {chat.imageCount} img
                 </span>
               )}
+              {/* Counted apart and named for what they are. A conversation with
+                  17 rich link previews and no generated picture reported "17
+                  img", which told the reader the opposite of the truth. */}
+              {chat.previewCount > 0 && (
+                <span
+                  className="chat-previews"
+                  title={`${chat.previewCount} link preview(s) or source thumbnail(s) — not the conversation's own images`}
+                >
+                  {' · '}
+                  {chat.previewCount} preview{chat.previewCount === 1 ? '' : 's'}
+                </span>
+              )}
             </span>
           </button>
         </div>
