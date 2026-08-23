@@ -15,6 +15,11 @@ import { getAssetsDir } from './db';
  */
 export interface TakeoutImportSummary {
   entries: number;
+  conversations: number;
+  createdChats: number;
+  extendedChats: number;
+  datedHarvested: number;
+  turnsWritten: number;
   inserted: number;
   duplicates: number;
   skipped: number;
@@ -58,6 +63,9 @@ export function importTakeout(
   // Activity first, then matching. Nothing here creates a conversation: an
   // export has no thread id, so it cannot identify one, and the version that
   // tried invented 736 conversations from 981 entries.
+  // Conversations first — Takeout is the base — then activity for the
+  // per-submission timestamps, then matching for anything still unattached.
+  const conversations = db.importTakeoutConversations(rows);
   const stored = db.importActivity(rows);
   const matched = db.matchActivity();
 
@@ -79,6 +87,11 @@ export function importTakeout(
 
   return {
     entries: rows.length,
+    conversations: conversations.conversations,
+    createdChats: conversations.created,
+    extendedChats: conversations.extended,
+    datedHarvested: conversations.mergedIntoHarvested,
+    turnsWritten: conversations.turnsWritten,
     inserted: stored.inserted,
     duplicates: stored.duplicates,
     skipped: stored.skipped,

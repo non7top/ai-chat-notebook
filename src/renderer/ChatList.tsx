@@ -81,14 +81,44 @@ export default function ChatList({ chats, selectedId, onSelect }: Props) {
                   thing worth browsing by. */}
               {/* Where the row came from. Without it a Takeout prompt and a
                   fully captured conversation look identical in the list. */}
-              <span className={`chat-source src-${chat.source}`}>
+              {/* Every contributing source, not just the last writer: a
+                  conversation imported from Takeout and later extended from the
+                  panel should say so, since that determines whether it has the
+                  original images. */}
+              <span className={`chat-source src-${chat.source}`} title={`sources: ${chat.sources}`}>
                 {' · '}
-                {chat.source === 'capture'
-                  ? 'panel'
-                  : chat.source === 'harvest'
-                    ? 'listed'
-                    : chat.source}
+                {chat.sources
+                  .split(',')
+                  .filter(Boolean)
+                  .map((s) =>
+                    s === 'capture'
+                      ? 'panel'
+                      : s === 'harvest'
+                        ? 'listed'
+                        : s === 'takeout-date'
+                          ? 'dated'
+                          : s,
+                  )
+                  .join('+')}
               </span>
+              {chat.takeoutEntryCount > 1 && (
+                <span
+                  className="chat-grouped"
+                  title={`${chat.takeoutEntryCount} export entries were grouped into this conversation`}
+                >
+                  {' · '}
+                  {chat.takeoutEntryCount} entries
+                </span>
+              )}
+              {chat.altTurnCount > 0 && chat.altTurnCount !== chat.messageCount && (
+                <span
+                  className="chat-mismatch"
+                  title={`The other reading of this conversation has ${chat.altTurnCount} turns, this one has ${chat.messageCount}`}
+                >
+                  {' · '}
+                  differs
+                </span>
+              )}
               {chat.imageCount > 0 && (
                 <span className="chat-images" title={`${chat.imageCount} image(s) archived`}>
                   {' · '}

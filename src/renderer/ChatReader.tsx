@@ -90,12 +90,22 @@ export default function ChatReader({ chat, onChange }: Props) {
           constructed mtid URL creates a duplicate conversation. Clicking the
           sidebar row is the only faithful route, so it is a button. */}
       <p className="provenance">
-        <span>
-          {chat.source === 'capture'
-            ? 'captured from the panel'
-            : chat.source === 'harvest'
-              ? 'listed in the sidebar, not yet captured'
-              : `source: ${chat.source}`}
+        <span title="Every source that contributed to this conversation">
+          {chat.sources
+            .split(',')
+            .filter(Boolean)
+            .map((s) =>
+              s === 'capture'
+                ? 'captured from the panel'
+                : s === 'harvest'
+                  ? 'listed in the sidebar'
+                  : s === 'takeout'
+                    ? 'text from Takeout'
+                    : s === 'takeout-date'
+                      ? 'dated from Takeout'
+                      : s,
+            )
+            .join(' + ')}
         </span>
         {chat.startedAt && (
           <span title="Inferred by matching the Takeout prompt text, not from a thread id">

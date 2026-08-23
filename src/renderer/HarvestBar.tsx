@@ -76,14 +76,11 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activi
       const { scan } = parseTakeoutHtml(picked.html);
       setTakeout(picked);
       setTakeoutNote(
-        `${scan.entryCount} entries · ${scan.withTimestamp} dated · ${scan.withQuery} titled · ` +
-          `${scan.withImages} with images (${scan.imageRefsTotal} refs) · ` +
-          `text ${scan.textLengths.min}/${scan.textLengths.median}/${scan.textLengths.max} chars · ` +
-          `nodes ${scan.structure.descendantsPerEntry} · ` +
-          `a=${scan.structure.anchorsInSample} img=${scan.structure.imgsInSample} ` +
-          `imgHref=${scan.structure.localImageHrefsInSample} · ` +
-          `container ${scan.containerDescription}` +
-          (scan.repeatedLabels.length ? ` · labels ${scan.repeatedLabels.join(', ')}` : ''),
+        `${scan.entryCount} cells, ${scan.aiModeEntries} AI Mode · ` +
+          `${scan.withTimestamp} dated · ${scan.withQuery} titled · ` +
+          `turns ${scan.turnCounts.min}/${scan.turnCounts.median}/${scan.turnCounts.max} ` +
+          `(${scan.turnCounts.total} total, ${scan.multiTurnEntries} multi-turn) · ` +
+          `${scan.withImages} with images (${scan.imageRefsTotal})`,
       );
     } catch (err) {
       setTakeoutNote(err instanceof Error ? err.message : String(err));
@@ -103,12 +100,15 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activi
           query: e.query,
           timestamp: e.timestamp,
           href: e.href,
-          text: e.text,
+          turns: e.turns,
           imageFiles: e.images,
         })),
       );
       setTakeoutNote(
-        `${summary.entries} entries → ${summary.inserted} recorded ` +
+        `${summary.entries} entries → ${summary.conversations} conversations ` +
+          `(${summary.createdChats} new, ${summary.extendedChats} extended, ` +
+          `${summary.datedHarvested} dated) · ${summary.turnsWritten} turns · ` +
+          `${summary.inserted} activity recorded ` +
           `(${summary.duplicates} already known, ${summary.skipped} no query) · ` +
           `matched ${summary.matchedToChat} by title, ${summary.matchedToTurn} by turn · ` +
           `${summary.ambiguous} ambiguous · ${summary.orphans} orphaned · ` +

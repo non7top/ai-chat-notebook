@@ -30,6 +30,24 @@ export interface ChatSummary {
    * Shown in the UI because otherwise a conversation's origin is invisible.
    */
   source: string;
+  /**
+   * Every source that has contributed, comma-separated — so a conversation
+   * imported from Takeout and later extended from the panel says both, rather
+   * than only whichever wrote last.
+   */
+  sources: string;
+  /**
+   * Turns in the other reading, when both Takeout and the panel described this
+   * conversation. Non-zero and different from messageCount means the two
+   * disagree, which is worth seeing rather than resolving silently.
+   */
+  altTurnCount: number;
+  /**
+   * Export entries folded into this conversation. More than one means
+   * successive snapshots were grouped, and seeing the number is how a wrong
+   * grouping gets noticed.
+   */
+  takeoutEntryCount: number;
 }
 
 export interface Message {
@@ -112,12 +130,18 @@ export interface TakeoutImportRow {
   query: string;
   timestamp: string | null;
   href: string | null;
-  text: string;
+  /** The conversation, split on Google's own "Your prompt:" / "Search's response:" labels. */
+  turns: { role: 'user' | 'ai'; text: string; html: string }[];
   imageFiles: string[];
 }
 
 export interface TakeoutImportSummary {
   entries: number;
+  conversations: number;
+  createdChats: number;
+  extendedChats: number;
+  datedHarvested: number;
+  turnsWritten: number;
   inserted: number;
   duplicates: number;
   skipped: number;

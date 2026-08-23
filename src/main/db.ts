@@ -139,6 +139,15 @@ export function initDb(userDataPath: string): void {
   // already holds harvested rows.
   ensureColumn('chats', 'list_rank', 'list_rank INTEGER');
   ensureColumn('chats', 'capture_attempts', 'capture_attempts INTEGER NOT NULL DEFAULT 0');
+  // Accumulates rather than overwrites: a conversation imported from Takeout
+  // and then extended from the panel has two provenances, and reporting only
+  // the latest hides where its content actually came from.
+  ensureColumn('chats', 'sources', 'sources TEXT');
+  // How many export entries were folded into this conversation. Grouping
+  // successive snapshots is correct, but doing it invisibly hides that three
+  // records were collapsed into one — and that is exactly where a wrong
+  // grouping would be spotted.
+  ensureColumn('chats', 'takeout_entries', 'takeout_entries INTEGER NOT NULL DEFAULT 0');
   db.exec('CREATE INDEX IF NOT EXISTS chats_list_rank ON chats(list_rank);');
 
   fts5Available = probeFts5(db);
@@ -152,6 +161,16 @@ export function initDb(userDataPath: string): void {
   // thousand images don't all land in one directory.
   assetsDir = path.join(userDataPath, 'assets');
   fs.mkdirSync(assetsDir, { recursive: true });
+}
+
+/** Adds a contributing source without losing the ones already recorded. */
+function noteSource(chatId: number, source: string): void {
+  const row = db.prepare('SELECT sources FROM chats WHERE id = ?').get(chatId) as unknown as
+    | { sources: string | null }
+    | undefined;
+  const set = new Set((row?.sources ?? '').split(',').filter(Boolean));
+  set.add(source);
+  db.prepare('UPDATE chats SET sources = ? WHERE id = ?').run([...set].join(','), chatId);
 }
 
 export function getAssetsDir(): string {
@@ -233,6 +252,9 @@ interface ChatSummaryRow {
   image_count: number;
   capture_attempts: number;
   source: string;
+  sources: string;
+  alt_turns: number | null;
+  takeout_entries: number;
 }
 
 // COALESCE order is the display rule in one place: a title typed by hand wins
@@ -242,7 +264,12 @@ const CHAT_TITLE_SQL = "COALESCE(NULLIF(user_title, ''), NULLIF(title, ''), '(un
 
 const CHAT_SUMMARY_SQL = `
   SELECT c.id, c.folder_id, ${CHAT_TITLE_SQL} AS title, c.started_at, c.last_seen_at,
-         c.capture_attempts, c.source,
+         c.capture_attempts, c.source, COALESCE(c.sources, c.source) AS sources,
+         -- Turn count of the other reading, when one was kept, so a
+         -- disagreement between Takeout and the panel is visible instead of
+         -- being resolved out of sight.
+         (SELECT COUNT(*) FROM json_each(json_extract(c.raw_json, '$.takeout.turns'))) AS alt_turns,
+         c.takeout_entries,
          (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count,
          -- DISTINCT sha256, not row count: every image is rendered twice by the
          -- page, so counting asset rows would report double.
@@ -261,6 +288,9 @@ function toSummary(row: ChatSummaryRow): ChatSummary {
     imageCount: row.image_count,
     captureAttempts: row.capture_attempts,
     source: row.source,
+    sources: row.sources,
+    altTurnCount: row.alt_turns ?? 0,
+    takeoutEntryCount: row.takeout_entries ?? 0,
   };
 }
 
@@ -475,6 +505,7 @@ export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetT
       new Date().toISOString(),
       chatId,
     );
+    noteSource(chatId, 'capture');
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
@@ -522,6 +553,12 @@ export function chatsWithoutTurns(limit: number): ChatToCapture[] {
            NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
            OR c.source = 'takeout'
          )
+         -- Excluded: conversations that exist only in Takeout. They have no
+         -- Google thread id, so the panel cannot open them however many times
+         -- it tries, and queueing them would mark genuinely unrecoverable
+         -- conversations as "capture failed" — which reads as a bug rather than
+         -- as Google having dropped them.
+         AND c.external_id NOT LIKE 'takeout:%'
        -- Never-attempted conversations first, then by Google's recency order.
        -- Without this, a long unattended run re-tries the same early failures
        -- ahead of hundreds of conversations it has never even looked at, and
@@ -548,7 +585,8 @@ export function countChatsWithoutTurns(): number {
          AND (
            NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
            OR c.source = 'takeout'
-         )`,
+         )
+         AND c.external_id NOT LIKE 'takeout:%'`,
     )
     .get() as unknown as { n: number };
   return row.n;
@@ -560,7 +598,7 @@ export interface TakeoutImportRow {
   query: string;
   timestamp: string | null;
   href: string | null;
-  text: string;
+  turns: { role: 'user' | 'ai'; text: string; html: string }[];
   imageFiles: string[];
 }
 
@@ -600,6 +638,215 @@ export function importActivity(rows: TakeoutImportRow[]): ActivityImportResult {
       const changes = insert.run(query, contentKeyFor(query), row.timestamp, row.href).changes;
       if (Number(changes) > 0) result.inserted += 1;
       else result.duplicates += 1;
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  return result;
+}
+
+export interface TakeoutConversationResult {
+  entries: number;
+  conversations: number;
+  created: number;
+  extended: number;
+  mergedIntoHarvested: number;
+  turnsWritten: number;
+}
+
+/**
+ * Imports Takeout entries as conversations, with their turns.
+ *
+ * Takeout is the base and the panel extends it: an export holds the complete
+ * text of every conversation including ones Google has since dropped, while
+ * only the panel still has the original uploads and generated images.
+ *
+ * Entries are deduplicated by opening query first. The export contains far more
+ * entries than conversations — roughly 981 against 300 — because it appears to
+ * record a snapshot per submission, each containing the conversation so far. Of
+ * the entries sharing an opening query, the one with the most turns is the
+ * furthest along, so that is the conversation and the rest are its earlier
+ * states.
+ *
+ * A harvested conversation with the same opening query is EXTENDED rather than
+ * duplicated, keeping its Google thread id — which is the only real identifier
+ * in the system and the thing that makes a later panel capture possible.
+ */
+export function importTakeoutConversations(
+  rows: TakeoutImportRow[],
+): TakeoutConversationResult {
+  const result: TakeoutConversationResult = {
+    entries: rows.length,
+    conversations: 0,
+    created: 0,
+    extended: 0,
+    mergedIntoHarvested: 0,
+    turnsWritten: 0,
+  };
+
+  // Group entries into conversations, then keep the fullest snapshot of each.
+  //
+  // Grouping by opening prompt ALONE loses data: the same query may have been
+  // asked twice, producing two genuinely different conversations, and Google
+  // sometimes clones an entry as well. Keeping only the longest per prompt would
+  // silently discard the other conversation entirely.
+  //
+  // So entries join a group only if their turn sequences do not contradict each
+  // other — one being a prefix of the other, which is what successive snapshots
+  // of the same conversation look like. Divergence at any turn starts a new
+  // group.
+  const norm = (t: string) => t.toLowerCase().replace(/\s+/g, ' ').trim();
+  const sequence = (row: TakeoutImportRow) => row.turns.map((t) => `${t.role}:${norm(t.text)}`);
+  const compatible = (a: string[], b: string[]) => {
+    const shared = Math.min(a.length, b.length);
+    for (let i = 0; i < shared; i += 1) if (a[i] !== b[i]) return false;
+    return true;
+  };
+
+  const groups: { key: string; seq: string[]; row: TakeoutImportRow; members: number }[] = [];
+  for (const row of rows) {
+    const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+    if (!opening.trim()) continue;
+    const key = contentKeyFor(opening);
+    const seq = sequence(row);
+    const group = groups.find((g) => g.key === key && compatible(g.seq, seq));
+    if (!group) {
+      groups.push({ key, seq, row, members: 1 });
+      continue;
+    }
+    group.members += 1;
+    // Keep the longer reading; it is the conversation further along.
+    if (seq.length > group.seq.length) {
+      group.seq = seq;
+      group.row = row;
+    }
+  }
+  const best = new Map<string, { row: TakeoutImportRow; members: number }>();
+  groups.forEach((g, index) => {
+    // Distinct groups sharing an opening need distinct handles.
+    const handle = groups.filter((o) => o.key === g.key).length > 1 ? `${g.key}#${index}` : g.key;
+    best.set(handle, { row: g.row, members: g.members });
+  });
+  result.conversations = best.size;
+
+  db.exec('BEGIN');
+  try {
+    for (const [groupKey, { row, members }] of best) {
+      const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+      // groupKey may carry a "#n" suffix distinguishing conversations that share
+      // an opening; content_key must stay the plain hash so duplicate detection
+      // still finds them.
+      const key = contentKeyFor(opening);
+      const isAmbiguousGroup = groupKey.includes('#');
+
+      // Prefer an existing conversation with this opening — but the opening
+      // prompt is NOT an identity. Two conversations can start with the same
+      // prompt and then diverge completely, and Google sometimes clones an
+      // entry outright. So uniqueness of the key is necessary and not
+      // sufficient: the conversations must also actually agree so far.
+      const candidates = db
+        .prepare('SELECT id, source FROM chats WHERE content_key = ? AND merged_into IS NULL LIMIT 2')
+        .all(key) as unknown as { id: number; source: string }[];
+
+      const agreesWith = (candidateId: number): boolean => {
+        const existing = db
+          .prepare(
+            "SELECT text FROM messages WHERE chat_id = ? AND role = 'user' ORDER BY seq LIMIT 2",
+          )
+          .all(candidateId) as unknown as { text: string }[];
+        // No turns stored yet (a bare sidebar listing) — nothing to contradict.
+        if (existing.length === 0) return true;
+        const norm = (t: string) => t.toLowerCase().replace(/\s+/g, ' ').trim();
+        const mine = row.turns.filter((t) => t.role === 'user').map((t) => norm(t.text));
+        const theirs = existing.map((t) => norm(t.text));
+        // Compare as far as both go. Divergence at the second prompt means two
+        // different conversations that happen to open alike, and merging them
+        // would fabricate a conversation that never existed.
+        return theirs.every((t, i) => mine[i] === undefined || mine[i] === t);
+      };
+
+      let chatId: number;
+      if (!isAmbiguousGroup && candidates.length === 1 && agreesWith(candidates[0].id)) {
+        chatId = candidates[0].id;
+        if (candidates[0].source === 'capture') {
+          // The panel version wins on content: it has the uploads and generated
+          // images Takeout lacks, and Takeout's text is rougher.
+          //
+          // But the Takeout reading is KEPT rather than dropped. They are two
+          // independent readings of the same conversation, and where they differ
+          // that is worth knowing — a truncated capture, a turn Google has since
+          // edited, or an image that only one of them saw. Silently preferring
+          // one would hide the disagreement. raw_json exists for exactly this.
+          const existingRaw = db.prepare('SELECT raw_json FROM chats WHERE id = ?').get(chatId) as
+            | { raw_json: string }
+            | undefined;
+          let merged: Record<string, unknown> = {};
+          try {
+            merged = existingRaw ? JSON.parse(existingRaw.raw_json) : {};
+          } catch {
+            merged = {};
+          }
+          merged.takeout = { href: row.href, timestamp: row.timestamp, turns: row.turns };
+          db.prepare(
+            `UPDATE chats
+                SET started_at = COALESCE(started_at, ?), raw_json = ?, takeout_entries = ?
+              WHERE id = ?`,
+          ).run(row.timestamp, JSON.stringify(merged), members, chatId);
+          noteSource(chatId, 'takeout-alt');
+          result.mergedIntoHarvested += 1;
+          continue;
+        }
+        result.extended += 1;
+      } else {
+        // Distinguished by timestamp as well as opening, so two conversations
+        // that begin identically get separate rows instead of overwriting each
+        // other — including Google's own clones.
+        const externalId = `takeout:${key.slice(0, 16)}:${row.timestamp ?? 'nodate'}`;
+        const found = db.prepare('SELECT id FROM chats WHERE external_id = ?').get(externalId) as
+          | { id: number }
+          | undefined;
+        if (found) {
+          chatId = found.id;
+          result.extended += 1;
+        } else {
+          const { lastInsertRowid } = db
+            .prepare(
+              `INSERT INTO chats
+                 (folder_id, external_id, content_key, url, title, started_at, last_seen_at,
+                  source, raw_json, list_rank)
+               VALUES (NULL, ?, ?, NULL, ?, ?, ?, 'takeout', ?, NULL)`,
+            )
+            .run(
+              externalId,
+              key,
+              opening.slice(0, 300),
+              row.timestamp,
+              new Date().toISOString(),
+              JSON.stringify({ takeout: { href: row.href } }),
+            );
+          chatId = Number(lastInsertRowid);
+          result.created += 1;
+        }
+      }
+
+      db.prepare(
+        'UPDATE chats SET started_at = COALESCE(?, started_at), takeout_entries = ? WHERE id = ?',
+      ).run(row.timestamp, members, chatId);
+      // Replace wholesale: this snapshot is a complete reading, and a partial
+      // upsert would leave stale turns from an earlier, shorter snapshot.
+      db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
+      const insert = db.prepare(
+        'INSERT INTO messages (chat_id, seq, role, text, html) VALUES (?, ?, ?, ?, ?)',
+      );
+      row.turns.forEach((turn, index) => {
+        // html is kept so emphasis and links survive; the reader sanitises it
+        // before rendering, as it does for panel captures.
+        insert.run(chatId, index, turn.role, turn.text, turn.html || null);
+      });
+      result.turnsWritten += row.turns.length;
+      noteSource(chatId, 'takeout');
     }
     db.exec('COMMIT');
   } catch (error) {

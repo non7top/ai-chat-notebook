@@ -524,3 +524,12 @@ button:disabled {
 .orphan-count {
   color: #b45309;
 }
+
+.chat-grouped {
+  color: #4338ca;
+}
+
+.chat-mismatch {
+  color: #b45309;
+  font-weight: 600;
+}
