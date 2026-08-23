@@ -499,6 +499,15 @@ button:disabled {
   color: #b45309;
 }
 
+/* A stand-in date, not the conversation's own. Deliberately the faintest text
+   in the list — fainter than --muted — because it is a loose end to be replaced
+   rather than information to read. Italic as well as pale, so it stays
+   distinguishable where the row is selected and the background changes. */
+.date-placeholder {
+  color: #a3a3a3;
+  font-style: italic;
+}
+
 /* A date the parser could not read, not a date the export lacked. Amber like
    the other "this needs attention" markers rather than grey, because it is a
    bug to fix here, not a fact about the data. */

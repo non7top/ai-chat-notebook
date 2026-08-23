@@ -204,6 +204,17 @@ export function initDb(userDataPath: string): void {
   // 'import' is the correct default for them: nothing had been glued by hand
   // before there was a way to do it.
   ensureColumn('chat_sources', 'linked_by', "linked_by TEXT NOT NULL DEFAULT 'import'");
+  // How started_at was arrived at, because the dates in this archive are not
+  // equally trustworthy and a bare date hides that. 'takeout' came from the
+  // export, 'activity' from the activity log's own stamp, and 'placeholder' is
+  // the moment the app first stored the conversation — a stand-in for a date
+  // nothing knows, kept so a conversation captured from the panel is not
+  // undateable forever, and marked so it is never mistaken for the real thing.
+  // NULL means no date at all. Existing rows with a date got it from the export
+  // or the activity log, and 'takeout' is the honest default for them: nothing
+  // else could have written one before this column existed.
+  ensureColumn('chats', 'date_basis', 'date_basis TEXT');
+  db.exec("UPDATE chats SET date_basis = 'takeout' WHERE started_at IS NOT NULL AND date_basis IS NULL");
   db.exec('CREATE INDEX IF NOT EXISTS chats_list_rank ON chats(list_rank);');
 
   fts5Available = probeFts5(db);
@@ -303,6 +314,7 @@ interface ChatSummaryRow {
   folder_id: number | null;
   title: string;
   started_at: string | null;
+  date_basis: string | null;
   last_seen_at: string;
   message_count: number;
   image_count: number;
@@ -319,7 +331,8 @@ interface ChatSummaryRow {
 const CHAT_TITLE_SQL = "COALESCE(NULLIF(user_title, ''), NULLIF(title, ''), '(untitled)')";
 
 const CHAT_SUMMARY_SQL = `
-  SELECT c.id, c.folder_id, ${CHAT_TITLE_SQL} AS title, c.started_at, c.last_seen_at,
+  SELECT c.id, c.folder_id, ${CHAT_TITLE_SQL} AS title, c.started_at, c.date_basis,
+         c.last_seen_at,
          c.capture_attempts, c.source, COALESCE(c.sources, c.source) AS sources,
          -- Turn count of the other reading, when one was kept, so a
          -- disagreement between Takeout and the panel is visible instead of
@@ -339,6 +352,7 @@ function toSummary(row: ChatSummaryRow): ChatSummary {
     folderId: row.folder_id,
     title: row.title,
     startedAt: row.started_at,
+    dateBasis: row.date_basis,
     lastSeenAt: row.last_seen_at,
     messageCount: row.message_count,
     imageCount: row.image_count,
@@ -531,6 +545,18 @@ export interface AssetToSave {
 export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetToSave[]): void {
   db.exec('BEGIN');
   try {
+    // A conversation read from the panel has no date anywhere: the sidebar list
+    // carries none, and the panel's own timestamp is adaptive display text with
+    // no machine-readable value behind it (see aiModeDriver.ts). Rather than
+    // leave it undateable forever, record when the app first stored it — which
+    // is a real fact, just not the one wanted — and mark it as a stand-in so it
+    // is never read as the conversation's own date. A later export supplies the
+    // real one and replaces this.
+    db.prepare(
+      `UPDATE chats
+          SET started_at = ?, date_basis = 'placeholder'
+        WHERE id = ? AND started_at IS NULL`,
+    ).run(new Date().toISOString(), chatId);
     db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
     const insertMessage = db.prepare(
       'INSERT INTO messages (chat_id, seq, role, text, html) VALUES (?, ?, ?, ?, ?)',
@@ -933,9 +959,26 @@ export function importTakeoutConversations(
           merged.takeout = { href: row.href, timestamp: row.timestamp, turns: row.turns };
           db.prepare(
             `UPDATE chats
-                SET started_at = COALESCE(started_at, ?), raw_json = ?, takeout_entries = ?
+                SET started_at = CASE
+                      WHEN ? IS NOT NULL AND (started_at IS NULL OR date_basis = 'placeholder')
+                        THEN ?
+                      ELSE started_at
+                    END,
+                    date_basis = CASE
+                      WHEN ? IS NOT NULL AND (started_at IS NULL OR date_basis = 'placeholder')
+                        THEN 'takeout'
+                      ELSE date_basis
+                    END,
+                    raw_json = ?, takeout_entries = ?
               WHERE id = ?`,
-          ).run(row.timestamp, JSON.stringify(merged), members, chatId);
+          ).run(
+            row.timestamp,
+            row.timestamp,
+            row.timestamp,
+            JSON.stringify(merged),
+            members,
+            chatId,
+          );
           noteSource(chatId, 'takeout-alt');
           result.mergedIntoHarvested += 1;
           continue;
@@ -974,8 +1017,12 @@ export function importTakeoutConversations(
       }
 
       db.prepare(
-        'UPDATE chats SET started_at = COALESCE(?, started_at), takeout_entries = ? WHERE id = ?',
-      ).run(row.timestamp, members, chatId);
+        `UPDATE chats
+            SET started_at = COALESCE(?, started_at),
+                date_basis = CASE WHEN ? IS NOT NULL THEN 'takeout' ELSE date_basis END,
+                takeout_entries = ?
+          WHERE id = ?`,
+      ).run(row.timestamp, row.timestamp, members, chatId);
       // Replace wholesale: this snapshot is a complete reading, and a partial
       // upsert would leave stale turns from an earlier, shorter snapshot.
       db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
@@ -1567,8 +1614,9 @@ export function matchActivity(): ActivityMatchResult {
          SET started_at = (
                SELECT MIN(a.occurred_at) FROM activity a
                 WHERE a.matched_chat_id = chats.id AND a.occurred_at IS NOT NULL
-             )
-       WHERE started_at IS NULL
+             ),
+             date_basis = 'activity'
+       WHERE (started_at IS NULL OR date_basis = 'placeholder')
          AND EXISTS (
            SELECT 1 FROM activity a
             WHERE a.matched_chat_id = chats.id AND a.occurred_at IS NOT NULL

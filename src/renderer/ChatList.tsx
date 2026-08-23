@@ -60,13 +60,32 @@ export default function ChatList({ chats, selectedId, onSelect }: Props) {
                   textual, not an id. Presenting it as plain fact would overstate
                   what is known. */}
               {started ? (
-                <span
-                  className="date-inferred"
-                  title="Inferred by matching the Takeout prompt text — not from a thread id"
-                >
-                  ~{started}
-                  {' · '}
-                </span>
+                chat.dateBasis === 'placeholder' ? (
+                  // Not the conversation's date at all — the date the app first
+                  // saved it, standing in because nothing knows the real one.
+                  // Faint and marked, so it reads as an open question rather
+                  // than an answer, and no dot after it: it is not a fact
+                  // sitting alongside the others.
+                  <span
+                    className="date-placeholder"
+                    title="No real date is known for this conversation. This is when the app first saved it — a stand-in until an export supplies the real one."
+                  >
+                    saved {started}
+                    {' · '}
+                  </span>
+                ) : (
+                  <span
+                    className="date-inferred"
+                    title={
+                      chat.dateBasis === 'activity'
+                        ? 'From the activity log, matched by prompt text — not from a thread id'
+                        : 'Inferred by matching the Takeout prompt text — not from a thread id'
+                    }
+                  >
+                    ~{started}
+                    {' · '}
+                  </span>
+                )
               ) : (
                 ''
               )}

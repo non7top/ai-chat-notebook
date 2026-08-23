@@ -18,6 +18,13 @@ export interface ChatSummary {
   folderId: number | null;
   title: string;
   startedAt: string | null;
+  /**
+   * How startedAt was arrived at, because the dates here are not equally
+   * trustworthy: 'takeout' from the export, 'activity' from the activity log,
+   * 'placeholder' for the moment the app first stored a conversation nothing
+   * can date. Null when there is no date at all.
+   */
+  dateBasis: string | null;
   lastSeenAt: string;
   messageCount: number;
   /** Distinct images archived, so an image-heavy conversation is findable. */

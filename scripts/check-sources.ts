@@ -248,5 +248,59 @@ function repairScenario(glueByHand: boolean): void {
 repairScenario(false);
 repairScenario(true);
 
+// ---------------------------------------------------------------------------
+// The placeholder date, and whether it lets go.
+//
+// A conversation read from the panel has no date anywhere, so the app records
+// when it first saved it as a stand-in. The whole risk of that is a stand-in
+// that sticks: it would look like a date, sort like a date, and quietly claim
+// that years of history all happened the week the app was installed. So what is
+// actually checked here is that a real date displaces it.
+{
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'notebook-dates-'));
+  db.initDb(scratch);
+
+  const dated = {
+    query: 'why does the placeholder need to let go',
+    timestamp: '2026-08-19T03:09:33+07:00',
+    timestampText: 'Aug 19, 2026, 3:09:33 AM GMT+07:00',
+    href: null,
+    turns: [turn('user', 'why does the placeholder need to let go'), turn('ai', 'because')],
+    imageFiles: [],
+  };
+
+  db.upsertThreadFromList('thread-dates', dated.query, null, 0);
+  const [chat] = db.listChats({ kind: 'all' });
+  console.log('\nbefore capture:', `date=${chat.startedAt} basis=${chat.dateBasis}`);
+  if (chat.startedAt !== null) throw new Error('a listed conversation should have no date yet');
+
+  db.replaceTurns(
+    chat.id,
+    dated.turns.map((t, i) => ({ seq: i, role: t.role, text: t.text, html: t.html })),
+    [],
+  );
+  const captured = db.listChats({ kind: 'all' })[0];
+  console.log('after capture:', `date=${captured.startedAt} basis=${captured.dateBasis}`);
+  if (captured.dateBasis !== 'placeholder') {
+    throw new Error(`expected a placeholder date, got ${captured.dateBasis}`);
+  }
+
+  db.importTakeoutConversations([dated] as never);
+  const enriched = db.listChats({ kind: 'all' }).find((c) => c.id === chat.id);
+  console.log('after the export arrives:', `date=${enriched?.startedAt} basis=${enriched?.dateBasis}`);
+  if (enriched?.dateBasis !== 'takeout' || enriched.startedAt !== dated.timestamp) {
+    throw new Error('the placeholder survived a real date — it must be displaced');
+  }
+
+  // And a real date is not downgraded by a later capture.
+  db.replaceTurns(chat.id, [{ seq: 0, role: 'user', text: 'again', html: null }], []);
+  const after = db.listChats({ kind: 'all' }).find((c) => c.id === chat.id);
+  console.log('after a later capture:', `date=${after?.startedAt} basis=${after?.dateBasis}`);
+  if (after?.dateBasis !== 'takeout' || after.startedAt !== dated.timestamp) {
+    throw new Error('a capture overwrote a real date with a placeholder');
+  }
+  fs.rmSync(scratch, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('OK');

@@ -125,12 +125,21 @@ export default function ChatReader({ chat, onChange }: Props) {
             )
             .join(' + ')}
         </span>
-        {chat.startedAt && (
-          <span title="Inferred by matching the Takeout prompt text, not from a thread id">
-            {' · ~'}
-            {displayDateTime(chat.startedAt)} (inferred)
-          </span>
-        )}
+        {chat.startedAt &&
+          (chat.dateBasis === 'placeholder' ? (
+            <span
+              className="date-placeholder"
+              title="No real date is known for this conversation. This is when the app first saved it."
+            >
+              {' · saved '}
+              {displayDateTime(chat.startedAt)} (no real date known)
+            </span>
+          ) : (
+            <span title="Inferred by matching the Takeout prompt text, not from a thread id">
+              {' · ~'}
+              {displayDateTime(chat.startedAt)} (inferred)
+            </span>
+          ))}
         <span className="provenance-id"> · {chat.externalId || 'no id'}</span>
         {!chat.externalId.startsWith('takeout:') && (
           <button
