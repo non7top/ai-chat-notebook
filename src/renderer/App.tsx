@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type {
   ActivityStats,
+  SuspectCopyGroup,
   AiModeStatus,
   ChatDetail,
   ChatScope,
@@ -10,6 +11,7 @@ import type {
 import ChatList from './ChatList';
 import OrphanEntries from './OrphanEntries';
 import TakeoutReport, { type TakeoutReportData } from './TakeoutReport';
+import SuspectCopies from './SuspectCopies';
 import ChatReader from './ChatReader';
 import FolderTree from './FolderTree';
 import HarvestBar from './HarvestBar';
@@ -22,6 +24,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [query, setQuery] = useState('');
   const [report, setReport] = useState<TakeoutReportData | null>(null);
+  const [copies, setCopies] = useState<SuspectCopyGroup[] | null>(null);
   const [applying, setApplying] = useState(false);
   const [chat, setChat] = useState<ChatDetail | null>(null);
   const [status, setStatus] = useState<AiModeStatus>({ connected: false });
@@ -105,6 +108,13 @@ export default function App() {
             window.notebook.setAiModeHidden(true);
           }
         }}
+        onCopies={(groups) => {
+          setCopies(groups);
+          // Takes the panes, like the export report: a list of threads to compare
+          // needs the width, and the native panel would paint over it.
+          setPanelVisible(false);
+          window.notebook.setAiModeHidden(true);
+        }}
         onNeedPanel={() => setPanelVisible(true)}
         onFinished={reloadAll}
         uncaptured={uncaptured}
@@ -144,7 +154,18 @@ export default function App() {
         {/* Orphan entries are not conversations, so they get the list and
             reader panes to themselves rather than being forced into a chat
             list that would have to lie about what they are. */}
-        {report ? (
+        {copies ? (
+          <div className="pane pane-report">
+            <SuspectCopies
+              groups={copies}
+              onOpenThread={(id) => {
+                setSelectedId(id);
+                setCopies(null);
+              }}
+              onClose={() => setCopies(null)}
+            />
+          </div>
+        ) : report ? (
           // Takes the list and reader panes together. The report is prose and a
           // table, and squeezed into a third of the width it would be the same
           // unreadable thing it was in the toolbar.

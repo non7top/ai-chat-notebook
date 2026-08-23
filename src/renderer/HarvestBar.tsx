@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type {
   ActivityStats,
+  SuspectCopyGroup,
   CaptureProgress,
   HarvestProgress,
   TakeoutImportRow,
@@ -19,6 +20,8 @@ interface Props {
   onReport: (report: TakeoutReportData | null) => void;
   /** Harvesting scrapes the live sidebar, so the panel has to be on screen. */
   onNeedPanel: () => void;
+  /** Opens the identical-conversations report; see SuspectCopies. */
+  onCopies: (groups: SuspectCopyGroup[]) => void;
   onFinished: () => void;
   /**
    * How many conversations have no turns yet, owned by the parent so it tracks
@@ -62,6 +65,7 @@ function importRows(entries: TakeoutEntry[]): TakeoutImportRow[] {
 
 export default function HarvestBar({
   onReport,
+  onCopies,
   onNeedPanel,
   onFinished,
   uncaptured,
@@ -330,6 +334,22 @@ export default function HarvestBar({
       >
         Undo import
       </button>
+      )}
+
+      {/* Behind More because it is a diagnostic: run once after a capture that
+          went oddly, not part of the day's work. Its results go to a panel
+          rather than the status line — a list of thread ids has no business in a
+          toolbar, as the export report demonstrated. */}
+      {more && (
+        <button
+          type="button"
+          title="Finds threads holding identical conversations — the trace left by a capture that stored the wrong thread"
+          onClick={async () => {
+            onCopies(await window.notebook.suspectCopies());
+          }}
+        >
+          Check for copies
+        </button>
       )}
 
       {/* Last, so the controls it reveals appear to its left and nothing jumps

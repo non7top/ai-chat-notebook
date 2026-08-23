@@ -1058,3 +1058,33 @@ button:disabled {
   overflow-wrap: anywhere;
   margin-bottom: 0.15rem;
 }
+
+/* A group of threads whose stored conversations are identical. Boxed together so
+   the grouping is the visible thing — which threads are implicated with which is
+   the entire content of the report. */
+.copy-group {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem;
+  margin-bottom: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.copy-member {
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copy-member:hover {
+  background: var(--selected);
+}

@@ -819,5 +819,54 @@ repairScenario(true);
   fs.rmSync(scratch, { recursive: true, force: true });
 }
 
+// ---------------------------------------------------------------------------
+// Finding threads that hold identical conversations.
+//
+// The detector for a real bug: clicking a sidebar row that was not there did
+// nothing and reported success, so a thread Google had rotated out was stored
+// with whatever the panel was still showing. Two thread rows, one conversation,
+// nothing on screen to say so.
+{
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'notebook-copies-'));
+  db.initDb(scratch);
+  const same = [
+    { seq: 0, role: 'user' as const, text: 'what is a false vacuum', html: null },
+    { seq: 1, role: 'ai' as const, text: 'a metastable state that can decay', html: null },
+  ];
+
+  db.upsertThreadFromList('copy-a', 'first thread', null, 0);
+  db.upsertThreadFromList('copy-b', 'second thread', null, 1);
+  db.upsertThreadFromList('copy-c', 'unrelated thread', null, 2);
+  const ids = db.listChats({ kind: 'all' }).map((c) => c.id);
+  db.replaceTurns(ids[0], same, []);
+  db.replaceTurns(ids[1], same, []);
+  db.replaceTurns(ids[2], [
+    { seq: 0, role: 'user', text: 'how do sprites get generated', html: null },
+    { seq: 1, role: 'ai', text: 'by a diffusion model', html: null },
+  ], []);
+
+  const found = db.suspectCopies();
+  console.log(
+    '\nidentical conversations:',
+    found.map((g) => g.chatIds),
+    '| threads:',
+    ids.length,
+  );
+  if (found.length !== 1) throw new Error(`expected 1 group, got ${found.length}`);
+  if (found[0].chatIds.length !== 2) {
+    throw new Error(`expected 2 threads in the group, got ${found[0].chatIds.length}`);
+  }
+  // The unrelated thread must not be dragged in, and a thread with no turns must
+  // not group with every other empty one — its fingerprint is the all-zero value
+  // and grouping on that would report the entire capture backlog as copies.
+  if (found[0].chatIds.includes(ids[2])) throw new Error('an unrelated thread was grouped');
+  db.upsertThreadFromList('empty-1', 'never read', null, 3);
+  db.upsertThreadFromList('empty-2', 'also never read', null, 4);
+  if (db.suspectCopies().length !== 1) {
+    throw new Error('threads with no turns were reported as copies of each other');
+  }
+  fs.rmSync(scratch, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('OK');

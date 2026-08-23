@@ -314,6 +314,12 @@ export interface TakeoutPreview {
   chatsTouched: number;
 }
 
+export interface SuspectCopyGroup {
+  fingerprint: string;
+  chatIds: number[];
+  titles: string[];
+}
+
 export interface LinkRunSummary {
   attempted: number;
   fetched: number;
@@ -436,7 +442,7 @@ export interface NotebookApi {
    * clicking a missing sidebar row silently stored the previously shown thread
    * under a different thread's id.
    */
-  suspectCopies(): Promise<{ fingerprint: string; chatIds: number[]; titles: string[] }[]>;
+  suspectCopies(): Promise<SuspectCopyGroup[]>;
   similarChats(chatId: number): Promise<ChatSummary[]>;
   mergeChats(keepId: number, mergeIds: number[]): Promise<{ merged: number }>;
   unmergeChat(chatId: number): Promise<void>;
