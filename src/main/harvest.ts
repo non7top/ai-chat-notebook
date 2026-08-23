@@ -478,6 +478,118 @@ export async function captureFromEntryLink(entryId: number): Promise<LinkCapture
   return { distance, rejected: null, chatId, turns: stored.turns, images: stored.images };
 }
 
+export interface LinkRunSummary {
+  attempted: number;
+  fetched: number;
+  turns: number;
+  images: number;
+  /** Pages whose answer did not match the export's — a re-run, not the thread. */
+  rejected: number;
+  errors: number;
+  remaining: number;
+  cancelled: boolean;
+  failures: { title: string; reason: string }[];
+  stoppedEarly?: string;
+}
+
+/**
+ * Works through the threads only an export knows about, opening each by its link.
+ *
+ * The counterpart to captureTurns, and for most of the archive the only route
+ * there is: the sidebar lists a few hundred threads while the export holds 2026
+ * with a link. Every page is verified against the export's own reading before
+ * anything is stored, so a link that re-runs its prompt is refused rather than
+ * written — see captureFromEntryLink.
+ *
+ * Rejections are counted apart from errors and do NOT stop the run. A refusal is
+ * this working correctly, and if the links turn out to re-run rather than open,
+ * the whole run refuses and stores nothing, which is the outcome to want.
+ */
+export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
+  const summary: LinkRunSummary = {
+    attempted: 0,
+    fetched: 0,
+    turns: 0,
+    images: 0,
+    rejected: 0,
+    errors: 0,
+    remaining: 0,
+    cancelled: false,
+    failures: [],
+  };
+  captureCancelled = false;
+  try {
+    await ensureOnAiMode();
+    const queue = db.threadsWithLinksToFetch(limit);
+    let consecutiveErrors = 0;
+
+    for (const item of queue) {
+      if (captureCancelled) break;
+      summary.attempted += 1;
+      broadcastCapture({
+        phase: 'capturing',
+        done: summary.fetched,
+        total: queue.length,
+        errors: summary.errors,
+        current: `link: ${item.title.slice(0, 60)}`,
+      });
+      try {
+        const result = await captureFromEntryLink(item.entryId);
+        if (result.rejected) {
+          summary.rejected += 1;
+          summary.failures.push({ title: item.title.slice(0, 60), reason: result.rejected });
+        } else {
+          summary.fetched += 1;
+          summary.turns += result.turns;
+          summary.images += result.images;
+        }
+        // A rejection is a verdict, not a fault: the check did its job. Only a
+        // thrown error suggests the run itself is in trouble.
+        consecutiveErrors = 0;
+      } catch (error) {
+        summary.errors += 1;
+        consecutiveErrors += 1;
+        summary.failures.push({
+          title: item.title.slice(0, 60),
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        if (consecutiveErrors >= CONSECUTIVE_FAILURE_LIMIT) {
+          summary.stoppedEarly =
+            `Stopped after ${consecutiveErrors} consecutive errors — something systemic ` +
+            '(signed out, offline, or the page changed) rather than awkward threads.';
+          break;
+        }
+      }
+      // Slower than the sidebar route on purpose: each of these is a full page
+      // load against Google rather than a click within an app already open.
+      await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS * 2));
+    }
+
+    summary.cancelled = captureCancelled;
+    summary.remaining = db.countThreadsWithLinksToFetch();
+    broadcastCapture({
+      phase: captureCancelled ? 'cancelled' : 'done',
+      done: summary.fetched,
+      total: summary.attempted,
+      errors: summary.errors + summary.rejected,
+      turns: summary.turns,
+      images: summary.images,
+      remaining: summary.remaining,
+      stoppedEarly: summary.stoppedEarly,
+    });
+    return summary;
+  } catch (error) {
+    broadcastCapture({
+      phase: 'error',
+      done: summary.fetched,
+      total: summary.attempted,
+      errors: summary.errors + 1,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
 export async function openChatInPanel(chatId: number): Promise<void> {
   const chat = db.getChatForCapture(chatId);
   if (!chat) throw new Error(`No chat with id ${chatId}`);

@@ -18,6 +18,7 @@ import {
   captureTurns,
   harvestThreadList,
   captureFromEntryLink,
+  fetchFromLinks,
   openChatInPanel,
   recaptureChat,
 } from './harvest';
@@ -151,6 +152,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('capture:cancel', () => cancelCapture());
   ipcMain.handle('capture:recapture', (_event, chatId: number) => recaptureChat(chatId));
   ipcMain.handle('capture:remaining', () => db.countChatsWithoutTurns());
+  // The route to everything Google has rotated out of the sidebar. Drives the
+  // live panel one page load at a time, and every page is checked against the
+  // export's own reading before anything is stored.
+  ipcMain.handle('links:fetch', (_event, limit: number) => fetchFromLinks(limit));
+  ipcMain.handle('links:remaining', () => db.countThreadsWithLinksToFetch());
 
   ipcMain.handle('harvest:threadList', () => harvestThreadList());
   ipcMain.handle('harvest:cancel', () => cancelHarvest());

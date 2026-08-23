@@ -314,6 +314,20 @@ export interface TakeoutPreview {
   chatsTouched: number;
 }
 
+export interface LinkRunSummary {
+  attempted: number;
+  fetched: number;
+  turns: number;
+  images: number;
+  /** Pages whose answer did not match the export's — a re-run, not the thread. */
+  rejected: number;
+  errors: number;
+  remaining: number;
+  cancelled: boolean;
+  failures: { title: string; reason: string }[];
+  stoppedEarly?: string;
+}
+
 export interface LinkCaptureResult {
   /** How far the page's opening is from the export's reading, 0 to 64. */
   distance: number;
@@ -410,6 +424,13 @@ export interface NotebookApi {
    * is what a re-run prompt looks like, and reports the distance either way.
    */
   captureFromEntryLink(entryId: number): Promise<LinkCaptureResult>;
+  /**
+   * Works through the threads only an export knows about, opening each by its
+   * own link. For most of the archive this is the only route to the real thread,
+   * since the sidebar lists a few hundred while the export holds thousands.
+   */
+  fetchFromLinks(limit: number): Promise<LinkRunSummary>;
+  countLinksToFetch(): Promise<number>;
   /**
    * Threads holding identical conversations. Detects the damage from a bug where
    * clicking a missing sidebar row silently stored the previously shown thread

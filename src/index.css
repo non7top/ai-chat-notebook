@@ -536,6 +536,12 @@ button:disabled {
   outline: none;
 }
 
+/* The disclosure itself is quiet: it is a way in to rare actions, not one of
+   them. */
+.harvest-more {
+  color: var(--muted);
+}
+
 .harvest-sep {
   width: 1px;
   align-self: stretch;

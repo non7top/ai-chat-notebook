@@ -36,6 +36,11 @@ interface Props {
 
 const CAPTURE_BATCH = 25;
 // Far above any plausible history, so "all" means all.
+// Bounded the same way Capture all is, and for a stronger reason: each of these
+// is a full page load against Google rather than a click inside a page already
+// open, so an unbounded run would be hours long.
+const LINK_FETCH_LIMIT = 500;
+
 const CAPTURE_ALL_LIMIT = 100_000;
 
 /**
@@ -71,6 +76,8 @@ export default function HarvestBar({
   const [takeoutBusy, setTakeoutBusy] = useState(false);
   // Only set while a run is in progress; the prop is the truth otherwise.
   const [remainingOverride, setRemainingOverride] = useState<number | null>(null);
+  const [linksToFetch, setLinksToFetch] = useState(0);
+  const [more, setMore] = useState(false);
   const remaining = remainingOverride ?? uncaptured;
 
   useEffect(
@@ -84,6 +91,13 @@ export default function HarvestBar({
       }),
     [onFinished],
   );
+
+  // Refreshed alongside the other counts: this number only moves when an import
+  // adds threads or a fetch consumes them.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: triggers, not inputs — they mark when the count can have changed
+  useEffect(() => {
+    window.notebook.countLinksToFetch().then(setLinksToFetch);
+  }, [uncaptured, activity]);
 
   useEffect(
     () =>
@@ -242,9 +256,19 @@ export default function HarvestBar({
 
   return (
     <div className="harvest-bar">
-      <button type="button" onClick={start} disabled={busy}>
-        {busy ? 'Harvesting…' : 'Harvest history'}
-      </button>
+      {/* Two groups, because the bar had grown to eight controls and the two that
+          get used were no easier to find than the six that do not.
+
+          Out front: the runs that take minutes and get started repeatedly.
+          Behind "More": refreshing the sidebar list, reading an export, undoing
+          an import — each a deliberate one-off, and each still one click away.
+          Anything mid-run stays visible regardless, since hiding a Stop button
+          behind a disclosure would be indefensible. */}
+      {(more || busy) && (
+        <button type="button" onClick={start} disabled={busy}>
+          {busy ? 'Harvesting…' : 'Harvest history'}
+        </button>
+      )}
       {busy && (
         <button type="button" onClick={() => window.notebook.cancelHarvest()}>
           Stop
@@ -273,11 +297,13 @@ export default function HarvestBar({
         </span>
       )}
 
-      <span className="harvest-sep" />
+      {(more || takeoutBusy || takeout) && <span className="harvest-sep" />}
 
-      <button type="button" onClick={scanTakeout} disabled={takeoutBusy || busy || capturing}>
-        {takeoutBusy ? 'Reading…' : 'Scan Takeout…'}
-      </button>
+      {(more || takeoutBusy) && (
+        <button type="button" onClick={scanTakeout} disabled={takeoutBusy || busy || capturing}>
+          {takeoutBusy ? 'Reading…' : 'Scan Takeout…'}
+        </button>
+      )}
       {/* Kept as a way back to the decision after the report was closed; the
           report itself carries the primary Import. */}
       {takeout && (
@@ -285,6 +311,7 @@ export default function HarvestBar({
           Import it
         </button>
       )}
+      {more && (
       <button
         type="button"
         title="Remove everything a Takeout import added. Harvested threads are kept."
@@ -302,6 +329,18 @@ export default function HarvestBar({
         }}
       >
         Undo import
+      </button>
+      )}
+
+      {/* Last, so the controls it reveals appear to its left and nothing jumps
+          under the pointer when it is used. */}
+      <button
+        type="button"
+        className="harvest-more"
+        onClick={() => setMore((v) => !v)}
+        title={more ? 'Hide the one-off actions' : 'Harvest the sidebar list, read an export, undo an import'}
+      >
+        {more ? 'Less' : 'More…'}
       </button>
       {/* Orphans are the point of keeping activity at all: prompts whose
           conversation Google no longer lists. Shown permanently rather than
@@ -334,6 +373,31 @@ export default function HarvestBar({
           title="Works through everything not yet captured. Safe to leave running; Stop works at any point."
         >
           Capture all ({remaining})
+        </button>
+      )}
+      {/* The only route to the threads Google no longer lists, and for this
+          archive that is most of them: the sidebar holds a few hundred while the
+          export holds thousands with a link. Each is verified against the
+          export's own reading before anything is stored, so a link that re-runs
+          its prompt is refused rather than written. */}
+      {linksToFetch > 0 && (
+        <button
+          type="button"
+          disabled={busy || capturing}
+          title="Opens each thread by the link in the export and captures what the page shows. Refuses to store anything where the page's answer does not match the export's."
+          onClick={async () => {
+            onNeedPanel();
+            setCapturing(true);
+            try {
+              const result = await window.notebook.fetchFromLinks(LINK_FETCH_LIMIT);
+              setLinksToFetch(result.remaining);
+              onFinished();
+            } finally {
+              setCapturing(false);
+            }
+          }}
+        >
+          Fetch from links ({linksToFetch})
         </button>
       )}
       {capturing && (

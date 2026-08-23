@@ -2367,6 +2367,57 @@ export interface EntryToOpen {
   chatId: number | null;
 }
 
+export interface ThreadToFetch {
+  chatId: number;
+  entryId: number;
+  title: string;
+}
+
+/**
+ * Threads that only an export knows about, and that carry a link to fetch.
+ *
+ * This is most of the archive. The sidebar lists a few hundred threads while the
+ * export holds 2026 records with a link, so for everything Google has rotated
+ * out the link is the only route to the real thread — the full text and the
+ * generated images, rather than the export's rougher account.
+ *
+ * Threads already read from the panel are excluded: they have the better reading
+ * already, and re-fetching would spend a page load to replace it with itself.
+ */
+export function threadsWithLinksToFetch(limit: number): ThreadToFetch[] {
+  return db
+    .prepare(
+      `SELECT c.id AS chatId, e.id AS entryId, ${CHAT_TITLE_SQL} AS title
+         FROM chats c
+         JOIN chat_sources cs ON cs.chat_id = c.id
+         JOIN source_entries e ON e.id = cs.source_entry_id
+        WHERE c.merged_into IS NULL
+          AND e.href IS NOT NULL
+          AND ',' || COALESCE(c.sources, c.source) || ',' NOT LIKE '%,capture,%'
+        GROUP BY c.id
+        -- Newest first: an older thread is likelier to have been dropped by
+        -- Google altogether, so the ones most likely to still be there go first.
+        ORDER BY c.started_at DESC
+        LIMIT ?`,
+    )
+    .all(limit) as unknown as ThreadToFetch[];
+}
+
+export function countThreadsWithLinksToFetch(): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(DISTINCT c.id) AS n
+         FROM chats c
+         JOIN chat_sources cs ON cs.chat_id = c.id
+         JOIN source_entries e ON e.id = cs.source_entry_id
+        WHERE c.merged_into IS NULL
+          AND e.href IS NOT NULL
+          AND ',' || COALESCE(c.sources, c.source) || ',' NOT LIKE '%,capture,%'`,
+    )
+    .get() as unknown as { n: number };
+  return row.n;
+}
+
 /** An entry's link and its own reading, for opening it in the panel. */
 export function getEntryToOpen(entryId: number): EntryToOpen | null {
   const row = db

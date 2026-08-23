@@ -29,6 +29,11 @@ export default function ChatReader({ chat, onChange }: Props) {
   const [entryTurns, setEntryTurns] = useState<Message[]>([]);
   const [candidates, setCandidates] = useState<ChatSummary[]>([]);
   const [showEntries, setShowEntries] = useState(false);
+  const [fetching, setFetching] = useState(false);
+  // The entry carrying a link, if any. An entry with none — a Lens search, a
+  // blank record — cannot be fetched, and offering the action would be a dead
+  // end.
+  const linkEntry = entries.find((e) => e.linked && e.href)?.id ?? null;
 
   // Reloaded on every chat change and after every link change: the entry list
   // is the record of what this conversation is made of, so a stale one would
@@ -41,6 +46,7 @@ export default function ChatReader({ chat, onChange }: Props) {
 
   // Back to the thread's own reading when the thread changes: an entry id from
   // the previous thread would show that thread's text under this one's title.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: chat.id is the trigger, not an input
   useEffect(() => {
     setReading('stored');
     setEntryTurns([]);
@@ -183,6 +189,36 @@ export default function ChatReader({ chat, onChange }: Props) {
             }}
           >
             Open in panel
+          </button>
+        )}
+        {/* For the threads the sidebar no longer lists, which is most of them:
+            the export's link is the only way back to the real thread, with the
+            full text and the generated images. Offered only where there is no
+            panel reading already, since that reading is the better one. */}
+        {!chat.sources.split(',').includes('capture') && linkEntry !== null && (
+          <button
+            type="button"
+            className="provenance-open"
+            disabled={fetching}
+            title="Open this thread by its link in the export and capture what the page shows. Stores nothing if the page's answer does not match the export's."
+            onClick={async () => {
+              setFetching(true);
+              setRecaptureError(null);
+              try {
+                const result = await window.notebook.captureFromEntryLink(linkEntry);
+                if (result.rejected) {
+                  setRecaptureError(`Not stored — ${result.rejected}`);
+                } else {
+                  onChange();
+                }
+              } catch (err) {
+                setRecaptureError(err instanceof Error ? err.message : String(err));
+              } finally {
+                setFetching(false);
+              }
+            }}
+          >
+            {fetching ? 'Fetching…' : 'Fetch from link'}
           </button>
         )}
       </p>
