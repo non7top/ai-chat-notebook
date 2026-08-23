@@ -573,6 +573,13 @@ button:disabled {
   color: var(--muted);
 }
 
+/* A record that has no turns and never will. Muted rather than amber: nothing is
+   wrong and nothing can be done, unlike a failed capture. */
+.chat-noturns {
+  color: var(--muted);
+  font-style: italic;
+}
+
 /* An internal row id, shown so it can be quoted back. Monospace because it is
    an identifier to be read character by character, and faint because it is for
    the rare occasion when something is wrong rather than for reading the list. */

@@ -803,12 +803,19 @@ export function chatsWithoutTurns(limit: number): ChatToCapture[] {
            NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
            OR c.source = 'takeout'
          )
-         -- Excluded: conversations that exist only in Takeout. They have no
-         -- Google thread id, so the panel cannot open them however many times
-         -- it tries, and queueing them would mark genuinely unrecoverable
-         -- conversations as "capture failed" — which reads as a bug rather than
-         -- as Google having dropped them.
+         -- Excluded: threads that exist only in an export. They have no Google
+         -- thread id, so the panel cannot open them however many times it tries,
+         -- and queueing them would mark genuinely unrecoverable threads as
+         -- "capture failed" — which reads as a bug rather than as Google having
+         -- dropped them.
+         --
+         -- entry:% belongs here for the same reason and was missing. Those are
+         -- created by adopting an orphan entry or ungluing one, and they carry no
+         -- thread id either — so every one of them was queued to fail, and a run
+         -- of them together would trip the consecutive-failure abort and stop a
+         -- capture that had real work left to do.
          AND c.external_id NOT LIKE 'takeout:%'
+         AND c.external_id NOT LIKE 'entry:%'
        -- Never-attempted conversations first, then by Google's recency order.
        -- Without this, a long unattended run re-tries the same early failures
        -- ahead of hundreds of conversations it has never even looked at, and
@@ -836,7 +843,8 @@ export function countChatsWithoutTurns(): number {
            NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
            OR c.source = 'takeout'
          )
-         AND c.external_id NOT LIKE 'takeout:%'`,
+         AND c.external_id NOT LIKE 'takeout:%'
+         AND c.external_id NOT LIKE 'entry:%'`,
     )
     .get() as unknown as { n: number };
   return row.n;

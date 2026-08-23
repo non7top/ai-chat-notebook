@@ -680,14 +680,41 @@ repairScenario(true);
   if (!full) throw new Error('fixture missing');
   db.replaceTurns(full.id, [{ seq: 0, role: 'user', text: 'something', html: null }], []);
 
+  // A thread with no Google thread id must never enter the capture queue: the
+  // panel cannot open it, so it would fail on every run, and a run of them
+  // together trips the consecutive-failure abort and stops a capture with real
+  // work still to do. entry:% ids — made by adopting or ungluing an entry — were
+  // missing from that exclusion.
+  const adopted = db.adoptSourceEntry(
+    (() => {
+      db.importTakeoutConversations([
+        { query: '', timestamp: '2026-07-01T00:00:00+07:00', timestampText: null, href: null, turns: [], imageFiles: [] },
+      ] as never);
+      return db.orphanSourceEntries()[0].id;
+    })(),
+    null,
+  );
+  const queued = db.chatsWithoutTurns(100).map((c) => c.id);
+  console.log('capture queue:', queued, '| adopted thread', adopted.chatId, 'queued?', queued.includes(adopted.chatId));
+  if (queued.includes(adopted.chatId)) {
+    throw new Error('a thread with no Google thread id was queued for capture');
+  }
+
+  // Derived from the full list rather than a literal count: the scope's job is
+  // to return exactly the threads with no turns, and asserting a number instead
+  // made this break whenever a fixture above it added one.
   const empties = db.listChats({ kind: 'empty' });
+  const expectedEmpty = db.listChats({ kind: 'all' }).filter((c) => c.messageCount === 0);
   console.log(
     '\nempty threads:',
-    empties.map((c) => c.title),
-    '| all threads:',
+    empties.map((c) => c.id),
+    'of',
     db.listChats({ kind: 'all' }).length,
+    'threads',
   );
-  if (empties.length !== 2) throw new Error(`expected 2 empty threads, got ${empties.length}`);
+  if (empties.length !== expectedEmpty.length) {
+    throw new Error(`empty scope returned ${empties.length}, expected ${expectedEmpty.length}`);
+  }
   if (empties.some((c) => c.messageCount > 0)) throw new Error('a thread with turns was listed');
   if (empties.some((c) => c.id === full.id)) throw new Error('the read thread was listed as empty');
   fs.rmSync(scratch, { recursive: true, force: true });

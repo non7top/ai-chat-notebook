@@ -197,8 +197,25 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
                     capture failed
                     {chat.captureAttempts > 1 ? ` (${chat.captureAttempts}×)` : ''}
                   </span>
-                ) : (
+                ) : chat.sources.split(',').includes('harvest') ? (
+                  // Listed in the sidebar and not read yet — the one case where
+                  // "not captured yet" is true and something can be done about
+                  // it.
                   'not captured yet'
+                ) : (
+                  // A thread with no turns that is NOT waiting to be read. It
+                  // came from a record the export never gave turns for: a Lens
+                  // search, or a blank one. Saying "not captured yet" of these
+                  // was a contradiction on its face — a thread showing an image
+                  // and claiming nothing had been captured — and it also implied
+                  // a capture would fix it, which nothing will: Google saved no
+                  // prompt and no response, so there is nothing to fetch.
+                  <span
+                    className="chat-noturns"
+                    title="The export holds no prompt or response for this record — a Lens search or a blank one. Capturing cannot add turns that were never saved."
+                  >
+                    {chat.imageCount > 0 ? 'image only' : 'no turns in the export'}
+                  </span>
                 )
               ) : (
                 `${chat.messageCount} turn${chat.messageCount === 1 ? '' : 's'}`
