@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { ChatDetail, ChatSummary, SourceEntryView } from '../shared/types';
+import type { ChatDetail, ChatSummary, Message, SourceEntryView } from '../shared/types';
 import { sanitizeHtml } from './sanitize';
 import { displayDateTime } from './dateDisplay';
 
@@ -21,6 +21,12 @@ export default function ChatReader({ chat, onChange }: Props) {
   const [recapturing, setRecapturing] = useState(false);
   const [recaptureError, setRecaptureError] = useState<string | null>(null);
   const [entries, setEntries] = useState<SourceEntryView[]>([]);
+  // Which reading is on screen: what is stored for the thread, or one entry's
+  // own account of it. They disagree, and which one is right depends on the
+  // thread — the export is rougher but sometimes longer, a capture has the real
+  // images but can be truncated. Nothing here should pick for the reader.
+  const [reading, setReading] = useState<'stored' | number>('stored');
+  const [entryTurns, setEntryTurns] = useState<Message[]>([]);
   const [candidates, setCandidates] = useState<ChatSummary[]>([]);
   const [showEntries, setShowEntries] = useState(false);
 
@@ -32,6 +38,23 @@ export default function ChatReader({ chat, onChange }: Props) {
     window.notebook.similarChats(chat.id).then(setCandidates);
   };
   useEffect(loadSources, [chat.id]);
+
+  // Back to the thread's own reading when the thread changes: an entry id from
+  // the previous thread would show that thread's text under this one's title.
+  useEffect(() => {
+    setReading('stored');
+    setEntryTurns([]);
+  }, [chat.id]);
+
+  useEffect(() => {
+    if (reading === 'stored') {
+      setEntryTurns([]);
+      return;
+    }
+    window.notebook.sourceEntryTurns(reading).then(setEntryTurns);
+  }, [reading]);
+
+  const shown = reading === 'stored' ? chat.messages : entryTurns;
 
   useEffect(() => {
     window.notebook.getAssetsBaseUrl().then(setAssetsBase);
@@ -337,8 +360,55 @@ export default function ChatReader({ chat, onChange }: Props) {
           external links, and following one inside the app's own renderer
           would navigate away from the app itself, replacing the UI with a web
           page and no way back. Opening them in a browser is a later job. */}
+      {/* Only offered when there is something to switch to. A single reading
+          needs no chooser, and an empty one would just be furniture. */}
+      {entries.length > 0 && (
+        <div className="reading-switch">
+          <span className="reading-label">Reading</span>
+          {/* Named for what it IS, not for where it lives. "stored" told the
+              reader nothing, and the answer matters: this is the panel's reading
+              wherever the thread has been captured, which is the better one —
+              it has the real images and the full text. A capture overwrites the
+              turns and an import onto a captured thread deliberately leaves them
+              alone, so this is already the capture when one exists. It is the
+              default for that reason. */}
+          <button
+            type="button"
+            className={reading === 'stored' ? 'reading-on' : undefined}
+            onClick={() => setReading('stored')}
+            title={
+              chat.sources.split(',').includes('capture')
+                ? 'Read from the live panel — the fullest text and the real images'
+                : 'What is stored for this thread; it has not been read from the panel yet'
+            }
+          >
+            {chat.sources.split(',').includes('capture') ? 'panel capture' : 'as imported'} ·{' '}
+            {chat.messageCount} turns
+          </button>
+          {entries.map((entry) => (
+            <button
+              key={entry.id}
+              type="button"
+              className={reading === entry.id ? 'reading-on' : undefined}
+              onClick={() => setReading(entry.id)}
+              title={
+                entry.linked
+                  ? "This entry's own account of the thread"
+                  : 'An entry that is not attached to this thread but opens the same way'
+              }
+            >
+              e#{entry.id} · {entry.turnCount} turns
+              {entry.linked ? '' : ' (unattached)'}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div className="reader-body" onClick={(event) => event.preventDefault()}>
-        {chat.messages.map((message) => (
+        {reading !== 'stored' && shown.length === 0 && (
+          <p className="hint">That entry holds no turns.</p>
+        )}
+        {shown.map((message) => (
           <div key={message.id} className={`turn turn-${message.role}`}>
             <div className="turn-role">{message.role === 'user' ? 'You' : 'AI Mode'}</div>
             {message.html ? (

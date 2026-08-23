@@ -864,6 +864,39 @@ button:disabled {
   border: 1px solid var(--border);
 }
 
+/* Choosing which reading to look at. Sits between the provenance and the turns,
+   because it changes what the turns ARE and reading it afterwards is too late. */
+.reading-switch {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+  padding: 0.35rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.reading-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-right: 0.2rem;
+}
+
+.reading-switch button {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.45rem;
+}
+
+/* The selected reading, marked strongly enough that it is obvious the turns
+   below are not the thread's own stored text. */
+.reading-switch button.reading-on {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+  color: #fff;
+}
+
 /* ----------------------------------------------------------------- report */
 
 /* The export report. Takes the list and reader panes together: it is prose and
