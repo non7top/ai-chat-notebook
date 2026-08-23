@@ -200,6 +200,24 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured }: Prop
           Import it
         </button>
       )}
+      <button
+        type="button"
+        title="Remove everything a Takeout import added. Harvested conversations are kept."
+        disabled={takeoutBusy || busy || capturing}
+        onClick={async () => {
+          if (!(await window.notebook.confirm('Undo the Takeout import?', 'Conversations harvested from the panel are kept.'))) return;
+          setTakeoutBusy(true);
+          try {
+            const r = await window.notebook.undoTakeout();
+            setTakeoutNote(`undone: ${r.deleted} removed, ${r.reverted} reverted`);
+            onFinished();
+          } finally {
+            setTakeoutBusy(false);
+          }
+        }}
+      >
+        Undo import
+      </button>
       {takeoutNote && <span className="harvest-status">{takeoutNote}</span>}
 
       <span className="harvest-sep" />

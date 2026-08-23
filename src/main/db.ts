@@ -611,6 +611,42 @@ export function importTakeoutEntries(rows: TakeoutImportRow[]): TakeoutImportRes
   return result;
 }
 
+/**
+ * Removes everything a Takeout import created, leaving harvested conversations
+ * untouched.
+ *
+ * Exists because the first import was wrong in a way that cannot be corrected
+ * in place: Takeout logs one entry per QUERY, not per conversation, so it
+ * created a chat per turn. Rolling back has to be possible without discarding
+ * the sidebar harvest alongside it — hence the synthetic "takeout:" external_id
+ * prefix, which makes imported rows identifiable.
+ *
+ * Rows the import merely annotated (an existing harvested conversation given a
+ * timestamp) keep their content; only the timestamp attribution is dropped.
+ */
+export function undoTakeoutImport(): { deleted: number; reverted: number } {
+  db.exec('BEGIN');
+  try {
+    const deleted = db
+      .prepare("DELETE FROM chats WHERE external_id LIKE 'takeout:%'")
+      .run().changes;
+    // Harvested conversations that the import touched: forget the imported
+    // date, and put them back in the capture queue.
+    const reverted = db
+      .prepare(
+        `UPDATE chats
+           SET started_at = NULL, source = 'harvest'
+         WHERE source = 'takeout' AND external_id NOT LIKE 'takeout:%'`,
+      )
+      .run().changes;
+    db.exec('COMMIT');
+    return { deleted: Number(deleted), reverted: Number(reverted) };
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
 /* --------------------------------------------------------------- dev seed */
 
 // Lives here rather than in a script because the database is inside the app's

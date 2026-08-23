@@ -123,6 +123,8 @@ export interface NotebookApi {
   /** Reads the Takeout folder only — nothing is stored until applyTakeout. */
   pickTakeout(): Promise<TakeoutPick | null>;
   applyTakeout(folder: string, rows: TakeoutImportRow[]): Promise<TakeoutImportSummary>;
+  /** Removes everything a Takeout import created; harvested chats survive. */
+  undoTakeout(): Promise<{ deleted: number; reverted: number }>;
 
   /** file:// base for resolving the relative asset paths in stored HTML. */
   getAssetsBaseUrl(): Promise<string>;

@@ -106,6 +106,8 @@ export function registerIpcHandlers(): void {
     (_event, folder: string, rows: db.TakeoutImportRow[]) => importTakeout(folder, rows),
   );
 
+  ipcMain.handle('takeout:undo', () => db.undoTakeoutImport());
+
   ipcMain.handle('capture:turns', (_event, limit: number) => captureTurns(limit));
   ipcMain.handle('capture:cancel', () => cancelCapture());
   ipcMain.handle('capture:recapture', (_event, chatId: number) => recaptureChat(chatId));

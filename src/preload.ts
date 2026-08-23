@@ -11,6 +11,7 @@ const api: NotebookApi = {
 
   pickTakeout: () => ipcRenderer.invoke('takeout:pick'),
   applyTakeout: (folder, rows) => ipcRenderer.invoke('takeout:apply', folder, rows),
+  undoTakeout: () => ipcRenderer.invoke('takeout:undo'),
   getAssetsBaseUrl: () => ipcRenderer.invoke('assets:baseUrl'),
   captureTurns: (limit) => ipcRenderer.invoke('capture:turns', limit),
   cancelCapture: () => ipcRenderer.invoke('capture:cancel'),
