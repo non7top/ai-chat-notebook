@@ -81,6 +81,7 @@ export function importTakeout(
     extendedChats: conversations.extended,
     datedHarvested: conversations.mergedIntoHarvested,
     ambiguousOpenings: conversations.ambiguousOpenings,
+    regrouped: conversations.regrouped,
     turnsWritten: conversations.turnsWritten,
     inserted: stored.inserted,
     duplicates: stored.duplicates,

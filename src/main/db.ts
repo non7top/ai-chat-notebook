@@ -127,10 +127,19 @@ export function initDb(userDataPath: string): void {
     CREATE INDEX IF NOT EXISTS source_entries_key ON source_entries(query_key);
 
     -- Which source records a conversation was built from. Many-to-one, because
-    -- gluing several entries into one conversation is expected.
+    -- gluing several entries into one conversation is expected — and
+    -- many-to-many, because one entry can be evidence for two conversations
+    -- Google cloned apart.
+    --
+    -- linked_by records who made the link, and it is load-bearing rather than
+    -- descriptive. Re-importing the export has to be able to undo a grouping
+    -- its own earlier run got wrong, which means deleting links; but it must
+    -- never delete a link made by hand, because that is the gluing work the
+    -- whole design asks for. Only 'import' links are the importer's to remove.
     CREATE TABLE IF NOT EXISTS chat_sources (
       chat_id         INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
       source_entry_id INTEGER NOT NULL REFERENCES source_entries(id) ON DELETE CASCADE,
+      linked_by       TEXT NOT NULL DEFAULT 'import',
       PRIMARY KEY (chat_id, source_entry_id)
     );
 
@@ -184,6 +193,10 @@ export function initDb(userDataPath: string): void {
   // records were collapsed into one — and that is exactly where a wrong
   // grouping would be spotted.
   ensureColumn('chats', 'takeout_entries', 'takeout_entries INTEGER NOT NULL DEFAULT 0');
+  // Existing links predate the distinction and are all the importer's own, so
+  // 'import' is the correct default for them: nothing had been glued by hand
+  // before there was a way to do it.
+  ensureColumn('chat_sources', 'linked_by', "linked_by TEXT NOT NULL DEFAULT 'import'");
   db.exec('CREATE INDEX IF NOT EXISTS chats_list_rank ON chats(list_rank);');
 
   fts5Available = probeFts5(db);
@@ -704,6 +717,13 @@ export interface TakeoutConversationResult {
    * count of conversations left for a person to glue by hand.
    */
   ambiguousOpenings: number;
+  /**
+   * Links an earlier import made that this one removed, because the entry it
+   * pointed at no longer describes the conversation. Non-zero means a previous
+   * run's wrong grouping was repaired, which is worth reporting rather than
+   * doing quietly.
+   */
+  regrouped: number;
   turnsWritten: number;
 }
 
@@ -735,6 +755,7 @@ export function importTakeoutConversations(
     extended: 0,
     mergedIntoHarvested: 0,
     ambiguousOpenings: 0,
+    regrouped: 0,
     turnsWritten: 0,
   };
 
@@ -954,8 +975,23 @@ export function importTakeoutConversations(
       const openingRef = `${key}@${row.timestamp ?? 'nodate'}`;
       const entryId = entryIdByRef.get(openingRef);
       if (entryId !== undefined) {
+        // The turns above were written from this one entry, so this is the only
+        // entry the import can claim describes this conversation. Any other
+        // link the IMPORT made is a grouping an earlier run got wrong, and
+        // leaving it would show a conversation as built from entries whose
+        // turns are no longer in it. Links made by hand are untouched: gluing
+        // is the owner's decision and re-running an import must not reverse it.
+        const { changes } = db
+          .prepare(
+            `DELETE FROM chat_sources
+               WHERE chat_id = ? AND source_entry_id <> ? AND linked_by = 'import'`,
+          )
+          .run(chatId, entryId);
+        result.regrouped += Number(changes);
         db.prepare(
-          'INSERT OR IGNORE INTO chat_sources (chat_id, source_entry_id) VALUES (?, ?)',
+          `INSERT INTO chat_sources (chat_id, source_entry_id, linked_by)
+           VALUES (?, ?, 'import')
+           ON CONFLICT (chat_id, source_entry_id) DO NOTHING`,
         ).run(chatId, entryId);
       }
     }
@@ -1061,7 +1097,9 @@ export function unmergeChat(chatId: number): void {
     // attached to both by hand is a separate decision and is made again by
     // hand — guessing which of the two a link was would be worse than either.
     const give = db.prepare(
-      'INSERT OR IGNORE INTO chat_sources (chat_id, source_entry_id) VALUES (?, ?)',
+      `INSERT INTO chat_sources (chat_id, source_entry_id, linked_by)
+       VALUES (?, ?, 'manual')
+       ON CONFLICT (chat_id, source_entry_id) DO UPDATE SET linked_by = 'manual'`,
     );
     const takeBack = db.prepare('DELETE FROM chat_sources WHERE chat_id = ? AND source_entry_id = ?');
     for (const entryId of moved) {
@@ -1168,10 +1206,11 @@ export function sourceEntriesForChat(chatId: number): SourceEntryView[] {
  * several conversations, and that is allowed: see SourceEntryView.chatCount.
  */
 export function linkSourceEntry(chatId: number, entryId: number): void {
-  db.prepare('INSERT OR IGNORE INTO chat_sources (chat_id, source_entry_id) VALUES (?, ?)').run(
-    chatId,
-    entryId,
-  );
+  db.prepare(
+    `INSERT INTO chat_sources (chat_id, source_entry_id, linked_by)
+     VALUES (?, ?, 'manual')
+     ON CONFLICT (chat_id, source_entry_id) DO UPDATE SET linked_by = 'manual'`,
+  ).run(chatId, entryId);
 }
 
 /** Writes an entry's own reading of the conversation as the chat's turns. */
@@ -1316,10 +1355,11 @@ function adoptEntry(entryId: number, folderId: number | null, from?: number): nu
     chatId = Number(lastInsertRowid);
   }
 
-  db.prepare('INSERT OR IGNORE INTO chat_sources (chat_id, source_entry_id) VALUES (?, ?)').run(
-    chatId,
-    entryId,
-  );
+  db.prepare(
+    `INSERT INTO chat_sources (chat_id, source_entry_id, linked_by)
+     VALUES (?, ?, 'manual')
+     ON CONFLICT (chat_id, source_entry_id) DO UPDATE SET linked_by = 'manual'`,
+  ).run(chatId, entryId);
   writeTurnsFromEntries(chatId, [entryId]);
   // Both: where the content came from, and how this conversation came to
   // exist. Recording only the latter would make an unglued conversation look

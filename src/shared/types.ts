@@ -152,6 +152,8 @@ export interface TakeoutImportSummary {
    * them it is — so each stands alone until someone glues them by hand.
    */
   ambiguousOpenings: number;
+  /** Wrong groupings from an earlier import that this run repaired. */
+  regrouped: number;
   turnsWritten: number;
   inserted: number;
   duplicates: number;

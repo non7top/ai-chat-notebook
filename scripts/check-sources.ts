@@ -20,6 +20,7 @@
  *   npm run check:sources
  */
 import fs from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import os from 'node:os';
 import path from 'node:path';
 import * as db from '../src/main/db.ts';
@@ -156,5 +157,94 @@ if (rebuilt?.messageCount !== orphans[0].turnCount) {
   throw new Error('adopted conversation lost turns');
 }
 console.log('orphans scope returns no chats:', db.listChats({ kind: 'orphans' }).length === 0);
+// ---------------------------------------------------------------------------
+// Re-importing on top of a grouping an earlier run got wrong.
+//
+// This is the repair path for the database that already exists: the buggy
+// import folded two entries into one conversation and threw away the shorter
+// reading, and re-importing the same export is supposed to undo that.
+//
+// Run twice, because the importer's licence to delete a link cuts both ways and
+// the two cases are the same DELETE told apart only by linked_by. It may remove
+// a link its own earlier run made; it may not remove one made by hand. Testing
+// either alone proves nothing about the other.
+function repairScenario(glueByHand: boolean): void {
+  const label = glueByHand ? 'hand-glued' : 'left as the importer made it';
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'notebook-regroup-'));
+  db.initDb(scratch);
+
+  // The wrong state: one conversation carrying the LATER entry's four turns,
+  // with both entries linked to it by the importer — what the old code left.
+  db.importTakeoutConversations([rows[0]] as never);
+  const [wrong] = db.listChats({ kind: 'all' });
+  db.importTakeoutConversations([rows[1]] as never);
+  const separate = db.listChats({ kind: 'all' }).find((c) => c.id !== wrong.id);
+  if (!separate) throw new Error('expected a second conversation to borrow its entry from');
+  const stray = db.sourceEntriesForChat(separate.id).filter((e) => e.linked)[0];
+  db.deleteChat(separate.id);
+
+  // Written straight into the file, on a second connection, because this is the
+  // state the OLD code left and no code path produces it any more. Doing it
+  // through an exported helper would mean adding a way to corrupt the database
+  // to the app itself, just to test the repair.
+  const raw = new DatabaseSync(path.join(scratch, 'notebook.sqlite'));
+  raw
+    .prepare(
+      "INSERT INTO chat_sources (chat_id, source_entry_id, linked_by) VALUES (?, ?, 'import')",
+    )
+    .run(wrong.id, stray.id);
+  raw.prepare('DELETE FROM messages WHERE chat_id = ?').run(wrong.id);
+  const insertWrong = raw.prepare(
+    'INSERT INTO messages (chat_id, seq, role, text, html) VALUES (?, ?, ?, ?, ?)',
+  );
+  rows[1].turns.forEach((t, i) => insertWrong.run(wrong.id, i, t.role, t.text, t.html));
+  raw.close();
+
+  if (glueByHand) db.linkSourceEntry(wrong.id, stray.id);
+
+  console.log(
+    `\nwrong state (${label}): chat ${wrong.id} holds`,
+    db.getChat(wrong.id)?.messageCount,
+    'turns, entries linked:',
+    db.sourceEntriesForChat(wrong.id).filter((e) => e.linked).map((e) => e.id),
+    '| conversations:',
+    db.listChats({ kind: 'all' }).length,
+  );
+
+  const repair = db.importTakeoutConversations(rows as never);
+  const after = db.listChats({ kind: 'all' });
+  const linked = db.sourceEntriesForChat(wrong.id).filter((e) => e.linked).map((e) => e.id);
+  console.log(
+    're-import:',
+    `regrouped=${repair.regrouped} ambiguous=${repair.ambiguousOpenings}`,
+    '| conversations:',
+    after.map((c) => `${c.id}:${c.messageCount}t`).join(' '),
+    '| entries on the repaired chat:',
+    linked,
+  );
+
+  // Both readings must be back in full either way: repairing the turns is
+  // independent of what happens to the links.
+  if (after.length !== 2) throw new Error(`expected 2 conversations, got ${after.length}`);
+  const totals = after.map((c) => c.messageCount).sort((a, b) => a - b);
+  if (totals[0] !== 2 || totals[1] !== 4) {
+    throw new Error(`both readings should be back in full, got ${totals.join('/')}`);
+  }
+
+  if (glueByHand) {
+    if (!linked.includes(stray.id)) throw new Error('the re-import removed a link made by hand');
+    if (repair.regrouped !== 0) throw new Error('a hand-made link was counted as regrouped');
+  } else {
+    if (linked.includes(stray.id)) {
+      throw new Error('the stale link from the wrong grouping survived the re-import');
+    }
+    if (repair.regrouped !== 1) throw new Error(`expected 1 regrouped, got ${repair.regrouped}`);
+  }
+  fs.rmSync(scratch, { recursive: true, force: true });
+}
+
+repairScenario(false);
+repairScenario(true);
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('OK');

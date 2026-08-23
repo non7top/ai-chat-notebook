@@ -107,7 +107,8 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activi
       setTakeoutNote(
         `${summary.entries} entries → ${summary.conversations} conversations ` +
           `(${summary.createdChats} new, ${summary.extendedChats} extended, ` +
-          `${summary.datedHarvested} dated, ${summary.ambiguousOpenings} left to glue) · ` +
+          `${summary.datedHarvested} dated, ${summary.ambiguousOpenings} left to glue, ` +
+          `${summary.regrouped} regrouped) · ` +
           `${summary.turnsWritten} turns · ` +
           `${summary.inserted} activity recorded ` +
           `(${summary.duplicates} already known, ${summary.skipped} no query) · ` +
