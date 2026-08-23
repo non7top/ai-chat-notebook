@@ -46,6 +46,33 @@ function entryRefFor(row: db.TakeoutImportRow): string {
   );
 }
 
+/**
+ * IMAGES CANNOT BE MATCHED ACROSS SOURCES. Measured, not assumed.
+ *
+ * The export ships its own re-encoding: 599x1334 baseline JPEG, median 57 KB
+ * across 1041 files. The panel holds the originals — 1000x1000 uploads and
+ * 1024x1024 generated images, per the findings in aiModeDriver.ts. So the same
+ * picture arrives with a different filename, different dimensions AND different
+ * bytes.
+ *
+ * Three consequences, all of which have to be lived with rather than solved:
+ *
+ * - The content-addressed store cannot collapse them. Two copies of one picture
+ *   are two assets, and a thread that has both counts two images. That is
+ *   honest — they really are two different files — but it is not the count a
+ *   person would give.
+ * - No image-derived value can be a cross-source key: not the filename, which
+ *   Takeout invents from the export time, and not the hash, which the
+ *   re-encoding changes. Matching a Takeout record to a panel capture has to be
+ *   done on text.
+ * - The panel's copy is the better one and should win wherever a choice is made.
+ *   The export's is a reduced screenshot-sized re-encode.
+ *
+ * Only a perceptual hash — dHash or pHash — could match these, since it survives
+ * re-encoding and resizing. That is a real option if it is ever needed, and it
+ * brings false positives with it: two different screenshots of the same app
+ * would collide. Nothing here needs it today.
+ */
 function copyIntoAssetStore(sourcePath: string): { sha256: string; localPath: string; bytes: number; mime: string } | null {
   try {
     const buffer = fs.readFileSync(sourcePath);
