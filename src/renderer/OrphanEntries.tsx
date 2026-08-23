@@ -42,8 +42,8 @@ export default function OrphanEntries({ onChange }: Props) {
     <div className="orphans">
       <p className="hint">
         {entries.length === 0
-          ? 'No orphan entries — every stored entry belongs to a conversation.'
-          : `${entries.length} ${entries.length === 1 ? 'entry' : 'entries'} attached to no conversation.`}
+          ? 'No orphan entries — every stored entry belongs to a thread.'
+          : `${entries.length} ${entries.length === 1 ? 'entry' : 'entries'} attached to no thread.`}
       </p>
       {entries.map((entry) => (
         <div key={entry.id} className="orphan">
@@ -70,7 +70,7 @@ export default function OrphanEntries({ onChange }: Props) {
             </span>
             <button
               type="button"
-              title="Adopt: give this entry a conversation of its own"
+              title="Adopt: give this entry a thread of its own"
               onClick={async () => {
                 // Unfiled deliberately: filing it is a separate decision, and
                 // guessing a folder here would bury it somewhere unexpected.

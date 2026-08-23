@@ -66,7 +66,7 @@ export default function TakeoutReport({ report, busy, onApply, onClose }: Props)
             one entry per submission, so entry counts are several times larger
             than the number of conversations and reading them as threads is
             simply wrong — 1779 of them for an account holding about 300. */}
-        <h3>Conversations</h3>
+        <h3>Threads</h3>
         <p className="report-figure new">+{sweep.wouldCreate} new</p>
         <p className="report-figure">
           ={existing} already here
@@ -74,12 +74,12 @@ export default function TakeoutReport({ report, busy, onApply, onClose }: Props)
         </p>
         <p className="report-note">
           From {sweep.entries} entries in the file, describing {sweep.conversations}{' '}
-          conversations
+          threads
           {sweep.snapshotsFolded > 0 && (
             <>
               {' '}— {sweep.snapshotsFolded} of those entries are earlier snapshots of a
-              conversation another entry carries further, folded in rather than made into
-              conversations of their own
+              thread another entry carries further, folded in rather than made into threads
+              of their own
             </>
           )}
           .
@@ -89,8 +89,8 @@ export default function TakeoutReport({ report, busy, onApply, onClose }: Props)
             {sweep.ambiguous} share an opening prompt
             <span className="report-aside">
               {' '}
-              — nothing can tell which conversation is which, so each stands alone until
-              you glue them
+              — nothing can tell which thread is which, so each stands alone until you
+              glue them
             </span>
           </p>
         )}
@@ -111,19 +111,21 @@ export default function TakeoutReport({ report, busy, onApply, onClose }: Props)
             {scan.titleCount === scan.entryCount ? (
               <span className="report-aside">
                 {' '}
-                — matching {scan.titleCount} record titles, so each cell is one record
+                — matching {scan.titleCount} record titles ({scan.aiModeTitleCount} of them
+                AI Mode), so each cell is one record
               </span>
             ) : (
               <span className="report-aside bad">
                 {' '}
-                — but {scan.titleCount} record titles. They must agree; div.outer-cell is
-                not one per record, so every figure here is measuring the wrong thing.
+                — but {scan.titleCount} record titles, {scan.aiModeTitleCount} of them AI
+                Mode. Cells and titles must agree; div.outer-cell is not one per record, so
+                every figure here is measuring the wrong thing.
               </span>
             )}
           </dd>
           <dt>Kinds</dt>
           <dd>
-            {scan.activityCounts.conversation} conversations
+            {scan.activityCounts.conversation} threads
             {scan.activityCounts.lens > 0 && (
               <>
                 , {scan.activityCounts.lens} Lens searches
@@ -176,8 +178,8 @@ export default function TakeoutReport({ report, busy, onApply, onClose }: Props)
             {scan.nestedCells} cells sit inside another cell
             <span className="report-aside">
               {' '}
-              — those conversations are counted twice and their turns are merged into the
-              outer one. Do not import until this is fixed.
+              — those threads are counted twice and their turns are merged into the outer
+              one. Do not import until this is fixed.
             </span>
           </p>
         )}
@@ -189,8 +191,7 @@ export default function TakeoutReport({ report, busy, onApply, onClose }: Props)
               {' '}
               — mostly Lens searches and empty records. Every one is kept in full under
               Orphan entries, each with its own date, rather than discarded: nothing here
-              can say which conversation they belong to, and that is not a reason to lose
-              them.
+              can say which thread they belong to, and that is not a reason to lose them.
             </span>
           </p>
         )}
@@ -205,9 +206,9 @@ export default function TakeoutReport({ report, busy, onApply, onClose }: Props)
             {scan.multiStampEntries} cells contain more than one submission
             <span className="report-aside">
               {' '}
-              — up to {scan.maxStamps} in one. Those conversations are run together: only
-              the first date and first prompt of each cell are kept. Do not import until
-              this is fixed.
+              — up to {scan.maxStamps} in one. Those threads are run together: only the
+              first date and first prompt of each cell are kept. Do not import until this
+              is fixed.
             </span>
           </p>
         )}
@@ -224,7 +225,7 @@ export default function TakeoutReport({ report, busy, onApply, onClose }: Props)
               {scan.largestEntry.stamps === 1 ? '' : 's'} and {scan.largestEntry.links} search
               link{scan.largestEntry.links === 1 ? '' : 's'} in the same cell.{' '}
               {scan.largestEntry.stamps <= 1 && scan.largestEntry.links <= 1
-                ? 'One of each, so this is a single long conversation.'
+                ? 'One of each, so this is a single long thread.'
                 : 'More than one of either means separate submissions were merged into it.'}
             </span>
           </p>

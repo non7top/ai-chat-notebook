@@ -623,5 +623,37 @@ repairScenario(true);
   fs.rmSync(scratch, { recursive: true, force: true });
 }
 
+// ---------------------------------------------------------------------------
+// The Empty threads scope.
+//
+// A thread with no turns looks exactly like a full one in a list of hundreds, so
+// the capture backlog is only findable as a category. The scope has to return
+// precisely those and nothing else — the 'orphans' scope once fell through to
+// the folder query and matched nothing, which looked identical to an empty
+// backlog.
+{
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'notebook-empty-'));
+  db.initDb(scratch);
+
+  db.upsertThreadFromList('empty-1', 'never read', null, 0);
+  db.upsertThreadFromList('empty-2', 'also never read', null, 1);
+  db.upsertThreadFromList('has-turns', 'read already', null, 2);
+  const full = db.listChats({ kind: 'all' }).find((c) => c.title === 'read already');
+  if (!full) throw new Error('fixture missing');
+  db.replaceTurns(full.id, [{ seq: 0, role: 'user', text: 'something', html: null }], []);
+
+  const empties = db.listChats({ kind: 'empty' });
+  console.log(
+    '\nempty threads:',
+    empties.map((c) => c.title),
+    '| all threads:',
+    db.listChats({ kind: 'all' }).length,
+  );
+  if (empties.length !== 2) throw new Error(`expected 2 empty threads, got ${empties.length}`);
+  if (empties.some((c) => c.messageCount > 0)) throw new Error('a thread with turns was listed');
+  if (empties.some((c) => c.id === full.id)) throw new Error('the read thread was listed as empty');
+  fs.rmSync(scratch, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('OK');

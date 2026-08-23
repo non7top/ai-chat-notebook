@@ -51,7 +51,7 @@ export default function ChatReader({ chat, onChange }: Props) {
             // Focused on appearance: it only exists because Rename was just clicked.
             autoFocus
             value={draft}
-            placeholder="Name this conversation"
+            placeholder="Name this thread"
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') commit();
@@ -68,7 +68,7 @@ export default function ChatReader({ chat, onChange }: Props) {
             <button
               type="button"
               disabled={recapturing}
-              title="Re-read this conversation from Google, replacing what is stored"
+              title="Re-read this thread from Google, replacing what is stored"
               onClick={async () => {
                 setRecapturing(true);
                 setRecaptureError(null);
@@ -108,7 +108,7 @@ export default function ChatReader({ chat, onChange }: Props) {
           constructed mtid URL creates a duplicate conversation. Clicking the
           sidebar row is the only faithful route, so it is a button. */}
       <p className="provenance">
-        <span title="Every source that contributed to this conversation">
+        <span title="Every source that contributed to this thread">
           {chat.sources
             .split(',')
             .filter(Boolean)
@@ -129,7 +129,7 @@ export default function ChatReader({ chat, onChange }: Props) {
           (chat.dateBasis === 'placeholder' ? (
             <span
               className="date-placeholder"
-              title="No real date is known for this conversation. This is when the app first saved it."
+              title="No real date is known for this thread. This is when the app first saved it."
             >
               {' · saved '}
               {displayDateTime(chat.startedAt)} (no real date known)
@@ -145,7 +145,7 @@ export default function ChatReader({ chat, onChange }: Props) {
           <button
             type="button"
             className="provenance-open"
-            title="Find and open this conversation in the live panel"
+            title="Find and open this thread in the live panel"
             onClick={async () => {
               setRecaptureError(null);
               try {
@@ -188,7 +188,7 @@ export default function ChatReader({ chat, onChange }: Props) {
           {candidates.length > 0 && (
             <span className="sources-hint">
               {' '}
-              · {candidates.length} similar {candidates.length === 1 ? 'conversation' : 'conversations'}
+              · {candidates.length} similar {candidates.length === 1 ? 'thread' : 'threads'}
             </span>
           )}
         </button>
@@ -238,11 +238,11 @@ export default function ChatReader({ chat, onChange }: Props) {
                 {entry.linked ? (
                   <button
                     type="button"
-                    title="Unglue: this entry is its own conversation, glued here only because it opens the same way"
+                    title="Unglue: this entry is its own thread, glued here only because it opens the same way"
                     onClick={async () => {
                       const ok = await window.notebook.confirm(
                         'Unglue this entry?',
-                        'It becomes a conversation of its own, with its own id and its own link to this entry. Nothing is deleted.',
+                        'It becomes a thread of its own, with its own id and its own link to this entry. Nothing is deleted.',
                       );
                       if (!ok) return;
                       await window.notebook.unglueSourceEntry(chat.id, entry.id);
@@ -255,7 +255,7 @@ export default function ChatReader({ chat, onChange }: Props) {
                 ) : (
                   <button
                     type="button"
-                    title="Glue: this entry belongs to this conversation"
+                    title="Glue: this entry belongs to this thread"
                     onClick={async () => {
                       await window.notebook.linkSourceEntry(chat.id, entry.id);
                       loadSources();
@@ -270,7 +270,7 @@ export default function ChatReader({ chat, onChange }: Props) {
 
             {candidates.map((other) => (
               <div key={`chat-${other.id}`} className="source-entry candidate">
-                <span className="source-kind">separate conversation</span>
+                <span className="source-kind">separate thread</span>
                 <span className="source-facts">
                   {other.startedAt ? displayDateTime(other.startedAt) : 'no date'}
                   {' · '}
@@ -280,10 +280,10 @@ export default function ChatReader({ chat, onChange }: Props) {
                 </span>
                 <button
                   type="button"
-                  title="Glue: fold this conversation's entries into this one. Reversible."
+                  title="Glue: fold this thread's entries into this one. Reversible."
                   onClick={async () => {
                     const ok = await window.notebook.confirm(
-                      'Glue these conversations?',
+                      'Glue these threads?',
                       'Its entries move here and it stops appearing in the list. Nothing is deleted — this can be undone.',
                     );
                     if (!ok) return;

@@ -88,8 +88,14 @@ export interface ChatDetail extends ChatSummary {
 export type ChatScope =
   | { kind: 'all' }
   | { kind: 'unfiled' }
-  /** Raw entries attached to no conversation — not chats, so rendered apart. */
+  /** Raw entries attached to no thread — not threads, so rendered apart. */
   | { kind: 'orphans' }
+  /**
+   * Threads with no turns stored. Harvested from the sidebar but never read, or
+   * read and failed. Scattered through the full list they are invisible; as a
+   * category they are the capture backlog.
+   */
+  | { kind: 'empty' }
   | { kind: 'folder'; id: number };
 
 export interface HarvestProgress {

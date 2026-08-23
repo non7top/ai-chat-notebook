@@ -48,9 +48,9 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
     [chats, terms],
   );
 
-  // Titles only, for now — and said out loud in the placeholder rather than
-  // left to be discovered, because a search that silently ignores the body text
-  // is worse than one that admits it does.
+  // "Search threads" is Google's own wording for this, and the app follows it —
+  // but "titles" stays in the placeholder, because a search that silently
+  // ignores the body text is worse than one that admits it does.
   const find = (
     <div className="find">
       <input
@@ -58,7 +58,7 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
         className="find-input"
         type="search"
         value={query}
-        placeholder="Find in titles…"
+        placeholder="Search thread titles…"
         onChange={(event) => onQueryChange(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === 'Escape') {
@@ -76,7 +76,7 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
   );
 
   if (chats.length === 0) {
-    return <p className="hint empty">No conversations here yet.</p>;
+    return <p className="hint empty">No threads here yet.</p>;
   }
 
   return (
@@ -86,8 +86,7 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
           folder is empty", which is a different and more alarming claim. */}
       {shown.length === 0 && (
         <p className="hint empty">
-          No title matches “{query}”. {chats.length} conversation
-          {chats.length === 1 ? '' : 's'} here.
+          No title matches “{query}”. {chats.length} thread{chats.length === 1 ? '' : 's'} here.
         </p>
       )}
       {shown.map((chat) => {
@@ -162,7 +161,7 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
                   // sitting alongside the others.
                   <span
                     className="date-placeholder"
-                    title="No real date is known for this conversation. This is when the app first saved it — a stand-in until an export supplies the real one."
+                    title="No real date is known for this thread. This is when the app first saved it — a stand-in until an export supplies the real one."
                   >
                     saved {started}
                     {' · '}
@@ -224,7 +223,7 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
               {chat.takeoutEntryCount > 1 && (
                 <span
                   className="chat-grouped"
-                  title={`${chat.takeoutEntryCount} export entries were grouped into this conversation`}
+                  title={`${chat.takeoutEntryCount} export entries were grouped into this thread`}
                 >
                   {' · '}
                   {chat.takeoutEntryCount} entries
@@ -233,7 +232,7 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
               {chat.altTurnCount > 0 && chat.altTurnCount !== chat.messageCount && (
                 <span
                   className="chat-mismatch"
-                  title={`The other reading of this conversation has ${chat.altTurnCount} turns, this one has ${chat.messageCount}`}
+                  title={`The other reading of this thread has ${chat.altTurnCount} turns, this one has ${chat.messageCount}`}
                 >
                   {' · '}
                   differs
@@ -251,7 +250,7 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
               {chat.previewCount > 0 && (
                 <span
                   className="chat-previews"
-                  title={`${chat.previewCount} link preview(s) or source thumbnail(s) — not the conversation's own images`}
+                  title={`${chat.previewCount} link preview(s) or source thumbnail(s) — not the thread's own images`}
                 >
                   {' · '}
                   {chat.previewCount} preview{chat.previewCount === 1 ? '' : 's'}

@@ -217,7 +217,7 @@ export default function FolderTree({ folders, scope, onScopeChange, onChange, on
               <button
                 type="button"
                 className="row-action"
-                title="Delete folder (conversations inside become Unfiled)"
+                title="Delete folder (threads inside become Unfiled)"
                 onClick={(event) => {
                   event.stopPropagation();
                   deleteFolder(folder);
@@ -253,7 +253,7 @@ export default function FolderTree({ folders, scope, onScopeChange, onChange, on
         onClick={() => onScopeChange({ kind: 'all' })}
       >
         <span className="twisty-spacer" />
-        <span className="tree-name">All conversations</span>
+        <span className="tree-name">All threads</span>
       </div>
       <div
         className={`tree-row${sameScope(scope, { kind: 'unfiled' }) ? ' selected' : ''}${
@@ -269,6 +269,17 @@ export default function FolderTree({ folders, scope, onScopeChange, onChange, on
       >
         <span className="twisty-spacer" />
         <span className="tree-name">Unfiled</span>
+      </div>
+
+      {/* The capture backlog. A thread with no turns is indistinguishable from a
+          full one in a list of hundreds, so the threads that still need reading
+          — or that failed — are only findable as a category. */}
+      <div
+        className={`tree-row${sameScope(scope, { kind: 'empty' }) ? ' selected' : ''}`}
+        onClick={() => onScopeChange({ kind: 'empty' })}
+      >
+        <span className="twisty-spacer" />
+        <span className="tree-name">Empty threads</span>
       </div>
 
       {/* Raw entries belonging to no conversation. Kept beside Unfiled rather

@@ -182,7 +182,7 @@ export default function App() {
               {chat ? (
                 <ChatReader chat={chat} onChange={reloadAll} />
               ) : (
-                <p className="hint empty">Select a conversation to read it.</p>
+                <p className="hint empty">Select a thread to read it.</p>
               )}
             </div>
           </>

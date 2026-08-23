@@ -114,7 +114,7 @@ export default function HarvestBar({
       // count is all that fits here, and pretending otherwise is what truncated
       // everything that mattered.
       setTakeoutNote(
-        `${scan.aiModeEntries} entries, ${sweep.conversations} conversations — see the report`,
+        `${scan.aiModeEntries} entries, ${sweep.conversations} threads — see the report`,
       );
     } catch (err) {
       setTakeoutNote(err instanceof Error ? err.message : String(err));
@@ -256,7 +256,7 @@ export default function HarvestBar({
       )}
       <button
         type="button"
-        title="Remove everything a Takeout import added. Harvested conversations are kept."
+        title="Remove everything a Takeout import added. Harvested threads are kept."
         disabled={takeoutBusy || busy || capturing}
         onClick={async () => {
           if (!(await window.notebook.confirm('Undo the Takeout import?', 'Conversations harvested from the panel are kept.'))) return;

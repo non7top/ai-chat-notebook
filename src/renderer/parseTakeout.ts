@@ -138,6 +138,17 @@ export interface TakeoutScan {
    */
   titleCount: number;
   /**
+   * Of those titles, how many say "AI Mode".
+   *
+   * Reported beside the total because a text search cannot settle this: the
+   * class appears on other products' records too, an attribute can be split
+   * across lines, and some tools count matching LINES rather than matches — so
+   * two searches of the same file gave 2088 and 3085, which cannot both be
+   * counts of the same thing since one string contains the other. Parsed
+   * figures from one pass are comparable; grep counts from two passes are not.
+   */
+  aiModeTitleCount: number;
+  /**
    * Entries whose cell contains more than one timestamp.
    *
    * A submission carries exactly one, so a cell with several holds several
@@ -330,7 +341,9 @@ export function parseTakeoutHtml(html: string): { entries: TakeoutEntry[]; scan:
   // the entry count tripled between two exports and only the previous total's
   // worth of entries had dates, which is the shape over-counting makes.
   const nested = cells.filter((cell) => cell.parentElement?.closest('div.outer-cell')).length;
-  const titles = doc.querySelectorAll('p.mdl-typography--title').length;
+  const titleNodes = Array.from(doc.querySelectorAll('p.mdl-typography--title'));
+  const titles = titleNodes.length;
+  const aiModeTitles = titleNodes.filter((node) => /ai mode/i.test(node.textContent ?? '')).length;
 
   // How many submissions each cell actually holds. Counted from timestamps
   // because a submission has exactly one, and from search links because it also
@@ -372,6 +385,7 @@ export function parseTakeoutHtml(html: string): { entries: TakeoutEntry[]; scan:
       multiTurnEntries: entries.filter((e) => e.turns.length > 2).length,
       nestedCells: nested,
       titleCount: titles,
+      aiModeTitleCount: aiModeTitles,
       multiStampEntries: perCell.filter((c) => c.stamps > 1).length,
       maxStamps: perCell.reduce((most, c) => Math.max(most, c.stamps), 0),
       largestEntry: biggest,

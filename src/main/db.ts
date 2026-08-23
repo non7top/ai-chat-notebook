@@ -465,6 +465,18 @@ export function listChats(scope: ChatScope): ChatSummary[] {
   // and `scope.id` was undefined, which quietly matched no rows and looked
   // like "no orphans" rather than "wrong query".
   if (scope.kind === 'orphans') return [];
+  // Threads the app knows of but holds nothing for. Ordered like the rest, so
+  // the ones Google listed most recently come first — those are the ones a
+  // capture is most likely to still find.
+  if (scope.kind === 'empty') {
+    return (
+      db
+        .prepare(
+          `${base} AND NOT EXISTS (SELECT 1 FROM messages m2 WHERE m2.chat_id = c.id)${order}`,
+        )
+        .all() as unknown as ChatSummaryRow[]
+    ).map(toSummary);
+  }
   return (
     db.prepare(`${base} AND c.folder_id = ?${order}`).all(scope.id) as unknown as ChatSummaryRow[]
   ).map(toSummary);
