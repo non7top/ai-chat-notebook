@@ -692,6 +692,23 @@ button:disabled {
   border-bottom: 1px solid var(--border);
   padding: 6px 0;
 }
+/* A Lens record's image is its entire content, so it sits in the row rather
+   than behind a disclosure. Small, because these lists run long. */
+.orphan-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  padding: 0.3rem 0 0.1rem;
+}
+
+.orphan-images img {
+  width: 4.5rem;
+  height: 4.5rem;
+  object-fit: cover;
+  border-radius: 3px;
+  background: var(--panel);
+}
+
 .orphan-head {
   display: flex;
   align-items: baseline;

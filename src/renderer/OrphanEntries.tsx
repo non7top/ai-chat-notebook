@@ -82,6 +82,21 @@ export default function OrphanEntries({ onChange }: Props) {
               Adopt
             </button>
           </div>
+          {/* Shown without opening the entry. A Lens record IS its image — a
+              date and a picture, with neither prompt nor response saved — so
+              hiding it behind a disclosure would hide the whole content. */}
+          {entry.imagePaths.length > 0 && assetsBase && (
+            <div className="orphan-images">
+              {entry.imagePaths.map((relative) => (
+                <img
+                  key={relative}
+                  src={assetsBase + relative.slice('assets/'.length)}
+                  alt=""
+                  loading="lazy"
+                />
+              ))}
+            </div>
+          )}
           {openId === entry.id && (
             // Read in full — the whole point of keeping the entry. Same
             // click-swallowing and sanitising as the reader.

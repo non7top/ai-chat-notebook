@@ -238,6 +238,12 @@ export interface SourceEntryView {
    * so an entry with no date says which kind of no-date it is.
    */
   dateText: string | null;
+  /**
+   * Where this entry's images were stored, as relative "assets/..." paths. An
+   * orphan entry has no thread to render through, and for a Lens record the
+   * image is the whole content.
+   */
+  imagePaths: string[];
 }
 
 export interface TakeoutPreview {

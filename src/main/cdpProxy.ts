@@ -30,6 +30,21 @@ export interface CdpProxyOptions {
   publicPort: number;
   /** Port Chromium was told to listen on. Never forward this one. */
   internalPort: number;
+  /**
+   * Address the proxy listens on. Defaults to loopback.
+   *
+   * Widening it is the one thing the password makes reasonable — and it is
+   * needed in practice: the app runs on Windows while the tooling driving it
+   * runs under WSL, whose NAT makes Windows loopback unreachable from the other
+   * side. The alternative is a netsh portproxy rule needing administrator
+   * rights, which forwards the unauthenticated Chromium port just as easily as
+   * this one.
+   *
+   * Still a decision, not a default. Bound anywhere but loopback this is a
+   * password away from full control of a signed-in Google session, and Basic
+   * auth over plain HTTP hands that password to anyone watching the wire.
+   */
+  bindAddress?: string;
   user: string;
   password: string;
 }
@@ -44,6 +59,22 @@ function unauthorized(response: http.ServerResponse): void {
   response.end('Authentication required.\n');
 }
 
+/**
+ * The query parameter the WebSocket URLs carry their credential in.
+ *
+ * The upgrade cannot be authenticated with a header from every client: the
+ * WebSocket API takes no headers, and the URL spec forbids userinfo on ws://, so
+ * a browser-style client has no way to send one. The target list is protected,
+ * and the URLs it hands back include the credential — so getting a usable
+ * WebSocket URL still requires authenticating first.
+ *
+ * It is no weaker than the Basic auth beside it: both put the password on the
+ * wire recoverably, which is the same condition the endpoint already has. It is
+ * more visible, though — URLs end up in logs and shell history in a way headers
+ * do not.
+ */
+const AUTH_PARAM = 'notebook_auth';
+
 function authorised(header: string | undefined, expected: string): boolean {
   if (!header?.startsWith('Basic ')) return false;
   const given = Buffer.from(header.slice('Basic '.length), 'base64');
@@ -56,8 +87,17 @@ function authorised(header: string | undefined, expected: string): boolean {
   return same === 0;
 }
 
+/** Same comparison, for a credential arriving in the URL instead of a header. */
+function authorisedUrl(url: string | undefined, expected: string): boolean {
+  if (!url) return false;
+  const at = url.indexOf(`${AUTH_PARAM}=`);
+  if (at === -1) return false;
+  const value = url.slice(at + AUTH_PARAM.length + 1).split('&')[0];
+  return authorised(`Basic ${decodeURIComponent(value)}`, expected);
+}
+
 export function startCdpProxy(options: CdpProxyOptions): http.Server {
-  const { publicPort, internalPort, user, password } = options;
+  const { publicPort, internalPort, user, password, bindAddress = '127.0.0.1' } = options;
   const expected = `${user}:${password}`;
 
   const server = http.createServer((request, response) => {
@@ -88,12 +128,21 @@ export function startCdpProxy(options: CdpProxyOptions): http.Server {
         const chunks: Buffer[] = [];
         upstreamResponse.on('data', (chunk) => chunks.push(chunk));
         upstreamResponse.on('end', () => {
+          // The credential travels with the URLs, since the upgrade cannot
+          // carry a header from every client. Reaching this response required
+          // authenticating, so handing out usable URLs from it does not widen
+          // anything.
+          const token = encodeURIComponent(Buffer.from(expected).toString('base64'));
           const rewritten = Buffer.concat(chunks)
             .toString('utf8')
             .split(`127.0.0.1:${internalPort}`)
             .join(`127.0.0.1:${publicPort}`)
             .split(`localhost:${internalPort}`)
-            .join(`127.0.0.1:${publicPort}`);
+            .join(`127.0.0.1:${publicPort}`)
+            .replace(
+              /(ws:\/\/[^"\\]+\/devtools\/(?:page|browser)\/[^"\\?]+)/g,
+              `$1?${AUTH_PARAM}=${token}`,
+            );
           const headers = { ...upstreamResponse.headers };
           // The body was buffered and rewritten, so it is now a single known
           // length. Both of the upstream's framing headers have to go before
@@ -121,12 +170,18 @@ export function startCdpProxy(options: CdpProxyOptions): http.Server {
   // command. Authenticated the same way and then piped raw — no framing to
   // understand, both ends speak the same protocol to each other.
   server.on('upgrade', (request, socket, head) => {
-    if (!authorised(request.headers.authorization, expected)) {
+    if (
+      !authorised(request.headers.authorization, expected) &&
+      !authorisedUrl(request.url, expected)
+    ) {
       socket.end('HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm="CDP"\r\n\r\n');
       return;
     }
     const upstream = net.connect(internalPort, '127.0.0.1', () => {
-      const lines = [`GET ${request.url} HTTP/1.1`];
+      // Stripped before forwarding: Chromium matches the path exactly, and it
+      // has no notion of this parameter.
+      const path = (request.url ?? '').split(`?${AUTH_PARAM}=`)[0].split(`&${AUTH_PARAM}=`)[0];
+      const lines = [`GET ${path} HTTP/1.1`];
       for (const [name, value] of Object.entries(request.headers)) {
         // Not forwarded: it is this proxy's credential, not Chromium's, and
         // Chromium has no notion of one.
@@ -144,6 +199,6 @@ export function startCdpProxy(options: CdpProxyOptions): http.Server {
     socket.on('error', () => upstream.destroy());
   });
 
-  server.listen(publicPort, '127.0.0.1');
+  server.listen(publicPort, bindAddress);
   return server;
 }

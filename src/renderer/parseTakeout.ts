@@ -237,17 +237,38 @@ const clean = (s: string | null | undefined) => (s ?? '').replace(/\s+/g, ' ').t
  * previous. Dropping the continuations would silently truncate answers, which
  * in this export are often several paragraphs long.
  */
-function turnsFrom(cell: Element): TakeoutTurn[] {
+/**
+ * Exported for scripts/check-turns.ts. The blocks an answer is made of are the
+ * substance of this archive, and they were being dropped silently — a check
+ * against the real markup shape is the only thing that catches that.
+ */
+export function turnsFrom(cell: Element): TakeoutTurn[] {
   const turns: TakeoutTurn[] = [];
-  for (const p of Array.from(cell.querySelectorAll('p'))) {
-    const label = clean(p.querySelector('strong')?.textContent);
+  // Every element child in document order, not just the paragraphs.
+  //
+  // This walked querySelectorAll('p') and therefore kept only the prose. An
+  // answer's other blocks are SIBLINGS of those paragraphs, not descendants, so
+  // they were never visited: measured against one real export, that silently
+  // discarded 3032 code blocks, 16990 headings, 51979 list items, 608 tables and
+  // 805 blockquotes. In an archive of technical questions the code block is
+  // usually the answer, so the part being dropped was the part worth keeping.
+  //
+  // Only element children of the cell are considered. Descending would visit a
+  // <p> inside an <li> twice — once as part of the list and once on its own.
+  for (const node of Array.from(cell.children)) {
+    // A label is a <strong> at the very start of a paragraph. Checked as the
+    // FIRST element child rather than anywhere in the node, because answers use
+    // <strong> freely for emphasis and a bolded phrase mid-sentence must not
+    // look like the start of a new turn.
+    const leading = node.tagName === 'P' ? node.firstElementChild : null;
+    const label = leading?.tagName === 'STRONG' ? clean(leading.textContent) : '';
     const isUser = USER_LABEL.test(label);
     const isAi = AI_LABEL.test(label);
 
     if (isUser || isAi) {
       // Remove only the label element, keeping everything else — including the
       // further <strong> emphasis Google uses inside answers.
-      const copy = p.cloneNode(true) as Element;
+      const copy = node.cloneNode(true) as Element;
       copy.querySelector('strong')?.remove();
       // A leading <br> is left behind where the label was.
       while (copy.firstChild && copy.firstChild.nodeName === 'BR') copy.firstChild.remove();
@@ -259,17 +280,22 @@ function turnsFrom(cell: Element): TakeoutTurn[] {
       continue;
     }
 
-    const text = clean(p.textContent);
-    if (!text) continue;
-    if (turns.length > 0) {
-      const last = turns[turns.length - 1];
-      last.text += `\n\n${text}`;
-      // Continuations are appended as their own paragraph so the answer keeps
-      // its shape instead of collapsing into one block.
-      last.html += `<p>${p.innerHTML.trim()}</p>`;
-    }
+    // Anything else continues the turn in progress: a paragraph, a code block, a
+    // heading, a list, a table. Before the first label there is no turn to
+    // continue — that content is the record's own header text, e.g.
+    // "Searched for …" and the timestamp.
+    if (turns.length === 0) continue;
+    const text = clean(node.textContent);
+    const html = node.outerHTML.trim();
+    if (!text && !html) continue;
+    const last = turns[turns.length - 1];
+    // Kept as its own block so the answer keeps its shape instead of collapsing
+    // into one run of text — and so a <pre> stays a <pre> rather than becoming a
+    // paragraph of code with its newlines squeezed out.
+    if (text) last.text += `\n\n${text}`;
+    last.html += html;
   }
-  return turns.filter((t) => t.text.length > 0);
+  return turns.filter((t) => t.text.length > 0 || t.html.length > 0);
 }
 
 function entryFrom(cell: Element): TakeoutEntry {

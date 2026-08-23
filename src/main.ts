@@ -81,6 +81,16 @@ function requestedDevtoolsPort(): string | undefined {
 const DEVTOOLS_AUTH_FLAG = '--devtools-auth=';
 const DEFAULT_DEVTOOLS_AUTH = 'ai:ai';
 
+/**
+ * Address the authenticating proxy listens on. Loopback unless asked otherwise.
+ *
+ * --devtools-bind=0.0.0.0 exists because the app runs on Windows while the
+ * tooling that drives it runs under WSL, and WSL's NAT makes Windows loopback
+ * unreachable from there. The password is what makes that defensible; without
+ * it this flag would be handing out a signed-in Google session.
+ */
+const DEVTOOLS_BIND_FLAG = '--devtools-bind=';
+
 function devtoolsAuth(): { user: string; password: string } {
   const flag = process.argv.find((arg) => arg.startsWith(DEVTOOLS_AUTH_FLAG));
   const raw =
@@ -110,6 +120,11 @@ if (devtoolsPort) {
   app.commandLine.appendSwitch('remote-allow-origins', '*');
 
   const auth = devtoolsAuth();
+  const bindFlag = process.argv.find((arg) => arg.startsWith(DEVTOOLS_BIND_FLAG));
+  const bindAddress =
+    bindFlag?.slice(DEVTOOLS_BIND_FLAG.length) ||
+    process.env.NOTEBOOK_DEVTOOLS_BIND ||
+    '127.0.0.1';
   // Started once the app is ready rather than at module load, so a failure to
   // bind is reported instead of taking the whole launch down with it.
   app.whenReady().then(() => {
@@ -117,6 +132,7 @@ if (devtoolsPort) {
       startCdpProxy({
         publicPort: Number(devtoolsPort),
         internalPort,
+        bindAddress,
         user: auth.user,
         password: auth.password,
       });
@@ -124,7 +140,12 @@ if (devtoolsPort) {
       console.warn(
         `[Notebook] Remote debugging is ON at http://127.0.0.1:${devtoolsPort}/json ` +
           `(${__DEBUG_BUILD__ ? 'debug build, on by default' : 'requested explicitly'}), ` +
-          `behind Basic auth as ${auth.user}. Forward THIS port — Chromium itself ` +
+          `on ${bindAddress}, behind Basic auth as ${auth.user}. ` +
+          (bindAddress === '127.0.0.1'
+            ? ''
+            : 'REACHABLE FROM THE NETWORK — the password is the only thing in the way, ' +
+              'and Basic auth over plain HTTP gives it to anyone watching. ') +
+          `Forward THIS port — Chromium itself ` +
           `listens on ${internalPort} with no password at all, and any process on ` +
           'this machine can reach it. The panel behind it holds a live Google session.',
       );

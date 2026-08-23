@@ -13,6 +13,7 @@
     "publish": "electron-vite build && electron-builder --publish always",
     "lint": "biome lint .",
     "check:cdp-proxy": "node --experimental-strip-types --no-warnings scripts/check-cdp-proxy.ts",
+    "check:turns": "node --experimental-strip-types --no-warnings scripts/check-turns.ts",
     "check:dates": "node --experimental-strip-types --no-warnings scripts/check-dates.ts",
     "check:find": "node --experimental-strip-types --no-warnings scripts/check-find.ts",
     "check:sources": "node --experimental-strip-types --no-warnings scripts/check-sources.ts",
@@ -28,6 +29,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.5.9",
     "@electron/fuses": "^2.1.3",
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
@@ -35,6 +37,7 @@
     "electron": "^43.4.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "^6.0.0-beta.1",
+    "jsdom": "^30.0.1",
     "typescript": "^7.0.2",
     "vite": "^8.1.5"
   },

@@ -260,6 +260,10 @@ function noteSource(chatId: number, source: string): void {
  * Nothing should produce one; that is the reason to refuse it here rather than
  * assume it cannot happen.
  */
+export function assetHrefForPath(localPath: string): string {
+  return assetHrefFor(localPath) ?? '';
+}
+
 function assetHrefFor(localPath: string | null): string | null {
   if (!localPath) return null;
   const relative = path.relative(getAssetsDir(), localPath).split(path.sep).join('/');
@@ -1611,6 +1615,12 @@ export interface SourceEntryView {
    * it is: nothing to read, or something we failed to read.
    */
   dateText: string | null;
+  /**
+   * Where this entry's images ended up, as relative "assets/..." paths. An
+   * orphan has no thread to render through, so this is the only way its picture
+   * can be seen — and for a Lens record the picture is the entire content.
+   */
+  imagePaths: string[];
 }
 
 /**
@@ -1655,15 +1665,18 @@ export function sourceEntriesForChat(chatId: number): SourceEntryView[] {
     let turnCount = 0;
     let imageCount = 0;
     let dateText: string | null = null;
+    let imagePaths: string[] = [];
     try {
       const payload = JSON.parse(row.payload_json) as {
         turns?: unknown[];
         images?: unknown[];
         timestampText?: string | null;
+        storedImages?: string[];
       };
       turnCount = payload.turns?.length ?? 0;
       imageCount = payload.images?.length ?? 0;
       dateText = payload.timestampText ?? null;
+      imagePaths = payload.storedImages ?? [];
     } catch {
       // A payload that will not parse is still worth listing: its existence is
       // the point, and hiding it would make the record look complete.
@@ -1679,6 +1692,7 @@ export function sourceEntriesForChat(chatId: number): SourceEntryView[] {
       linked: row.linked === 1,
       chatCount: row.chat_count,
       dateText,
+      imagePaths,
     };
   });
 }
@@ -1896,6 +1910,36 @@ export function attachExportImage(
   ).run(chatId, asset.sha256, asset.mime, asset.localPath, asset.bytes);
 }
 
+/**
+ * Records where an entry's image was stored, on the entry itself.
+ *
+ * An entry that belongs to no thread — a Lens search is a date and an image and
+ * nothing else — has no chat row to hang an asset off, and assets.chat_id cannot
+ * be null. Without this the file was copied to disk and the only thing naming it
+ * was the export's own filename, so the orphan list could say an image existed
+ * and never show it.
+ */
+export function attachEntryImage(ref: string, relativePath: string): void {
+  const row = db
+    .prepare("SELECT id, payload_json FROM source_entries WHERE kind = 'takeout' AND external_ref = ?")
+    .get(ref) as { id: number; payload_json: string } | undefined;
+  if (!row) return;
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  const stored = Array.isArray(payload.storedImages) ? (payload.storedImages as string[]) : [];
+  if (stored.includes(relativePath)) return;
+  stored.push(relativePath);
+  payload.storedImages = stored;
+  db.prepare('UPDATE source_entries SET payload_json = ? WHERE id = ?').run(
+    JSON.stringify(payload),
+    row.id,
+  );
+}
+
 /** Gives an orphan entry a conversation of its own. */
 export function adoptSourceEntry(entryId: number, folderId: number | null): { chatId: number } {
   db.exec('BEGIN');
@@ -1937,15 +1981,18 @@ export function orphanSourceEntries(): SourceEntryView[] {
     let turnCount = 0;
     let imageCount = 0;
     let dateText: string | null = null;
+    let imagePaths: string[] = [];
     try {
       const payload = JSON.parse(row.payload_json) as {
         turns?: unknown[];
         images?: unknown[];
         timestampText?: string | null;
+        storedImages?: string[];
       };
       turnCount = payload.turns?.length ?? 0;
       imageCount = payload.images?.length ?? 0;
       dateText = payload.timestampText ?? null;
+      imagePaths = payload.storedImages ?? [];
     } catch {
       // Listed regardless — see sourceEntriesForChat.
     }
@@ -1960,6 +2007,7 @@ export function orphanSourceEntries(): SourceEntryView[] {
       linked: false,
       chatCount: 0,
       dateText,
+      imagePaths,
     };
   });
 }

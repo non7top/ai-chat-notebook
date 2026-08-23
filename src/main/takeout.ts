@@ -81,7 +81,8 @@ export function importTakeout(
     if (row.imageFiles.length === 0) continue;
     // Which conversation this entry landed on, asked of the link table rather
     // than re-derived, so an image follows its entry wherever the entry went.
-    const chatId = db.chatIdForEntry(entryRefFor(row));
+    const ref = entryRefFor(row);
+    const chatId = db.chatIdForEntry(ref);
     for (const name of row.imageFiles) {
       const candidate = path.join(folder, name);
       if (!fs.existsSync(candidate)) {
@@ -99,6 +100,11 @@ export function importTakeout(
       // The bytes used to be written and then abandoned — no row pointed at
       // them, so the app could neither count nor show them. A file on disk that
       // nothing references is lost in every sense that matters.
+      //
+      // Recorded on the ENTRY either way, not only on the thread: a Lens record
+      // belongs to no thread and is a date plus an image, so the entry is the
+      // only place its picture can be found again.
+      db.attachEntryImage(ref, db.assetHrefForPath(asset.localPath));
       if (chatId !== null) db.attachExportImage(chatId, asset);
       else imagesOrphaned += 1;
     }

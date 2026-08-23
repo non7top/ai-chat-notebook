@@ -77,6 +77,13 @@ jobs:
       - name: Check the export's date pattern
         run: docker compose run --rm dev npm run check:dates
 
+      # Against the export's real markup. The blocks an answer is made of — code,
+      # headings, lists, tables — are siblings of its paragraphs, and a splitter
+      # that walked only the paragraphs dropped every one of them without a
+      # trace: 3032 code blocks in a single export.
+      - name: Check turn splitting
+        run: docker compose run --rm dev npm run check:turns
+
       # The CDP proxy is the only authentication in front of an endpoint that
       # has none of its own. A lock that does not lock is worse than no lock,
       # because it invites forwarding a port in the belief that it is protected.
