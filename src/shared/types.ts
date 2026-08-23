@@ -325,6 +325,21 @@ export interface NotebookApi {
    */
   previewTakeout(rows: TakeoutImportRow[]): Promise<TakeoutPreview>;
   applyTakeout(folder: string, rows: TakeoutImportRow[]): Promise<TakeoutImportSummary>;
+  /**
+   * Copies the whole archive — database and images — to a folder of the user's
+   * choosing. Returns null if the dialog was cancelled.
+   */
+  exportArchive(): Promise<{
+    folder: string;
+    dbBytes: number;
+    assetFiles: number;
+    assetBytes: number;
+  } | null>;
+  /**
+   * Replaces the archive with a backup, setting aside what it replaces and then
+   * quitting. Returns null if cancelled at either prompt.
+   */
+  importArchive(): Promise<{ movedTo: string } | null>;
   /** Removes conversations a previous, broken import created; harvested chats survive. */
   undoTakeout(): Promise<{ deleted: number; reverted: number }>;
   /** Re-runs matching. Worth doing after a capture, which adds turns to match against. */

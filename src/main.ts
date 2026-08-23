@@ -1,8 +1,8 @@
-import { app, BrowserWindow, Menu } from 'electron';
+import { app, BrowserWindow, dialog, Menu } from 'electron';
 import path from 'node:path';
 import contextMenu from 'electron-context-menu';
 import { initDb, seedDevData } from './main/db';
-import { registerIpcHandlers } from './main/ipc';
+import { registerIpcHandlers, runArchiveExport, runArchiveImport } from './main/ipc';
 import { startCdpProxy } from './main/cdpProxy';
 import {
   createAiModeView,
@@ -203,6 +203,33 @@ const createWindow = () => {
   // panel directly. The recon spike depends on this.
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
+      {
+        label: 'Archive',
+        submenu: [
+          {
+            // In the menu rather than the toolbar because it is rare and
+            // deliberate, and because a backup is not part of the day's work —
+            // it is what makes the day's work survivable.
+            label: 'Back up to a folder…',
+            click: () => {
+              // Errors surfaced in a dialog: a menu click has nowhere else to
+              // report to, and a backup that silently did nothing is worse than
+              // one that failed loudly.
+              runArchiveExport().catch((error) =>
+                dialog.showErrorBox('Backup failed', String(error?.message ?? error)),
+              );
+            },
+          },
+          {
+            label: 'Restore from a backup…',
+            click: () => {
+              runArchiveImport().catch((error) =>
+                dialog.showErrorBox('Restore failed', String(error?.message ?? error)),
+              );
+            },
+          },
+        ],
+      },
       {
         label: 'View',
         submenu: [

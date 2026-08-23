@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -136,6 +136,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('takeout:preview', (_event, rows: db.TakeoutImportRow[]) =>
     db.previewTakeoutImport(rows),
   );
+  // Backing the archive up is the point of the archive. The source is a cloud
+  // history that prunes and rewrites itself, so a copy that cannot leave the app
+  // is one more single point of failure rather than a defence against one.
+  ipcMain.handle('archive:export', () => runArchiveExport());
+  ipcMain.handle('archive:import', () => runArchiveImport());
+
   ipcMain.handle('takeout:undo', () => db.undoTakeoutImport());
   ipcMain.handle('takeout:rematch', () => rematchActivity());
   ipcMain.handle('takeout:stats', () => db.activityStats());
@@ -154,4 +160,57 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('aiMode:back', () => aiModeGoBack());
   ipcMain.handle('aiMode:forward', () => aiModeGoForward());
   ipcMain.handle('aiMode:reload', () => aiModeReload());
+}
+
+export async function runArchiveExport() {
+  const window = BrowserWindow.getFocusedWindow();
+  const options: Electron.OpenDialogOptions = {
+    title: 'Choose an empty folder for the backup',
+    properties: ['openDirectory', 'createDirectory'],
+    buttonLabel: 'Back up here',
+  };
+  const { canceled, filePaths } = window
+    ? await dialog.showOpenDialog(window, options)
+    : await dialog.showOpenDialog(options);
+  if (canceled || filePaths.length === 0) return null;
+  return { folder: filePaths[0], ...db.exportArchive(filePaths[0]) };
+}
+
+// Confirmed twice on purpose. A restore is the one action here that can destroy
+// more than it repairs, and the person reaching for it is already having a bad
+// day. What it replaces is moved aside rather than deleted.
+export async function runArchiveImport() {
+  const window = BrowserWindow.getFocusedWindow();
+  const options: Electron.OpenDialogOptions = {
+    title: 'Choose a backup folder to restore',
+    properties: ['openDirectory'],
+    buttonLabel: 'Restore this',
+  };
+  const { canceled, filePaths } = window
+    ? await dialog.showOpenDialog(window, options)
+    : await dialog.showOpenDialog(options);
+  if (canceled || filePaths.length === 0) return null;
+
+  const confirmOptions = {
+    type: 'warning' as const,
+    buttons: ['Cancel', 'Replace the archive'],
+    defaultId: 0,
+    cancelId: 1,
+    message: 'Replace everything in this app with that backup?',
+    detail:
+      'Every thread, folder and image currently stored is set aside into a dated ' +
+      'folder and the backup takes its place. The app closes afterwards and must ' +
+      'be started again.',
+  };
+  const { response } = window
+    ? await dialog.showMessageBox(window, confirmOptions)
+    : await dialog.showMessageBox(confirmOptions);
+  if (response !== 1) return null;
+
+  const result = db.importArchive(filePaths[0], app.getPath('userData'));
+  // Quit rather than reopening in place. The database handle is closed and
+  // every window is showing rows from the archive that was just replaced;
+  // restarting is the only state that is certainly consistent.
+  setTimeout(() => app.quit(), 250);
+  return result;
 }

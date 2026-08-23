@@ -284,6 +284,142 @@ function assetHrefFor(localPath: string | null): string | null {
   return `assets/${relative}`;
 }
 
+/**
+ * Writes a consistent snapshot of the archive to a directory.
+ *
+ * The reason this exists is the reason the whole app does: the source of this
+ * data is a cloud history that prunes and rewrites itself, and an archive that
+ * cannot be copied out is one more single point of failure rather than a defence
+ * against one.
+ *
+ * VACUUM INTO rather than copying the file. The database is open and being
+ * written to; a byte copy of a live SQLite file can land mid-transaction and
+ * produce something that opens and is subtly wrong, which is the worst possible
+ * outcome for a backup. VACUUM INTO takes a read transaction and writes a
+ * complete, defragmented database — and it refuses rather than overwriting, so a
+ * backup can never silently clobber an older one.
+ *
+ * Assets are copied beside it, because a database of conversations whose images
+ * live somewhere else is not a backup of the conversations.
+ */
+export function exportArchive(destDir: string): {
+  dbBytes: number;
+  assetFiles: number;
+  assetBytes: number;
+} {
+  fs.mkdirSync(destDir, { recursive: true });
+  const dbPath = path.join(destDir, 'notebook.sqlite');
+  if (fs.existsSync(dbPath)) {
+    throw new Error(
+      `${dbPath} already exists. Pick an empty folder — refusing to overwrite an existing backup.`,
+    );
+  }
+  // The path is interpolated because VACUUM INTO takes no parameters. Quotes are
+  // doubled, which is SQLite's own escape for a string literal, so a folder name
+  // containing an apostrophe cannot end the statement early.
+  db.exec(`VACUUM INTO '${dbPath.replace(/'/g, "''")}'`);
+
+  const assetsSource = getAssetsDir();
+  const assetsDest = path.join(destDir, 'assets');
+  let assetFiles = 0;
+  let assetBytes = 0;
+  if (fs.existsSync(assetsSource)) {
+    fs.cpSync(assetsSource, assetsDest, { recursive: true });
+    const walk = (dir: string): void => {
+      for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, item.name);
+        if (item.isDirectory()) walk(full);
+        else {
+          assetFiles += 1;
+          assetBytes += fs.statSync(full).size;
+        }
+      }
+    };
+    walk(assetsDest);
+  }
+
+  const counts = db
+    .prepare(
+      `SELECT (SELECT COUNT(*) FROM chats) AS chats,
+              (SELECT COUNT(*) FROM messages) AS messages,
+              (SELECT COUNT(*) FROM assets) AS assets,
+              (SELECT COUNT(*) FROM source_entries) AS entries,
+              (SELECT COUNT(*) FROM folders) AS folders`,
+    )
+    .get() as unknown as Record<string, number>;
+
+  // Written last, so its presence means the copy finished. A restore checks for
+  // it before touching anything, which is what stops a half-written backup from
+  // being restored over a good archive.
+  fs.writeFileSync(
+    path.join(destDir, 'manifest.json'),
+    `${JSON.stringify(
+      {
+        format: 'ai-chat-notebook-archive',
+        version: 1,
+        writtenAt: new Date().toISOString(),
+        counts,
+        assetFiles,
+        assetBytes,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
+  return { dbBytes: fs.statSync(dbPath).size, assetFiles, assetBytes };
+}
+
+/**
+ * Restores a snapshot, keeping the archive it replaces.
+ *
+ * The current database and assets are MOVED aside rather than deleted, into a
+ * timestamped folder beside them. A restore is the one operation here that can
+ * destroy more than it repairs, and the person doing it is by definition already
+ * having a bad day.
+ *
+ * The caller must reopen the database afterwards: the handle is closed here
+ * because a file cannot be replaced underneath an open SQLite connection and
+ * have the connection notice.
+ */
+export function importArchive(srcDir: string, userDataPath: string): { movedTo: string } {
+  const manifestPath = path.join(srcDir, 'manifest.json');
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error(`No manifest.json in ${srcDir} — that is not an archive folder.`);
+  }
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as { format?: string };
+  if (manifest.format !== 'ai-chat-notebook-archive') {
+    throw new Error(`${manifestPath} is not an archive manifest.`);
+  }
+  const incomingDb = path.join(srcDir, 'notebook.sqlite');
+  if (!fs.existsSync(incomingDb)) throw new Error(`No notebook.sqlite in ${srcDir}.`);
+
+  // Opened read-only first as a sanity check. Restoring a corrupt file over a
+  // working archive would turn a backup into the thing it was meant to prevent.
+  const probe = new DatabaseSync(incomingDb, { readOnly: true });
+  try {
+    probe.prepare('SELECT COUNT(*) AS n FROM chats').get();
+  } finally {
+    probe.close();
+  }
+
+  db.close();
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const asideDir = path.join(userDataPath, `replaced-${stamp}`);
+  fs.mkdirSync(asideDir, { recursive: true });
+  const currentDb = path.join(userDataPath, 'notebook.sqlite');
+  if (fs.existsSync(currentDb)) fs.renameSync(currentDb, path.join(asideDir, 'notebook.sqlite'));
+  const currentAssets = getAssetsDir();
+  if (fs.existsSync(currentAssets)) fs.renameSync(currentAssets, path.join(asideDir, 'assets'));
+
+  fs.copyFileSync(incomingDb, currentDb);
+  const incomingAssets = path.join(srcDir, 'assets');
+  if (fs.existsSync(incomingAssets)) {
+    fs.cpSync(incomingAssets, currentAssets, { recursive: true });
+  }
+  return { movedTo: asideDir };
+}
+
 export function getAssetsDir(): string {
   return assetsDir;
 }
