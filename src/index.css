@@ -573,6 +573,16 @@ button:disabled {
   color: var(--muted);
 }
 
+/* An internal row id, shown so it can be quoted back. Monospace because it is
+   an identifier to be read character by character, and faint because it is for
+   the rare occasion when something is wrong rather than for reading the list. */
+.chat-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  color: #9a9aa2;
+  white-space: nowrap;
+}
+
 /* Provenance: quiet by default, since it answers a question you only
    occasionally ask, but always present so the answer exists. */
 .chat-source {
@@ -813,6 +823,38 @@ button:disabled {
   max-height: 1.25em;
   vertical-align: -0.2em;
   object-fit: contain;
+}
+
+/* The export's images, which belong to the thread but to no turn in it. Shown
+   large enough to be worth looking at — for many of these threads the picture is
+   the subject — and captioned, so their unknown position is stated rather than
+   implied by where they sit. */
+.unplaced-images {
+  flex: none;
+  padding: 0.5rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  background: #fafafa;
+}
+
+.unplaced-caption {
+  margin: 0 0 0.4rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.unplaced-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.unplaced-strip img {
+  max-width: 12rem;
+  max-height: 12rem;
+  object-fit: contain;
+  border-radius: 4px;
+  background: #fff;
+  border: 1px solid var(--border);
 }
 
 /* ----------------------------------------------------------------- report */

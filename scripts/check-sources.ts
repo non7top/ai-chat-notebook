@@ -577,7 +577,11 @@ repairScenario(true);
     ['opens with an image', opens, true],
     ['image only later', later, false],
     ['opens with a preview', preview, false],
-    ['unclassified image', unknown, false],
+    // Reversed deliberately: requiring a known kind meant nothing qualified,
+    // since every image captured before that column existed is unclassified and
+    // that is most of the archive. The opening-turn restriction is what keeps
+    // favicons out, and it still applies.
+    ['unclassified image at the opening', unknown, true],
   ] as const) {
     const got = thumbOf(id) !== null;
     console.log(`  ${what}: thumbnail ${got ? 'shown' : 'none'}`);

@@ -62,6 +62,10 @@ export default function ChatReader({ chat, onChange }: Props) {
         ) : (
           <>
             <h2 className={chat.title === '(untitled)' ? 'untitled' : undefined}>{chat.title}</h2>
+            {/* Quotable, and the same number the list shows. */}
+            <span className="chat-id" title="This thread's internal id">
+              #{chat.id}
+            </span>
             {/* A parser fix cannot repair what is already stored, and the
                 capture queue deliberately skips conversations that have turns —
                 so re-reading one has to be reachable by hand. */}
@@ -203,6 +207,10 @@ export default function ChatReader({ chat, onChange }: Props) {
             )}
             {entries.map((entry) => (
               <div key={entry.id} className={`source-entry${entry.linked ? '' : ' unlinked'}`}>
+                {/* The entry's own id, distinct from the thread's. A thread and
+                    the entries behind it are different rows and get reported as
+                    different things, so both numbers have to be visible. */}
+                <span className="chat-id">e#{entry.id}</span>
                 <span className="source-kind">{KIND_LABELS[entry.kind] ?? entry.kind}</span>
                 <span className="source-facts">
                   {/* Only what this entry actually carries — a field it is
@@ -270,6 +278,7 @@ export default function ChatReader({ chat, onChange }: Props) {
 
             {candidates.map((other) => (
               <div key={`chat-${other.id}`} className="source-entry candidate">
+                <span className="chat-id">#{other.id}</span>
                 <span className="source-kind">separate thread</span>
                 <span className="source-facts">
                   {other.startedAt ? displayDateTime(other.startedAt) : 'no date'}
@@ -299,6 +308,30 @@ export default function ChatReader({ chat, onChange }: Props) {
           </div>
         )}
       </div>
+
+      {/* The export's own images. Above the turns, because for many of these
+          threads the picture IS the subject — and the caption says outright that
+          their place in the conversation is unknown rather than implying they
+          belong to the first turn. */}
+      {chat.unplacedImagePaths.length > 0 && assetsBase && (
+        <div className="unplaced-images">
+          <p className="unplaced-caption">
+            {chat.unplacedImagePaths.length} image
+            {chat.unplacedImagePaths.length === 1 ? '' : 's'} from the export — it does not say
+            which turn they belong to
+          </p>
+          <div className="unplaced-strip">
+            {chat.unplacedImagePaths.map((relative) => (
+              <img
+                key={relative}
+                src={assetsBase + relative.slice('assets/'.length)}
+                alt=""
+                loading="lazy"
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Clicks are swallowed at the container: stored HTML can contain real
           external links, and following one inside the app's own renderer

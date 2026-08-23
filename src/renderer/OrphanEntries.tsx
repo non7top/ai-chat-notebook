@@ -53,6 +53,7 @@ export default function OrphanEntries({ onChange, onNeedPanel }: Props) {
       {entries.map((entry) => (
         <div key={entry.id} className="orphan">
           <div className="orphan-head">
+            <span className="chat-id">e#{entry.id}</span>
             <button
               type="button"
               className="orphan-open"

@@ -406,12 +406,15 @@ const CHAT_SUMMARY_SQL = `
          --    upload, or the first picture generated in answer to it. Taking
          --    the earliest image anywhere meant a conversation whose seventh
          --    answer happened to contain a picture was represented by it.
-         -- 2. A KNOWN kind. NULL means "captured before images were
-         --    classified", which includes every rich link preview and
-         --    source-card thumbnail from those captures — so the face of a
-         --    text-only conversation became whichever preview came first.
-         --    Unknown is not a licence to display: re-capturing a conversation
-         --    classifies its images and a real one then appears.
+         -- 2. Not a KNOWN preview. Unknown kinds are allowed, which reverses
+         --    an earlier decision: requiring a known kind meant that in practice
+         --    nothing qualified, because every image captured before the column
+         --    existed is NULL and that is most of the archive. Refusing to guess
+         --    produced no thumbnails at all, which is a worse answer than the
+         --    occasional wrong one. Restriction 1 carries the weight here — a
+         --    favicon in the opening turn is rare, where favicons ten turns deep
+         --    are the norm — and re-capturing a thread classifies its images
+         --    properly.
          --
          -- Export images have no turn to sit in, and are allowed on their own
          -- terms: an entry that shipped a single image is exactly the case this
@@ -419,7 +422,7 @@ const CHAT_SUMMARY_SQL = `
          (SELECT a.local_path FROM assets a
             LEFT JOIN messages m ON m.id = a.message_id
            WHERE a.chat_id = c.id
-             AND a.kind IN ('generated', 'upload', 'takeout')
+             AND COALESCE(a.kind, 'unknown') <> 'other'
              AND (a.message_id IS NULL OR m.seq <= 1)
            ORDER BY COALESCE(m.seq, -1) ASC, a.id ASC
            LIMIT 1) AS title_image
@@ -555,12 +558,34 @@ export function getChat(id: number): ChatDetail | null {
     .map((a) => assetHrefFor(a.local_path))
     .filter((href): href is string => href !== null);
 
+  // Images that belong to the thread but to no turn in it.
+  //
+  // The export puts its images in a cell BESIDE the conversation rather than
+  // inside a turn, so there is nothing in any turn's HTML that references them
+  // and no honest way to say which exchange they came from. They were being
+  // stored, counted, and then never shown — which is the same as losing them from
+  // a reader's point of view. Rendered as the thread's own strip instead, with
+  // the reader saying plainly that their position is unknown.
+  const unplacedImagePaths = (
+    db
+      .prepare(
+        `SELECT local_path FROM assets
+          WHERE chat_id = ? AND message_id IS NULL
+            AND (kind IS NULL OR kind IN ('takeout', 'generated', 'upload'))
+          ORDER BY id`,
+      )
+      .all(id) as unknown as { local_path: string }[]
+  )
+    .map((a) => assetHrefFor(a.local_path))
+    .filter((href): href is string => href !== null);
+
   return {
     ...toSummary(row),
     externalId: extra?.external_id ?? '',
     url: extra?.url ?? null,
     messages,
     previewPaths,
+    unplacedImagePaths,
   };
 }
 

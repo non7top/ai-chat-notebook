@@ -91,6 +91,15 @@ export interface ChatDetail extends ChatSummary {
    * still shown, just small: they are part of what the answer looked like.
    */
   previewPaths: string[];
+  /**
+   * Images belonging to the thread but to no particular turn.
+   *
+   * The export ships them in a cell beside the conversation, so nothing says
+   * which exchange they came from. Shown as the thread's own strip rather than
+   * guessed into a turn — and shown at all, which they were not: they were
+   * stored and counted and never rendered.
+   */
+  unplacedImagePaths: string[];
 }
 
 /** Which conversations the list pane is showing. */

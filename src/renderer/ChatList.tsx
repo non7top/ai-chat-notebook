@@ -147,6 +147,11 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
               )}
             </span>
             <span className="chat-meta">
+              {/* The thread's internal id, quotable. Without it a report can only
+                  say "the one about sprites", and several threads open with the
+                  same prompt — this is the number that finds exactly one row in
+                  the database. */}
+              <span className="chat-id">#{chat.id}</span>{' · '}
               {/* Prefixed and titled because every date here is INFERRED: it
                   comes from matching a Takeout prompt against this
                   conversation's title or a captured turn, and that match is
