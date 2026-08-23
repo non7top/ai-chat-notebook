@@ -720,5 +720,107 @@ repairScenario(true);
   fs.rmSync(scratch, { recursive: true, force: true });
 }
 
+// ---------------------------------------------------------------------------
+// Matching by the answer when the opening prompt is shared.
+//
+// The visible symptom this fixes: a thread captured from the panel sitting in the
+// list beside an imported thread of the same conversation, because the same
+// question had been asked more than once and the importer refused to guess which
+// was which. The answers differ, so the answers can decide — but only when one
+// candidate is CLEARLY closer than the rest, which is the part that has to be
+// checked, because a rule that always picks a winner will confidently pick wrong.
+{
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'notebook-match-'));
+  db.initDb(scratch);
+
+  const ask = 'gpg clearsign specify the key';
+  const answerA =
+    'Use the -u or --local-user option followed by the key identifier. You can name ' +
+    'the key by email address, by short or long key id, by full fingerprint, or by name.';
+  const answerB =
+    'Vacuum decay describes a false vacuum state collapsing, where a bubble of true ' +
+    'vacuum expands at light speed and destroys everything it passes through.';
+  const entry = (ts: string, answer: string) => ({
+    query: ask,
+    timestamp: ts,
+    timestampText: null,
+    href: null,
+    entryId: null,
+    fingerprints: { long: `L${ts}`, short: `S${ts}`, empty: `E${ts}` },
+    turns: [turn('user', ask), turn('ai', answer)],
+    imageFiles: [],
+  });
+
+  // Two threads captured from the panel, same question, different answers.
+  db.upsertThreadFromList('thread-A', ask, null, 0);
+  db.upsertThreadFromList('thread-B', ask, null, 1);
+  const idOf = (ext: string) =>
+    (db.listChats({ kind: 'all' }).find((c) => c.title === ask && c.messageCount === 0)?.id ??
+      0) as number;
+  const chatA = db.listChats({ kind: 'all' })[0].id;
+  db.replaceTurns(chatA, [
+    { seq: 0, role: 'user', text: ask, html: null },
+    { seq: 1, role: 'ai', text: answerA, html: null },
+  ], []);
+  const chatB = db.listChats({ kind: 'all' }).find((c) => c.id !== chatA)?.id as number;
+  db.replaceTurns(chatB, [
+    { seq: 0, role: 'user', text: ask, html: null },
+    { seq: 1, role: 'ai', text: answerB, html: null },
+  ], []);
+
+  // Two entries with the same opening and those two answers. Each must land on
+  // the thread whose answer it matches — not on the other, and not on a new row.
+  const before = db.listChats({ kind: 'all' }).length;
+  const result = db.importTakeoutConversations([
+    entry('2026-08-22T01:00:00+07:00', answerA),
+    entry('2026-08-22T02:00:00+07:00', answerB),
+  ] as never);
+  const after = db.listChats({ kind: 'all' });
+  console.log(
+    `\nsame prompt, different answers: ${before} threads -> ${after.length}`,
+    `| created ${result.created} enriched ${result.extended + result.mergedIntoHarvested}`,
+  );
+  if (after.length !== before) {
+    throw new Error(`matching by answer failed: ${before} threads became ${after.length}`);
+  }
+  const linkedA = db.sourceEntriesForChat(chatA).filter((e) => e.linked);
+  const linkedB = db.sourceEntriesForChat(chatB).filter((e) => e.linked);
+  console.log('  each thread took one entry:', linkedA.length, linkedB.length);
+  if (linkedA.length !== 1 || linkedB.length !== 1) {
+    throw new Error(`entries landed wrong: A=${linkedA.length} B=${linkedB.length}`);
+  }
+  // The one that matters: they must not have swapped.
+  const turnsA = db.getChat(chatA)?.messages.map((m) => m.text).join(' ') ?? '';
+  if (!turnsA.includes('local-user')) {
+    throw new Error('a thread took the wrong entry — the answers were swapped');
+  }
+
+  // A near-tie must DECLINE. Two threads whose answers are the same give the
+  // fingerprint nothing to separate them by, and a rule that picks anyway would
+  // attach an entry to whichever row came back first.
+  db.upsertThreadFromList('thread-C', 'a tied question', null, 2);
+  db.upsertThreadFromList('thread-D', 'a tied question', null, 3);
+  const tied = db.listChats({ kind: 'all' }).filter((c) => c.title === 'a tied question');
+  for (const t of tied) {
+    db.replaceTurns(t.id, [
+      { seq: 0, role: 'user', text: 'a tied question', html: null },
+      { seq: 1, role: 'ai', text: answerA, html: null },
+    ], []);
+  }
+  const tiedBefore = db.listChats({ kind: 'all' }).length;
+  db.importTakeoutConversations([
+    { ...entry('2026-08-23T01:00:00+07:00', answerA), query: 'a tied question',
+      turns: [turn('user', 'a tied question'), turn('ai', answerA)] },
+    { ...entry('2026-08-23T02:00:00+07:00', answerA), query: 'a tied question',
+      turns: [turn('user', 'a tied question'), turn('ai', `${answerA} and a little more`)] },
+  ] as never);
+  const tiedAfter = db.listChats({ kind: 'all' }).length;
+  console.log(`  a near-tie declines: ${tiedBefore} threads -> ${tiedAfter} (new rows expected)`);
+  if (tiedAfter <= tiedBefore) {
+    throw new Error('a near-tie was matched anyway instead of standing aside');
+  }
+  fs.rmSync(scratch, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('OK');

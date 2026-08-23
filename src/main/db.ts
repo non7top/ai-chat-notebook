@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { openingFingerprint } from '../shared/fingerprint.ts';
+import { hammingDistance, openingFingerprint } from '../shared/fingerprint.ts';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -1221,6 +1221,38 @@ export function placeEntry(
   // And the match must be unambiguous on both sides. When several entries in
   // one import share an opening, at most one of them is that conversation and
   // nothing here can tell which — so none of them claim it.
+  // When the opening prompt is shared, the ANSWER decides.
+  //
+  // Refusing to match on an ambiguous opening was right as far as it went, and
+  // its cost is visible in the list: a thread captured from the panel sitting
+  // beside an imported thread of the same conversation, because "gpg clearsign
+  // …" was asked more than once and nothing was allowed to tell them apart.
+  // Measured on a real export, 132 records share an opening prompt while only 2
+  // share the prompt AND its answer — so the answer almost always decides, and
+  // the fingerprints for it are recorded on both sides.
+  //
+  // Nearest match with a margin, not a threshold. An absolute cut-off would be a
+  // number picked out of the air; this asks the only question that matters — is
+  // one candidate clearly closer than the rest — and declines when the answer is
+  // no, which lands back on the old conservative behaviour exactly when it
+  // should.
+  // Needs turns to compare: a Lens or blank record has no answer, so there is
+  // nothing for the answer to decide with.
+  const byFingerprint =
+    ambiguous && row.turns.some((t) => t.role === 'ai') ? matchByFingerprint(key, row) : null;
+  if (byFingerprint) {
+    return {
+      ref,
+      key,
+      // Resolved, so no longer ambiguous for the caller's purposes.
+      ambiguous: false,
+      knownEntry: known,
+      enrich: byFingerprint,
+      ownExternalId: `takeout:${key.slice(0, 16)}:${row.timestamp ?? 'nodate'}`,
+      ownChatId: null,
+    };
+  }
+
   const candidates = ambiguous
     ? []
     : (db
@@ -1344,6 +1376,50 @@ export function planConversations(rows: TakeoutImportRow[]): ConversationPlan[] 
     }
   }
   return plans;
+}
+
+/**
+ * The thread whose stored conversation this entry most resembles.
+ *
+ * Only consulted when the opening prompt alone cannot decide. Compares the
+ * entry's opening exchange against each candidate thread's, and returns one only
+ * when it is CLEARLY closer than the next best — a margin, so a near-tie
+ * declines rather than guessing. MAX_MATCH is a ceiling on obvious nonsense
+ * rather than the decision itself: measured on real material, the same thread
+ * read from two sources sat at 14 of 64 bits apart while unrelated threads sat
+ * at 24.
+ */
+const MAX_MATCH_DISTANCE = 22;
+const REQUIRED_MARGIN = 6;
+
+function matchByFingerprint(
+  key: string,
+  row: TakeoutImportRow,
+): { id: number; source: string } | null {
+  const mine = openingFingerprint(row.turns);
+  const candidates = db
+    .prepare(
+      `SELECT id, source, text_fingerprint FROM chats
+        WHERE content_key = ? AND merged_into IS NULL
+          AND text_fingerprint IS NOT NULL
+          AND external_id NOT LIKE 'takeout:%' AND external_id NOT LIKE 'entry:%'
+          AND NOT EXISTS (
+                SELECT 1 FROM chat_sources cs
+                  JOIN source_entries e ON e.id = cs.source_entry_id
+                 WHERE cs.chat_id = chats.id AND e.kind = 'takeout'
+              )`,
+    )
+    .all(key) as unknown as { id: number; source: string; text_fingerprint: string }[];
+  if (candidates.length === 0) return null;
+
+  const scored = candidates
+    .map((c) => ({ ...c, distance: hammingDistance(mine, c.text_fingerprint) }))
+    .sort((a, b) => a.distance - b.distance);
+  const best = scored[0];
+  if (best.distance > MAX_MATCH_DISTANCE) return null;
+  const runnerUp = scored[1];
+  if (runnerUp && runnerUp.distance - best.distance < REQUIRED_MARGIN) return null;
+  return { id: best.id, source: best.source };
 }
 
 /** How many entries in one import open with each prompt. */
@@ -1587,6 +1663,10 @@ export function importTakeoutConversations(
       if (placement.ambiguous) result.ambiguousOpenings += 1;
 
       let chatId: number;
+      // The panel's reading is better than the export's — it has the real images
+      // and the fuller text — so where a thread already has one, the import adds
+      // its date, its alternate reading and its link, and leaves the turns alone.
+      let keepExistingTurns = false;
       if (placement.enrich) {
         chatId = placement.enrich.id;
         if (placement.enrich.source === 'capture') {
@@ -1632,9 +1712,17 @@ export function importTakeoutConversations(
           );
           noteSource(chatId, 'takeout-alt');
           result.mergedIntoHarvested += 1;
-          continue;
+          // Falls through to the linking below instead of continuing.
+          //
+          // It used to skip straight past it, and that is why a thread the
+          // importer had just matched showed "0 data entries · 1 unattached with
+          // the same prompt": the entry had contributed its date and its
+          // alternate reading, and nothing recorded that it belonged. The link is
+          // the record of the match, so the one path that matches without
+          // rewriting turns is the last place that should omit it.
+          keepExistingTurns = true;
         }
-        result.extended += 1;
+        if (!keepExistingTurns) result.extended += 1;
       } else {
         const externalId = placement.ownExternalId;
         if (placement.ownChatId !== null) {
@@ -1670,6 +1758,7 @@ export function importTakeoutConversations(
       ).run(row.timestamp, row.timestamp, members, chatId);
       // Replace wholesale: this snapshot is a complete reading, and a partial
       // upsert would leave stale turns from an earlier, shorter snapshot.
+      if (!keepExistingTurns) {
       db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
       const insert = db.prepare(
         'INSERT INTO messages (chat_id, seq, role, text, html) VALUES (?, ?, ?, ?, ?)',
@@ -1681,7 +1770,14 @@ export function importTakeoutConversations(
       });
       result.turnsWritten += row.turns.length;
       noteSource(chatId, 'takeout');
-      const openingRef = `${key}@${row.timestamp ?? 'nodate'}`;
+      }
+      const openingRef = takeoutEntryRef(
+        opening,
+        row.timestamp,
+        { turns: row.turns, images: row.imageFiles, href: row.href },
+        row.entryId,
+        row.fingerprints,
+      );
       const entryId = entryIdByRef.get(openingRef);
       if (entryId !== undefined) {
         // The turns above were written from this one entry, so this is the only
