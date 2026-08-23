@@ -80,7 +80,19 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activi
           `${scan.withTimestamp} dated · ${scan.withQuery} titled · ` +
           `turns ${scan.turnCounts.min}/${scan.turnCounts.median}/${scan.turnCounts.max} ` +
           `(${scan.turnCounts.total} total, ${scan.multiTurnEntries} multi-turn) · ` +
-          `${scan.withImages} with images (${scan.imageRefsTotal})`,
+          `${scan.withImages} with images (${scan.imageRefsTotal})` +
+          // Only shown when non-zero, so the ordinary line stays readable, and
+          // spelled out because each of these means something different: a
+          // nested cell is double-counting, unparsed date text is a bug here,
+          // and an empty cell is not a conversation at all.
+          (scan.nestedCells > 0 ? ` · ${scan.nestedCells} NESTED (double-counted)` : '') +
+          (scan.emptyCells > 0 ? ` · ${scan.emptyCells} empty cells` : '') +
+          (scan.noDateText > 0 ? ` · ${scan.noDateText} with no date at all` : '') +
+          (scan.unparsedDateText > 0
+            ? ` · ${scan.unparsedDateText} dates unread, e.g. ${scan.unparsedDateSamples
+                .map((t) => `"${t}"`)
+                .join(', ')}`
+            : ''),
       );
     } catch (err) {
       setTakeoutNote(err instanceof Error ? err.message : String(err));

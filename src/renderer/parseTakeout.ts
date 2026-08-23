@@ -76,6 +76,23 @@ export interface TakeoutScan {
   /** Turns per entry: >2 proves entries hold whole conversations, not prompts. */
   turnCounts: { min: number; median: number; max: number; total: number };
   multiTurnEntries: number;
+  /**
+   * Cells sitting inside another cell. Must be zero: a nested match means the
+   * same conversation is counted more than once, and every downstream number
+   * inherits the error.
+   */
+  nestedCells: number;
+  /** Undated entries carrying no date-like text at all — a gap in the export. */
+  noDateText: number;
+  /** Undated entries that DO carry date text — a gap in the parser instead. */
+  unparsedDateText: number;
+  /** Up to five of those, verbatim, so the pattern can be fixed against them. */
+  unparsedDateSamples: string[];
+  /**
+   * Cells with no query, no turns and no images. Not conversations by any
+   * measure, so counting them as entries inflates every total.
+   */
+  emptyCells: number;
 }
 
 function parseTimestamp(text: string): { iso: string | null; raw: string | null } {
@@ -193,6 +210,15 @@ export function parseTakeoutHtml(html: string): { entries: TakeoutEntry[]; scan:
   const all = cells.map(entryFrom);
   const entries = all.filter((e) => /ai mode/i.test(e.product));
 
+  // A cell inside another cell would be counted twice, and would explain a
+  // total that grew without the history growing. Checked rather than assumed:
+  // the entry count tripled between two exports and only the previous total's
+  // worth of entries had dates, which is the shape over-counting makes.
+  const nested = cells.filter((cell) => cell.parentElement?.closest('div.outer-cell')).length;
+
+  const undated = entries.filter((e) => !e.timestamp);
+  const unparsed = undated.filter((e) => e.timestampText);
+
   const counts = entries.map((e) => e.turns.length).sort((a, b) => a - b);
   return {
     entries,
@@ -211,6 +237,14 @@ export function parseTakeoutHtml(html: string): { entries: TakeoutEntry[]; scan:
         total: counts.reduce((a, b) => a + b, 0),
       },
       multiTurnEntries: entries.filter((e) => e.turns.length > 2).length,
+      nestedCells: nested,
+      noDateText: undated.length - unparsed.length,
+      unparsedDateText: unparsed.length,
+      // Dates only — no conversation text. The owner has asked that the
+      // contents not be read, and a date is not content.
+      unparsedDateSamples: unparsed.slice(0, 5).map((e) => e.timestampText ?? ''),
+      emptyCells: all.filter((e) => !e.query && e.turns.length === 0 && e.images.length === 0)
+        .length,
     },
   };
 }
