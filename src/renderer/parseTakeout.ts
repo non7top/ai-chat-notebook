@@ -25,8 +25,19 @@
  * fetches nothing.
  */
 
+// No \b before the month, and that single character was costing 2104 of 3085
+// entries their date. The export's cells run text together with no separator,
+// so the date arrives glued to whatever preceded it:
+//
+//   "keyAug 22, 2026, 10:07:33 AM GMT+07:00Your prompt: gpg"
+//
+// There is no word boundary between "key" and "Aug" — both are word characters —
+// so the pattern simply did not match, and the entry came out undated. The 981
+// that did parse were the ones where the date happened to follow a space or a
+// tag boundary. Reported as "dates unread" rather than "no date", which is what
+// made it findable: the two had been the same blank space in the list.
 const TIMESTAMP_RE =
-  /\b([A-Z][a-z]{2}) (\d{1,2}), (\d{4}), (\d{1,2}):(\d{2}):(\d{2})\s?(AM|PM)\s*(GMT[+-]\d{2}:\d{2})?/;
+  /([A-Z][a-z]{2}) (\d{1,2}), (\d{4}), (\d{1,2}):(\d{2}):(\d{2})\s?(AM|PM)\s*(GMT[+-]\d{2}:\d{2})?/;
 
 // Deliberately permissive: it only has to recognise "this is meant to be a
 // date" well enough to quote it back, not to parse it.
@@ -95,7 +106,13 @@ export interface TakeoutScan {
   emptyCells: number;
 }
 
-function parseTimestamp(text: string): { iso: string | null; raw: string | null } {
+/**
+ * Exported for scripts/check-dates.ts. The DOM traversal around it needs a
+ * browser DOMParser, but this is where the pattern lives and where the bugs
+ * have been — testing it directly is what makes it testable at all, without
+ * pulling in a DOM implementation to reach one regular expression.
+ */
+export function parseTimestamp(text: string): { iso: string | null; raw: string | null } {
   const m = TIMESTAMP_RE.exec(text);
   if (!m) {
     // Keep whatever date-like text was there. Without this, a date the parser

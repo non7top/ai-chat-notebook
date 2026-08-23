@@ -3,6 +3,7 @@ import path from 'node:path';
 import contextMenu from 'electron-context-menu';
 import { initDb, seedDevData } from './main/db';
 import { registerIpcHandlers } from './main/ipc';
+import { startCdpProxy } from './main/cdpProxy';
 import {
   createAiModeView,
   getAiModeNavState,
@@ -45,28 +46,99 @@ if (process.env.NOTEBOOK_DISABLE_GPU) {
 // publishes a logged-in browser to the local network.
 const DEVTOOLS_PORT_FLAG = '--devtools-port=';
 
+/**
+ * The port CI's pull-request builds listen on with no flag at all.
+ *
+ * Those builds exist to be driven and inspected, and needing to remember a
+ * command-line flag every time defeats that. A release is built without
+ * __DEBUG_BUILD__ and keeps the opt-in, because there the flag IS the consent:
+ * the endpoint is unauthenticated and the panel behind it is signed in.
+ *
+ * Baked in at build time rather than read from the environment, so a release
+ * cannot be turned into a debug build by setting a variable, and a PR build
+ * cannot lose the setting depending on how it was launched.
+ */
+const DEBUG_BUILD_PORT = '9222';
+
 function requestedDevtoolsPort(): string | undefined {
   const fromEnv = process.env.NOTEBOOK_REMOTE_DEBUGGING_PORT;
   if (fromEnv) return fromEnv;
   const flag = process.argv.find((arg) => arg.startsWith(DEVTOOLS_PORT_FLAG));
-  return flag ? flag.slice(DEVTOOLS_PORT_FLAG.length) : undefined;
+  if (flag) return flag.slice(DEVTOOLS_PORT_FLAG.length);
+  // An explicit flag or variable still wins, so a debug build can be moved to
+  // another port when 9222 is taken.
+  return __DEBUG_BUILD__ ? DEBUG_BUILD_PORT : undefined;
+}
+
+/**
+ * Credentials for the proxy in front of the debugging port, as user:password.
+ *
+ * Weak on purpose. Chromium has no authentication on that endpoint and no flag
+ * adds one, so anything here is better than the nothing that was there — and a
+ * password nobody has to look up is a password that stays switched on. Override
+ * with --devtools-auth=user:pass when it matters.
+ */
+const DEVTOOLS_AUTH_FLAG = '--devtools-auth=';
+const DEFAULT_DEVTOOLS_AUTH = 'ai:ai';
+
+function devtoolsAuth(): { user: string; password: string } {
+  const flag = process.argv.find((arg) => arg.startsWith(DEVTOOLS_AUTH_FLAG));
+  const raw =
+    flag?.slice(DEVTOOLS_AUTH_FLAG.length) ||
+    process.env.NOTEBOOK_DEVTOOLS_AUTH ||
+    DEFAULT_DEVTOOLS_AUTH;
+  const at = raw.indexOf(':');
+  return at === -1
+    ? { user: raw, password: '' }
+    : { user: raw.slice(0, at), password: raw.slice(at + 1) };
 }
 
 const devtoolsPort = requestedDevtoolsPort();
 if (devtoolsPort) {
-  app.commandLine.appendSwitch('remote-debugging-port', devtoolsPort);
+  // Chromium listens one port up and the proxy takes the port that was asked
+  // for, so the port to forward is the one with the password on it. Deliberately
+  // arithmetic rather than picked at random: the switch has to be set before the
+  // app is ready, and a value discovered asynchronously would not be available
+  // yet. It also keeps the pair predictable when something goes wrong.
+  const internalPort = Number(devtoolsPort) + 1;
+  app.commandLine.appendSwitch('remote-debugging-port', String(internalPort));
   // Since Chromium 111 the CDP WebSocket handshake is rejected outright when
   // it carries an Origin header that isn't allow-listed. Local tools like
   // chrome://inspect send none and work without this; a remote client
   // (including anything proxied through a tunnel) generally does send one,
   // and fails with a bare 403 that gives no hint why.
   app.commandLine.appendSwitch('remote-allow-origins', '*');
-  // eslint-disable-next-line no-console
-  console.warn(
-    `[Notebook] Remote debugging is ON at http://127.0.0.1:${devtoolsPort}/json ` +
-      '— this is unauthenticated and the embedded panel holds a live Google ' +
-      'session. Do not expose this port beyond a trusted tunnel.',
-  );
+
+  const auth = devtoolsAuth();
+  // Started once the app is ready rather than at module load, so a failure to
+  // bind is reported instead of taking the whole launch down with it.
+  app.whenReady().then(() => {
+    try {
+      startCdpProxy({
+        publicPort: Number(devtoolsPort),
+        internalPort,
+        user: auth.user,
+        password: auth.password,
+      });
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[Notebook] Remote debugging is ON at http://127.0.0.1:${devtoolsPort}/json ` +
+          `(${__DEBUG_BUILD__ ? 'debug build, on by default' : 'requested explicitly'}), ` +
+          `behind Basic auth as ${auth.user}. Forward THIS port — Chromium itself ` +
+          `listens on ${internalPort} with no password at all, and any process on ` +
+          'this machine can reach it. The panel behind it holds a live Google session.',
+      );
+    } catch (error) {
+      // Said loudly rather than swallowed: without the proxy the only way in is
+      // the unauthenticated port, and believing otherwise is the dangerous part.
+      // eslint-disable-next-line no-console
+      console.error(
+        `[Notebook] Could not start the authenticating proxy on ${devtoolsPort}: ` +
+          `${error instanceof Error ? error.message : String(error)}. Chromium is ` +
+          `still listening on ${internalPort} WITHOUT a password.`,
+      );
+    }
+  });
 }
 
 const createWindow = () => {
@@ -77,6 +149,21 @@ const createWindow = () => {
       preload: path.join(__dirname, '../preload/preload.js'),
     },
   });
+
+  // A build listening on an unauthenticated CDP port should say so somewhere a
+  // person actually looks. The startup warning goes to a console nobody sees
+  // when the app was double-clicked, and these installers sit in a downloads
+  // folder next to real releases with near-identical names.
+  //
+  // page-title-updated has to be intercepted rather than just setting a title:
+  // the renderer's <title> overwrites the window title as soon as it loads, so
+  // a title set here alone would last only until then.
+  if (__DEBUG_BUILD__) {
+    mainWindow.on('page-title-updated', (event, title) => {
+      event.preventDefault();
+      mainWindow.setTitle(`${title} — DEBUG BUILD (remote debugging on)`);
+    });
+  }
 
   // electron-vite sets ELECTRON_RENDERER_URL in dev (HMR dev server); in a
   // packaged build it's unset and the renderer is loaded from its built

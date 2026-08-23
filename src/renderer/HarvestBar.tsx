@@ -7,8 +7,16 @@ import type {
   TakeoutPick,
 } from '../shared/types';
 import { type TakeoutEntry, parseTakeoutHtml } from './parseTakeout';
+import type { TakeoutReportData } from './TakeoutReport';
 
 interface Props {
+  /**
+   * Where the export report goes. Handed up rather than rendered here: it is
+   * several paragraphs and a list, and this component is a single toolbar row —
+   * which is exactly how four hundred characters of it ended up truncated in a
+   * span.
+   */
+  onReport: (report: TakeoutReportData | null) => void;
   /** Harvesting scrapes the live sidebar, so the panel has to be on screen. */
   onNeedPanel: () => void;
   onFinished: () => void;
@@ -45,7 +53,13 @@ function importRows(entries: TakeoutEntry[]): TakeoutImportRow[] {
   }));
 }
 
-export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activity }: Props) {
+export default function HarvestBar({
+  onReport,
+  onNeedPanel,
+  onFinished,
+  uncaptured,
+  activity,
+}: Props) {
   const [progress, setProgress] = useState<HarvestProgress | null>(null);
   const [busy, setBusy] = useState(false);
   const [capture, setCapture] = useState<CaptureProgress | null>(null);
@@ -95,33 +109,11 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activi
       // The sweep. Reads only, and goes through the same placement rule the
       // import uses, so it describes the import that will actually run.
       const sweep = await window.notebook.previewTakeout(importRows(entries));
-      setTakeoutNote(
-        `${scan.entryCount} cells, ${scan.aiModeEntries} AI Mode · ` +
-          `${scan.withTimestamp} dated · ${scan.withQuery} titled · ` +
-          `turns ${scan.turnCounts.min}/${scan.turnCounts.median}/${scan.turnCounts.max} ` +
-          `(${scan.turnCounts.total} total, ${scan.multiTurnEntries} multi-turn) · ` +
-          `${scan.withImages} with images (${scan.imageRefsTotal})` +
-          // Only shown when non-zero, so the ordinary line stays readable, and
-          // spelled out because each of these means something different: a
-          // nested cell is double-counting, unparsed date text is a bug here,
-          // and an empty cell is not a conversation at all.
-          (scan.nestedCells > 0 ? ` · ${scan.nestedCells} NESTED (double-counted)` : '') +
-          (scan.emptyCells > 0 ? ` · ${scan.emptyCells} empty cells` : '') +
-          (scan.noDateText > 0 ? ` · ${scan.noDateText} with no date at all` : '') +
-          (scan.unparsedDateText > 0
-            ? ` · ${scan.unparsedDateText} dates unread, e.g. ${scan.unparsedDateSamples
-                .map((t) => `"${t}"`)
-                .join(', ')}`
-            : '') +
-          `\nsweep: ${sweep.wouldCreate} new, ${sweep.wouldEnrich} would extend a ` +
-          `conversation already here, ${sweep.wouldUpdate} would update one from an ` +
-          `earlier import (${sweep.chatsTouched} existing touched) · ` +
-          `${sweep.alreadyKnown} entries already stored · ` +
-          `${sweep.ambiguous} share an opening, left to glue by hand` +
-          (sweep.wouldOrphan > 0
-            ? ` · ${sweep.wouldOrphan} with no prompt → kept as orphans`
-            : ''),
-      );
+      onReport({ folder: picked.folder, scan, sweep, apply: applyTakeout });
+      // The toolbar keeps a single figure and the panel carries the rest. A
+      // count is all that fits here, and pretending otherwise is what truncated
+      // everything that mattered.
+      setTakeoutNote(`${scan.aiModeEntries} entries — see the report`);
     } catch (err) {
       setTakeoutNote(err instanceof Error ? err.message : String(err));
     } finally {
@@ -138,6 +130,9 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activi
         takeout.folder,
         importRows(entries),
       );
+      // The panel is replaced by the outcome, so the report on screen never
+      // describes an import that has already happened.
+      onReport(null);
       setTakeoutNote(
         `${summary.entries} entries → ${summary.conversations} conversations ` +
           `(${summary.createdChats} new, ${summary.extendedChats} extended, ` +
@@ -250,6 +245,8 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activi
       <button type="button" onClick={scanTakeout} disabled={takeoutBusy || busy || capturing}>
         {takeoutBusy ? 'Reading…' : 'Scan Takeout…'}
       </button>
+      {/* Kept as a way back to the decision after the report was closed; the
+          report itself carries the primary Import. */}
       {takeout && (
         <button type="button" onClick={applyTakeout} disabled={takeoutBusy}>
           Import it

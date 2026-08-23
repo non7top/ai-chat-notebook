@@ -74,6 +74,15 @@ jobs:
       - name: Check title matching
         run: docker compose run --rm dev npm run check:find
 
+      - name: Check the export's date pattern
+        run: docker compose run --rm dev npm run check:dates
+
+      # The CDP proxy is the only authentication in front of an endpoint that
+      # has none of its own. A lock that does not lock is worse than no lock,
+      # because it invites forwarding a port in the belief that it is protected.
+      - name: Check the CDP auth proxy
+        run: docker compose run --rm dev npm run check:cdp-proxy
+
   build-windows:
     # electron-builder cross-builds its deb and rpm targets from Linux, but
     # not NSIS — that needs a real Windows host. (Established the hard way on
@@ -127,8 +136,16 @@ jobs:
         shell: bash
         run: git checkout preview-head
 
+      # Pull-request builds ship with remote debugging on by default, because
+      # they exist to be driven and inspected and a flag you have to remember
+      # every launch defeats that. Releases are built WITHOUT this — see
+      # release.yml — so there it stays an explicit opt-in, which is the consent
+      # for an unauthenticated endpoint in front of a signed-in Google session.
+      # The window title says DEBUG BUILD so one is never mistaken for the other.
       - name: Package Windows installer
         run: npm run make
+        env:
+          NOTEBOOK_DEBUG_BUILD: '1'
 
       # Same guard as the release workflow, and the reason it exists: a bare
       # require() left in the bundle crashes the installed app at startup,

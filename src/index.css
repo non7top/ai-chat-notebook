@@ -757,3 +757,132 @@ button:disabled {
   color: inherit;
   text-decoration: underline;
 }
+
+/* ----------------------------------------------------------------- report */
+
+/* The export report. Takes the list and reader panes together: it is prose and
+   a table, and in a third of the width it would be the same unreadable thing it
+   was as one truncated line in the toolbar. */
+.pane-report {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.report {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.report-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.report-head h2 {
+  font-size: 1rem;
+  margin: 0;
+  flex: 1;
+}
+
+.report-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.6rem 0.8rem 2rem;
+  /* Measured for reading rather than stretched to the pane: long explanatory
+     lines across a 900px pane are hard to track back to the next line. */
+  max-width: 46rem;
+}
+
+.report-path {
+  margin: 0 0 0.8rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.report-body h3 {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 1.1rem 0 0.4rem;
+}
+
+.report-body h3:first-of-type {
+  margin-top: 0;
+}
+
+/* The headline numbers. Large because they are the decision — everything
+   underneath is why they are what they are. */
+.report-figure {
+  margin: 0 0 0.3rem;
+  font-size: 1.05rem;
+}
+
+.report-figure.new {
+  color: #047857;
+  font-weight: 600;
+}
+
+.report-figure.warn {
+  color: #b45309;
+}
+
+.report-figure.bad {
+  color: #b91c1c;
+  font-weight: 600;
+}
+
+/* The explanation rides along at normal text size: it belongs to the figure but
+   must not compete with it. */
+.report-aside {
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.report-note {
+  margin: 0.4rem 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.report-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.8rem;
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.report-facts dt {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.report-facts dd {
+  margin: 0;
+}
+
+/* Unreadable date text, quoted verbatim. Monospace because the point is the
+   exact characters — where the date is glued to the word before it is visible
+   here and nowhere else. */
+.report-samples {
+  margin: 0.3rem 0 0;
+  padding-left: 1.1rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.report-samples li {
+  overflow-wrap: anywhere;
+  margin-bottom: 0.15rem;
+}

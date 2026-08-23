@@ -12,6 +12,16 @@ const external = [
   ...builtinModules.map((mod) => `node:${mod}`),
 ];
 
+// Baked in at build time, not read from the environment at runtime: a release
+// must not be turnable into a debug build by setting a variable, and a PR build
+// must not quietly lose the setting depending on how it was launched.
+//
+// CI sets this for pull-request builds only. Releases are built without it, so
+// they ship with remote debugging off and it stays an explicit opt-in there —
+// which matters, because the endpoint is unauthenticated and the embedded panel
+// holds a live Google session.
+const debugBuild = process.env.NOTEBOOK_DEBUG_BUILD === '1';
+
 export default defineConfig({
   main: {
     // electron-vite auto-adds its own externalize-deps plugin unless told not
@@ -24,6 +34,9 @@ export default defineConfig({
     // no node_modules that crashes the packaged app at startup (contextMenu()
     // is called at module top level in src/main.ts, so it isn't even deferred
     // to the first right-click).
+    define: {
+      __DEBUG_BUILD__: JSON.stringify(debugBuild),
+    },
     build: {
       externalizeDeps: false,
       rollupOptions: {
@@ -51,6 +64,9 @@ export default defineConfig({
   },
   renderer: {
     root: '.',
+    define: {
+      __DEBUG_BUILD__: JSON.stringify(debugBuild),
+    },
     build: {
       rollupOptions: {
         input: 'index.html',

@@ -471,5 +471,66 @@ repairScenario(true);
   fs.rmSync(scratch, { recursive: true, force: true });
 }
 
+// ---------------------------------------------------------------------------
+// The thumbnail is the image the conversation STARTED with.
+//
+// The first version took the earliest image anywhere, so a conversation
+// beginning with text was represented by whatever picture turned up later — and
+// for captures made before images were classified, that was usually a rich link
+// preview. Each case below is built explicitly, because the version of this
+// check that inferred them from earlier fixtures reported "n/a" and proved
+// nothing.
+{
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'notebook-thumb-'));
+  db.initDb(scratch);
+  const inStore = (c: string) => path.join(db.getAssetsDir(), c.repeat(2), `${c.repeat(64)}.png`);
+  const asset = (seq: number, kind: string | null, c: string) => ({
+    messageSeq: seq,
+    kind,
+    originalUrl: null,
+    sha256: c.repeat(64),
+    mime: 'image/png',
+    localPath: inStore(c),
+    bytes: 1,
+  });
+  const sixTurns = Array.from({ length: 6 }, (_, i) => ({
+    seq: i,
+    role: (i % 2 === 0 ? 'user' : 'ai') as 'user' | 'ai',
+    text: `turn ${i}`,
+    html: null,
+  }));
+
+  const make = (ext: string, assets: ReturnType<typeof asset>[]): number => {
+    db.upsertThreadFromList(ext, ext, null, 0);
+    const id = db.listChats({ kind: 'all' }).find((c) => c.title === ext)?.id as number;
+    db.replaceTurns(id, sixTurns, assets);
+    return id;
+  };
+  const thumbOf = (id: number) =>
+    db.listChats({ kind: 'all' }).find((c) => c.id === id)?.titleImage ?? null;
+
+  // Opens with an upload: shown.
+  const opens = make('opens-with-image', [asset(0, 'upload', 'a')]);
+  // Text first, a generated picture five turns in: NOT the opening image.
+  const later = make('image-much-later', [asset(5, 'generated', 'b')]);
+  // A link preview at the opening: never the face of a conversation.
+  const preview = make('opens-with-preview', [asset(0, 'other', 'c')]);
+  // Captured before kinds existed, so nothing is known about it. This is the
+  // case that produced the random thumbnails.
+  const unknown = make('unclassified', [asset(0, null, 'd')]);
+
+  for (const [what, id, want] of [
+    ['opens with an image', opens, true],
+    ['image only later', later, false],
+    ['opens with a preview', preview, false],
+    ['unclassified image', unknown, false],
+  ] as const) {
+    const got = thumbOf(id) !== null;
+    console.log(`  ${what}: thumbnail ${got ? 'shown' : 'none'}`);
+    if (got !== want) throw new Error(`${what}: expected ${want ? 'a thumbnail' : 'none'}`);
+  }
+  fs.rmSync(scratch, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('OK');

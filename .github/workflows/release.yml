@@ -98,6 +98,10 @@ jobs:
       - name: Build and check bundle externals
         run: npm run build
       - run: npm run check:bundle
+      # Asks the artifact rather than trusting that this workflow simply never
+      # sets NOTEBOOK_DEBUG_BUILD. One copied step or inherited environment and
+      # a release would ship listening on an unauthenticated port.
+      - run: npm run check:not-debug
 
       - name: Publish (build installer + create GitHub release)
         run: npm run publish

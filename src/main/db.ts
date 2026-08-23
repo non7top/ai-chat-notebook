@@ -381,19 +381,29 @@ const CHAT_SUMMARY_SQL = `
          -- discarded, but counted apart so 17 previews never read as 17 images.
          (SELECT COUNT(DISTINCT a.sha256) FROM assets a
            WHERE a.chat_id = c.id AND a.kind = 'other') AS preview_count,
-         -- The conversation's own first image, for the list thumbnail. Ordered
-         -- by turn and then by insertion, so it is the image the conversation
-         -- opened with — an upload the question came with, or the first picture
-         -- generated in answer to it. Export images have no turn to sit in and
-         -- sort first, which is right: an entry that shipped one image is
-         -- exactly the case this is for.
+         -- The image the conversation STARTED with, for the list thumbnail.
+         -- Two restrictions, and an earlier version had neither, which is why
+         -- conversations that begin with text were showing an unrelated picture:
          --
-         -- Previews are excluded outright. A source-card thumbnail as the face
-         -- of a conversation would be worse than no thumbnail at all.
+         -- 1. The opening turn pair only (seq 0 or 1) — the question's own
+         --    upload, or the first picture generated in answer to it. Taking
+         --    the earliest image anywhere meant a conversation whose seventh
+         --    answer happened to contain a picture was represented by it.
+         -- 2. A KNOWN kind. NULL means "captured before images were
+         --    classified", which includes every rich link preview and
+         --    source-card thumbnail from those captures — so the face of a
+         --    text-only conversation became whichever preview came first.
+         --    Unknown is not a licence to display: re-capturing a conversation
+         --    classifies its images and a real one then appears.
+         --
+         -- Export images have no turn to sit in, and are allowed on their own
+         -- terms: an entry that shipped a single image is exactly the case this
+         -- is for, and 'takeout' says what it is.
          (SELECT a.local_path FROM assets a
             LEFT JOIN messages m ON m.id = a.message_id
            WHERE a.chat_id = c.id
-             AND (a.kind IS NULL OR a.kind IN ('generated', 'upload', 'takeout'))
+             AND a.kind IN ('generated', 'upload', 'takeout')
+             AND (a.message_id IS NULL OR m.seq <= 1)
            ORDER BY COALESCE(m.seq, -1) ASC, a.id ASC
            LIMIT 1) AS title_image
   FROM chats c

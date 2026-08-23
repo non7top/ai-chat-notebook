@@ -12,8 +12,11 @@
     "make": "electron-vite build && electron-builder --publish never",
     "publish": "electron-vite build && electron-builder --publish always",
     "lint": "biome lint .",
+    "check:cdp-proxy": "node --experimental-strip-types --no-warnings scripts/check-cdp-proxy.ts",
+    "check:dates": "node --experimental-strip-types --no-warnings scripts/check-dates.ts",
     "check:find": "node --experimental-strip-types --no-warnings scripts/check-find.ts",
     "check:sources": "node --experimental-strip-types --no-warnings scripts/check-sources.ts",
+    "check:not-debug": "node scripts/check-not-debug.mjs",
     "check:bundle": "node scripts/check-bundle-externals.mjs"
   },
   "keywords": [],

@@ -9,6 +9,7 @@ import type {
 } from '../shared/types';
 import ChatList from './ChatList';
 import OrphanEntries from './OrphanEntries';
+import TakeoutReport, { type TakeoutReportData } from './TakeoutReport';
 import ChatReader from './ChatReader';
 import FolderTree from './FolderTree';
 import HarvestBar from './HarvestBar';
@@ -20,6 +21,8 @@ export default function App() {
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [query, setQuery] = useState('');
+  const [report, setReport] = useState<TakeoutReportData | null>(null);
+  const [applying, setApplying] = useState(false);
   const [chat, setChat] = useState<ChatDetail | null>(null);
   const [status, setStatus] = useState<AiModeStatus>({ connected: false });
   const [panelVisible, setPanelVisible] = useState(false);
@@ -92,6 +95,16 @@ export default function App() {
       </div>
 
       <HarvestBar
+        onReport={(next) => {
+          setReport(next);
+          // The native panel is a separate window-level view painted over the
+          // app, so it would cover the report rather than sit beside it. Hiding
+          // it is what makes the space available at all.
+          if (next) {
+            setPanelVisible(false);
+            window.notebook.setAiModeHidden(true);
+          }
+        }}
         onNeedPanel={() => setPanelVisible(true)}
         onFinished={reloadAll}
         uncaptured={uncaptured}
@@ -131,7 +144,26 @@ export default function App() {
         {/* Orphan entries are not conversations, so they get the list and
             reader panes to themselves rather than being forced into a chat
             list that would have to lie about what they are. */}
-        {scope.kind === 'orphans' ? (
+        {report ? (
+          // Takes the list and reader panes together. The report is prose and a
+          // table, and squeezed into a third of the width it would be the same
+          // unreadable thing it was in the toolbar.
+          <div className="pane pane-report">
+            <TakeoutReport
+              report={report}
+              busy={applying}
+              onApply={async () => {
+                setApplying(true);
+                try {
+                  await report.apply();
+                } finally {
+                  setApplying(false);
+                }
+              }}
+              onClose={() => setReport(null)}
+            />
+          </div>
+        ) : scope.kind === 'orphans' ? (
           <div className="pane pane-orphans">
             <OrphanEntries onChange={reloadAll} />
           </div>
