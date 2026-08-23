@@ -481,3 +481,37 @@ button:disabled {
 .chat-images {
   color: #047857;
 }
+
+/* Provenance: quiet by default, since it answers a question you only
+   occasionally ask, but always present so the answer exists. */
+.chat-source {
+  color: var(--muted);
+}
+
+.src-takeout {
+  color: #7c3aed;
+}
+
+.provenance {
+  margin: 0;
+  padding: 0.3rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.74rem;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  flex: none;
+}
+
+.provenance-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provenance-open {
+  margin-left: auto;
+  flex: none;
+}

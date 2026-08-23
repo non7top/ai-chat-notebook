@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ChatDetail } from '../shared/types';
 import { sanitizeHtml } from './sanitize';
+import { displayDateTime } from './dateDisplay';
 
 interface Props {
   chat: ChatDetail;
@@ -82,6 +83,40 @@ export default function ChatReader({ chat, onChange }: Props) {
           </>
         )}
       </div>
+
+      {/* Provenance, because "where did this come from and how do I get back
+          to it" had no answer in the UI at all. There is deliberately no link:
+          a Takeout URL re-runs the prompt and loses the uploads, and a
+          constructed mtid URL creates a duplicate conversation. Clicking the
+          sidebar row is the only faithful route, so it is a button. */}
+      <p className="provenance">
+        <span>
+          {chat.source === 'capture'
+            ? 'captured from the panel'
+            : chat.source === 'harvest'
+              ? 'listed in the sidebar, not yet captured'
+              : `source: ${chat.source}`}
+        </span>
+        {chat.startedAt && <span> · {displayDateTime(chat.startedAt)}</span>}
+        <span className="provenance-id"> · {chat.externalId || 'no id'}</span>
+        {!chat.externalId.startsWith('takeout:') && (
+          <button
+            type="button"
+            className="provenance-open"
+            title="Find and open this conversation in the live panel"
+            onClick={async () => {
+              setRecaptureError(null);
+              try {
+                await window.notebook.openChatInPanel(chat.id);
+              } catch (err) {
+                setRecaptureError(err instanceof Error ? err.message : String(err));
+              }
+            }}
+          >
+            Open in panel
+          </button>
+        )}
+      </p>
 
       {recaptureError && (
         <p className="status-line error">Re-capture failed: {recaptureError}</p>

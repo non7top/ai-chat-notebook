@@ -321,6 +321,27 @@ export async function recaptureChat(chatId: number): Promise<{ turns: number; im
   return { turns: result.turns, images: result.images };
 }
 
+/**
+ * Shows a conversation in the live panel.
+ *
+ * Uses the sidebar-click path, which is the only faithful way in: a Takeout
+ * link re-runs the prompt and loses the uploads, and a constructed mtid URL
+ * mints a new conversation. Reads nothing and stores nothing — this is "take me
+ * there", not a capture.
+ */
+export async function openChatInPanel(chatId: number): Promise<void> {
+  const chat = db.getChatForCapture(chatId);
+  if (!chat) throw new Error(`No chat with id ${chatId}`);
+  if (chat.externalId.startsWith('takeout:')) {
+    throw new Error(
+      'This entry came from a Takeout export and has no Google thread id, so it cannot be opened.',
+    );
+  }
+  await ensureOnAiMode();
+  await ensureHistorySidebarOpen();
+  await openThreadById(chat.externalId);
+}
+
 export interface CaptureSummary {
   attempted: number;
   captured: number;

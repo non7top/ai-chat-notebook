@@ -1,4 +1,5 @@
 import type { ChatSummary } from '../shared/types';
+import { displayDate } from './dateDisplay';
 
 interface Props {
   chats: ChatSummary[];
@@ -10,13 +11,8 @@ interface Props {
 // harvester last saw the thread, which for a bulk harvest is "today" for every
 // row — displaying that stamped the harvest date onto years of history and read
 // as though every conversation happened at once. AI Mode exposes no per-thread
-// date at all (see the notes in aiModeDriver.ts), so until myactivity is
-// scraped for real timestamps, showing nothing is the honest option.
-function when(iso: string | null): string | null {
-  if (!iso) return null;
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? null : date.toLocaleDateString();
-}
+// date at all (see the notes in aiModeDriver.ts), so a date appears only once
+// Takeout has supplied one.
 
 export default function ChatList({ chats, selectedId, onSelect }: Props) {
   if (chats.length === 0) {
@@ -26,7 +22,7 @@ export default function ChatList({ chats, selectedId, onSelect }: Props) {
   return (
     <div className="chat-list">
       {chats.map((chat) => {
-        const started = when(chat.startedAt);
+        const started = displayDate(chat.startedAt);
         return (
         <div
           key={chat.id}
@@ -68,6 +64,16 @@ export default function ChatList({ chats, selectedId, onSelect }: Props) {
               )}
               {/* Most of this archive is image generation, so images are the
                   thing worth browsing by. */}
+              {/* Where the row came from. Without it a Takeout prompt and a
+                  fully captured conversation look identical in the list. */}
+              <span className={`chat-source src-${chat.source}`}>
+                {' · '}
+                {chat.source === 'capture'
+                  ? 'panel'
+                  : chat.source === 'harvest'
+                    ? 'listed'
+                    : chat.source}
+              </span>
               {chat.imageCount > 0 && (
                 <span className="chat-images" title={`${chat.imageCount} image(s) archived`}>
                   {' · '}

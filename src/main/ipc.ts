@@ -17,6 +17,7 @@ import {
   cancelHarvest,
   captureTurns,
   harvestThreadList,
+  openChatInPanel,
   recaptureChat,
 } from './harvest';
 import type { ChatScope } from '../shared/types';
@@ -45,6 +46,7 @@ export function registerIpcHandlers(): void {
     db.setChatTitle(chatId, userTitle),
   );
   ipcMain.handle('chats:delete', (_event, id: number) => db.deleteChat(id));
+  ipcMain.handle('chats:openInPanel', (_event, id: number) => openChatInPanel(id));
 
   // Routed through the main process rather than window.confirm. Electron does
   // support confirm(), but it does NOT support prompt() — that threw

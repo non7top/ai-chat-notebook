@@ -44,6 +44,7 @@ const api: NotebookApi = {
   setChatFolder: (chatId, folderId) => ipcRenderer.invoke('chats:setFolder', chatId, folderId),
   setChatTitle: (chatId, userTitle) => ipcRenderer.invoke('chats:setTitle', chatId, userTitle),
   deleteChat: (id) => ipcRenderer.invoke('chats:delete', id),
+  openChatInPanel: (chatId) => ipcRenderer.invoke('chats:openInPanel', chatId),
 
   getAiModeStatus: () => ipcRenderer.invoke('aiMode:getStatus'),
   navigateAiMode: (url) => ipcRenderer.invoke('aiMode:navigate', url),

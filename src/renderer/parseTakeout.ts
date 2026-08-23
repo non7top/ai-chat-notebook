@@ -69,7 +69,14 @@ function parseTimestamp(text: string): { iso: string | null; raw: string | null 
   const offset = zone ? zone.replace('GMT', '') : 'Z';
   const iso = `${year}-${pad(monthIndex + 1)}-${pad(Number(day))}T${pad(hour)}:${minute}:${second}${offset}`;
   const date = new Date(iso);
-  return { iso: Number.isNaN(date.getTime()) ? null : date.toISOString(), raw };
+  if (Number.isNaN(date.getTime())) return { iso: null, raw };
+  // Returned WITH its original offset rather than normalised to UTC. Converting
+  // moved conversations across midnight — "Aug 22, 3:09 AM GMT+07:00" became
+  // 2026-08-21T20:09Z, and the list then showed Aug 21 for something Google
+  // records as Aug 22. For an archive the meaningful date is the one it happened
+  // on where it happened, so the offset is part of the value, not noise to
+  // discard.
+  return { iso, raw };
 }
 
 function textOf(el: Element): string {

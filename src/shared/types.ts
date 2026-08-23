@@ -24,6 +24,12 @@ export interface ChatSummary {
   imageCount: number;
   /** Failed capture attempts — distinguishes "failed" from "never tried". */
   captureAttempts: number;
+  /**
+   * Where this came from: 'harvest' (seen in the sidebar list), 'capture'
+   * (turns read from the panel), 'takeout' (an export), 'seed' (dev data).
+   * Shown in the UI because otherwise a conversation's origin is invisible.
+   */
+  source: string;
 }
 
 export interface Message {
@@ -157,6 +163,12 @@ export interface NotebookApi {
   setChatFolder(chatId: number, folderId: number | null): Promise<void>;
   setChatTitle(chatId: number, userTitle: string): Promise<void>;
   deleteChat(id: number): Promise<void>;
+  /**
+   * Opens a conversation in the live panel by clicking its sidebar row.
+   * Deliberately not a URL: Takeout links re-run the prompt and constructed
+   * mtid links create duplicate conversations.
+   */
+  openChatInPanel(chatId: number): Promise<void>;
 
   getAiModeStatus(): Promise<AiModeStatus>;
   navigateAiMode(url: string): Promise<void>;

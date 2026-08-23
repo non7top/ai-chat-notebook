@@ -202,6 +202,7 @@ interface ChatSummaryRow {
   message_count: number;
   image_count: number;
   capture_attempts: number;
+  source: string;
 }
 
 // COALESCE order is the display rule in one place: a title typed by hand wins
@@ -211,7 +212,7 @@ const CHAT_TITLE_SQL = "COALESCE(NULLIF(user_title, ''), NULLIF(title, ''), '(un
 
 const CHAT_SUMMARY_SQL = `
   SELECT c.id, c.folder_id, ${CHAT_TITLE_SQL} AS title, c.started_at, c.last_seen_at,
-         c.capture_attempts,
+         c.capture_attempts, c.source,
          (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count,
          -- DISTINCT sha256, not row count: every image is rendered twice by the
          -- page, so counting asset rows would report double.
@@ -229,6 +230,7 @@ function toSummary(row: ChatSummaryRow): ChatSummary {
     messageCount: row.message_count,
     imageCount: row.image_count,
     captureAttempts: row.capture_attempts,
+    source: row.source,
   };
 }
 
