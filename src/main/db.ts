@@ -1015,6 +1015,78 @@ export function placeEntry(
   };
 }
 
+/**
+ * Groups entries that are successive snapshots of ONE conversation.
+ *
+ * The export records a snapshot per submission, each holding the conversation
+ * so far, so ~300 conversations arrive as thousands of entries. Importing one
+ * conversation per entry is the bug that turned 981 entries into 736 phantom
+ * chats; grouping them by opening prompt alone is the opposite bug, since two
+ * conversations can open identically and Google sometimes clones one outright.
+ *
+ * Neither is necessary, because snapshots of one conversation are not merely
+ * similar — they are PREFIX-CONSISTENT. Every turn of the earlier snapshot
+ * appears, identical and in order, at the start of the later one. That is a
+ * fact about the text rather than a judgement about intent, so it can be
+ * decided here.
+ *
+ * When two entries share an opening and then diverge, they are different
+ * conversations and each gets its own. That is the case nothing can resolve
+ * automatically, and it stays a manual glue.
+ */
+export interface ConversationPlan {
+  key: string;
+  /** Every snapshot, shortest first. All of them are recorded as source entries. */
+  snapshots: TakeoutImportRow[];
+  /** The furthest along, and therefore the conversation itself. */
+  best: TakeoutImportRow;
+}
+
+/** A row's turns as comparable text, so snapshots can be matched exactly. */
+function turnKeys(row: TakeoutImportRow): string[] {
+  return row.turns.map((t) => `${t.role}:${t.text.toLowerCase().replace(/\s+/g, ' ').trim()}`);
+}
+
+function isPrefixOf(shorter: string[], longer: string[]): boolean {
+  if (shorter.length > longer.length) return false;
+  return shorter.every((turn, index) => turn === longer[index]);
+}
+
+export function planConversations(rows: TakeoutImportRow[]): ConversationPlan[] {
+  const byKey = new Map<string, TakeoutImportRow[]>();
+  for (const row of rows) {
+    const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+    if (!opening.trim()) continue;
+    const key = contentKeyFor(opening);
+    const group = byKey.get(key);
+    if (group) group.push(row);
+    else byKey.set(key, [row]);
+  }
+
+  const plans: ConversationPlan[] = [];
+  for (const [key, group] of byKey) {
+    // Shortest first, so each entry either extends a chain already seen or
+    // starts one. Walking longest-first would need the same comparisons in
+    // reverse and makes the "extend" case harder to see.
+    const ordered = [...group].sort((a, b) => a.turns.length - b.turns.length);
+    const chains: { keys: string[]; plan: ConversationPlan }[] = [];
+    for (const row of ordered) {
+      const keys = turnKeys(row);
+      const chain = chains.find((c) => isPrefixOf(c.keys, keys));
+      if (chain) {
+        chain.keys = keys;
+        chain.plan.snapshots.push(row);
+        chain.plan.best = row;
+      } else {
+        const plan: ConversationPlan = { key, snapshots: [row], best: row };
+        chains.push({ keys, plan });
+        plans.push(plan);
+      }
+    }
+  }
+  return plans;
+}
+
 /** How many entries in one import open with each prompt. */
 export function openingCounts(rows: TakeoutImportRow[]): Map<string, number> {
   const counts = new Map<string, number>();
@@ -1029,6 +1101,10 @@ export function openingCounts(rows: TakeoutImportRow[]): Map<string, number> {
 
 export interface TakeoutPreview {
   entries: number;
+  /** Conversations those entries describe — far fewer, and the figure that matters. */
+  conversations: number;
+  /** Earlier snapshots folded into a later one, rather than made into conversations. */
+  snapshotsFolded: number;
   /**
    * Entries with no opening prompt. They are still stored — nothing is dropped —
    * and become orphans for review rather than conversations.
@@ -1055,9 +1131,19 @@ export interface TakeoutPreview {
  * run rather than a second implementation of the same intent.
  */
 export function previewTakeoutImport(rows: TakeoutImportRow[]): TakeoutPreview {
-  const counts = openingCounts(rows);
+  // Counted over CONVERSATIONS, exactly as the import counts them. Reporting
+  // entries here was wrong and misleading in the way that matters: 1779 "new
+  // threads" for an account with about 300, because the export records one
+  // entry per submission and most entries are earlier snapshots of a
+  // conversation another entry already describes.
+  const plans = planConversations(rows);
+  const counts = new Map<string, number>();
+  for (const plan of plans) counts.set(plan.key, (counts.get(plan.key) ?? 0) + 1);
+
   const preview: TakeoutPreview = {
     entries: rows.length,
+    conversations: plans.length,
+    snapshotsFolded: plans.reduce((n, plan) => n + plan.snapshots.length - 1, 0),
     wouldOrphan: 0,
     alreadyKnown: 0,
     wouldEnrich: 0,
@@ -1066,14 +1152,16 @@ export function previewTakeoutImport(rows: TakeoutImportRow[]): TakeoutPreview {
     ambiguous: 0,
     chatsTouched: 0,
   };
-  const touched = new Set<number>();
   for (const row of rows) {
     const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
-    if (!opening.trim()) {
-      preview.wouldOrphan += 1;
-      continue;
-    }
-    const placement = placeEntry(row, counts.get(contentKeyFor(opening)) ?? 1);
+    if (!opening.trim()) preview.wouldOrphan += 1;
+  }
+
+  const touched = new Set<number>();
+  for (const plan of plans) {
+    const placement = placeEntry(plan.best, counts.get(plan.key) ?? 1);
+    // Known when every snapshot of it is already stored; a conversation that has
+    // grown since the last import is not "already known".
     if (placement.knownEntry) preview.alreadyKnown += 1;
     if (placement.ambiguous) preview.ambiguous += 1;
     if (placement.enrich) {
@@ -1128,15 +1216,15 @@ export function importTakeoutConversations(
   //
   // The cost is more rows than conversations; the benefit is that nothing is
   // silently lost or silently welded, and the duplicates are visible.
-  const best = new Map<string, { row: TakeoutImportRow; members: number }>();
-  for (const row of rows) {
-    const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
-    if (!opening.trim()) continue;
-    // Opening plus exact time: one row per submission, so asking the same thing
-    // twice yields two conversations rather than one overwriting the other.
-    best.set(`${contentKeyFor(opening)}@${row.timestamp ?? 'nodate'}`, { row, members: 1 });
-  }
-  result.conversations = best.size;
+  //
+  // What IS grouped is a conversation with its own earlier snapshots, because
+  // that needs no judgement: the export records one entry per submission, each
+  // holding the conversation so far, so an earlier snapshot's turns are a
+  // prefix of a later one's. See planConversations. Entries that share an
+  // opening and then diverge stay separate, which is the case a person has to
+  // decide.
+  const plans = planConversations(rows);
+  result.conversations = plans.length;
 
   // Preserve every entry first, before any interpretation of it. If the
   // grouping below is wrong, this is what makes it fixable without going back
@@ -1202,15 +1290,22 @@ export function importTakeoutConversations(
   // An opening shared by several entries cannot identify any one of them, so it
   // disqualifies automatic matching outright rather than handing the
   // conversation to whichever entry the loop happens to reach last.
-  const counts = openingCounts([...best.values()].map((b) => b.row));
+  // Counted over CONVERSATIONS, not entries. Several snapshots of one
+  // conversation share an opening by definition and say nothing about ambiguity;
+  // two distinct conversations sharing one is the case where neither may claim a
+  // harvested thread.
+  const counts = new Map<string, number>();
+  for (const plan of plans) counts.set(plan.key, (counts.get(plan.key) ?? 0) + 1);
 
   db.exec('BEGIN');
   try {
-    for (const [, { row, members }] of best) {
+    for (const plan of plans) {
+      // The furthest-along snapshot IS the conversation; the shorter ones are
+      // its history, recorded as source entries against it.
+      const row = plan.best;
+      const members = plan.snapshots.length;
+      const key = plan.key;
       const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
-      // content_key stays the plain hash of the opening, so conversations that
-      // start alike remain findable as candidates for gluing.
-      const key = contentKeyFor(opening);
 
       // One shared rule, so the sweep cannot promise an import that differs
       // from the one that runs.
@@ -1321,18 +1416,38 @@ export function importTakeoutConversations(
         // leaving it would show a conversation as built from entries whose
         // turns are no longer in it. Links made by hand are untouched: gluing
         // is the owner's decision and re-running an import must not reverse it.
+        // Every snapshot of this conversation, not only the one whose turns
+        // were written: they are the record of how it got here, and the reason
+        // a wrong grouping can be taken apart later.
+        const snapshotIds = plan.snapshots
+          .map((snapshot) => {
+            const opening =
+              snapshot.turns.find((t) => t.role === 'user')?.text ?? snapshot.query;
+            return entryIdByRef.get(
+              takeoutEntryRef(opening, snapshot.timestamp, {
+                turns: snapshot.turns,
+                images: snapshot.imageFiles,
+                href: snapshot.href,
+              }),
+            );
+          })
+          .filter((id): id is number => id !== undefined);
+        const keepList = snapshotIds.length > 0 ? snapshotIds : [entryId];
+        const placeholders = keepList.map(() => '?').join(',');
         const { changes } = db
           .prepare(
             `DELETE FROM chat_sources
-               WHERE chat_id = ? AND source_entry_id <> ? AND linked_by = 'import'`,
+               WHERE chat_id = ? AND source_entry_id NOT IN (${placeholders})
+                 AND linked_by = 'import'`,
           )
-          .run(chatId, entryId);
+          .run(chatId, ...keepList);
         result.regrouped += Number(changes);
-        db.prepare(
+        const link = db.prepare(
           `INSERT INTO chat_sources (chat_id, source_entry_id, linked_by)
            VALUES (?, ?, 'import')
            ON CONFLICT (chat_id, source_entry_id) DO NOTHING`,
-        ).run(chatId, entryId);
+        );
+        for (const id of keepList) link.run(chatId, id);
       }
     }
     db.exec('COMMIT');

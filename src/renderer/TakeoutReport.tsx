@@ -62,11 +62,27 @@ export default function TakeoutReport({ report, busy, onApply, onClose }: Props)
           {report.folder}
         </p>
 
-        <h3>Threads</h3>
+        {/* "Conversations", not "threads" and not "entries". The export records
+            one entry per submission, so entry counts are several times larger
+            than the number of conversations and reading them as threads is
+            simply wrong — 1779 of them for an account holding about 300. */}
+        <h3>Conversations</h3>
         <p className="report-figure new">+{sweep.wouldCreate} new</p>
         <p className="report-figure">
           ={existing} already here
           <span className="report-aside"> — re-read and refreshed, not duplicated</span>
+        </p>
+        <p className="report-note">
+          From {sweep.entries} entries in the file, describing {sweep.conversations}{' '}
+          conversations
+          {sweep.snapshotsFolded > 0 && (
+            <>
+              {' '}— {sweep.snapshotsFolded} of those entries are earlier snapshots of a
+              conversation another entry carries further, folded in rather than made into
+              conversations of their own
+            </>
+          )}
+          .
         </p>
         {sweep.ambiguous > 0 && (
           <p className="report-figure warn">
@@ -108,6 +124,18 @@ export default function TakeoutReport({ report, busy, onApply, onClose }: Props)
             {scan.noDateText > 0 && `, ${scan.noDateText} carry no date at all`}
           </dd>
         </dl>
+
+        {/* Always shown. A real entry has one timestamp, one search link and at
+            least one turn; anything else in this list is a cell that is not an
+            entry, and every count above is then measuring the wrong thing. */}
+        <h3>Cell shapes</h3>
+        <ul className="report-shapes">
+          {scan.cellShapes.map((row) => (
+            <li key={row.shape}>
+              <span className="report-shape-count">{row.count}</span> {row.shape}
+            </li>
+          ))}
+        </ul>
 
         {problems > 0 && <h3>Worth knowing</h3>}
 

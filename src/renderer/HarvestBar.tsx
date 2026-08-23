@@ -113,7 +113,9 @@ export default function HarvestBar({
       // The toolbar keeps a single figure and the panel carries the rest. A
       // count is all that fits here, and pretending otherwise is what truncated
       // everything that mattered.
-      setTakeoutNote(`${scan.aiModeEntries} entries — see the report`);
+      setTakeoutNote(
+        `${scan.aiModeEntries} entries, ${sweep.conversations} conversations — see the report`,
+      );
     } catch (err) {
       setTakeoutNote(err instanceof Error ? err.message : String(err));
     } finally {

@@ -874,6 +874,27 @@ button:disabled {
 /* Unreadable date text, quoted verbatim. Monospace because the point is the
    exact characters — where the date is glued to the word before it is visible
    here and nowhere else. */
+/* The shape histogram: a table in all but name, so the counts line up and an
+   outlier is visible without reading every row. */
+.report-shapes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.82rem;
+}
+
+.report-shapes li {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.report-shape-count {
+  min-width: 3.5rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
 .report-samples {
   margin: 0.3rem 0 0;
   padding-left: 1.1rem;

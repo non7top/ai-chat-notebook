@@ -532,5 +532,76 @@ repairScenario(true);
   fs.rmSync(scratch, { recursive: true, force: true });
 }
 
+// ---------------------------------------------------------------------------
+// Snapshots of one conversation, versus two conversations that merely open the
+// same way.
+//
+// This is the distinction both earlier attempts got wrong in opposite
+// directions: one conversation per entry turned 981 entries into 736 phantom
+// chats, and grouping by opening prompt collapsed genuinely separate
+// conversations into one. Prefix consistency decides it without guessing, and
+// all three cases are checked here because getting any one of them wrong looks
+// like ordinary success.
+{
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'notebook-plan-'));
+  db.initDb(scratch);
+  const entry = (ts: string, turns: { role: 'user' | 'ai'; text: string; html: string }[]) => ({
+    query: turns[0].text,
+    timestamp: ts,
+    timestampText: null,
+    href: null,
+    turns,
+    imageFiles: [],
+  });
+
+  const q = turn('user', 'how do sprites get generated');
+  const a1 = turn('ai', 'first answer');
+  const q2 = turn('user', 'and the palette?');
+  const a2 = turn('ai', 'about palettes');
+
+  // Three snapshots of ONE conversation: each is the previous plus more.
+  const snap1 = entry('2026-08-19T01:00:00+07:00', [q, a1]);
+  const snap2 = entry('2026-08-19T02:00:00+07:00', [q, a1, q2]);
+  const snap3 = entry('2026-08-19T03:00:00+07:00', [q, a1, q2, a2]);
+  // Same opening, different answer — a separate conversation, or Google's clone.
+  const diverged = entry('2026-08-20T01:00:00+07:00', [q, turn('ai', 'a different answer')]);
+  // Its own snapshot, which must attach to IT and not to the first chain.
+  const divergedLater = entry('2026-08-20T02:00:00+07:00', [
+    q,
+    turn('ai', 'a different answer'),
+    turn('user', 'follow up'),
+  ]);
+
+  const plans = db.planConversations([snap2, diverged, snap1, divergedLater, snap3] as never);
+  console.log(
+    '\nplans:',
+    plans.map((p) => `${p.snapshots.length} snapshots → ${p.best.turns.length} turns`),
+  );
+  if (plans.length !== 2) throw new Error(`expected 2 conversations, got ${plans.length}`);
+  const sizes = plans.map((p) => p.snapshots.length).sort((a, b) => a - b);
+  if (sizes[0] !== 2 || sizes[1] !== 3) {
+    throw new Error(`snapshots should split 3 and 2, got ${sizes.join('/')}`);
+  }
+  // The longest snapshot is the conversation; the shorter ones are its history.
+  const longest = plans.map((p) => p.best.turns.length).sort((a, b) => b - a);
+  if (longest[0] !== 4 || longest[1] !== 3) {
+    throw new Error(`furthest-along snapshots should be 4 and 3 turns, got ${longest.join('/')}`);
+  }
+  // Order of arrival must not change the outcome — the export is not sorted.
+  const shuffled = db.planConversations([snap3, divergedLater, snap1, diverged, snap2] as never);
+  if (shuffled.length !== plans.length) {
+    throw new Error('the grouping depends on the order entries arrive in');
+  }
+
+  // The same question asked twice with identical answers is indistinguishable
+  // from one conversation logged twice, and is deliberately treated as one:
+  // there is nothing in the text to tell them apart, and inventing a second
+  // conversation would be a guess in the other direction.
+  const twice = db.planConversations([snap1, entry('2026-08-25T00:00:00+07:00', [q, a1])] as never);
+  console.log('identical entries collapse to:', twice.length);
+  if (twice.length !== 1) throw new Error('identical entries should not make two conversations');
+  fs.rmSync(scratch, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('OK');

@@ -237,6 +237,14 @@ export interface SourceEntryView {
 export interface TakeoutPreview {
   entries: number;
   /**
+   * Conversations those entries describe. The export records one entry per
+   * submission, each holding the conversation so far, so this is far smaller
+   * than `entries` — and it is the number that means anything.
+   */
+  conversations: number;
+  /** Earlier snapshots folded into a later one instead of becoming conversations. */
+  snapshotsFolded: number;
+  /**
    * Entries with no opening prompt. Still stored — nothing is dropped — and
    * listed under Orphan entries for review rather than made into conversations.
    */

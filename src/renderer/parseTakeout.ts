@@ -126,6 +126,19 @@ export interface TakeoutScan {
    * the number of timestamps and links inside it can.
    */
   largestEntry: { turns: number; stamps: number; links: number };
+  /**
+   * Cells grouped by their shape — how many timestamps, search links and turns
+   * each holds — commonest first.
+   *
+   * The decisive diagnostic for a cell count that does not match the number of
+   * conversations. A real entry has exactly one timestamp, one search link and
+   * at least one turn. If most cells are missing one of those, they are not
+   * entries: they are fragments of one, and the container being counted is the
+   * wrong element. Ratios alone cannot say which — 3085 cells against a file
+   * holding about 1000 entries could be three cells per entry or one entry in
+   * three pieces — but the shapes can.
+   */
+  cellShapes: { shape: string; count: number }[];
   /** Undated entries carrying no date-like text at all — a gap in the export. */
   noDateText: number;
   /** Undated entries that DO carry date text — a gap in the parser instead. */
@@ -308,6 +321,19 @@ export function parseTakeoutHtml(html: string): { entries: TakeoutEntry[]; scan:
       multiStampEntries: perCell.filter((c) => c.stamps > 1).length,
       maxStamps: perCell.reduce((most, c) => Math.max(most, c.stamps), 0),
       largestEntry: biggest,
+      cellShapes: (() => {
+        const tally = new Map<string, number>();
+        for (const cell of perCell) {
+          const shape = `${cell.stamps} date${cell.stamps === 1 ? '' : 's'}, ${cell.links} link${
+            cell.links === 1 ? '' : 's'
+          }, ${cell.turns} turn${cell.turns === 1 ? '' : 's'}`;
+          tally.set(shape, (tally.get(shape) ?? 0) + 1);
+        }
+        return [...tally.entries()]
+          .map(([shape, count]) => ({ shape, count }))
+          .sort((a, b) => b.count - a.count)
+          .slice(0, 8);
+      })(),
       noDateText: undated.length - unparsed.length,
       unparsedDateText: unparsed.length,
       // Dates only — no conversation text. The owner has asked that the
