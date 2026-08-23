@@ -457,45 +457,72 @@ function activityOf(bodyText: string, turns: TakeoutTurn[]): TakeoutEntry['activ
   return 'other';
 }
 
-export function parseTakeoutHtml(html: string): { entries: TakeoutEntry[]; scan: TakeoutScan } {
+/** Told as the scan runs, so a 30MB export does not look like a hung window. */
+export interface ParseProgress {
+  phase: 'parsing' | 'reading' | 'done';
+  done: number;
+  total: number;
+}
+
+export async function parseTakeoutHtml(
+  html: string,
+  onProgress?: (progress: ParseProgress) => void,
+): Promise<{ entries: TakeoutEntry[]; scan: TakeoutScan }> {
+  onProgress?.({ phase: 'parsing', done: 0, total: 0 });
+  // Yield before the expensive part, so the caller's "reading…" state actually
+  // paints before the thread is taken for several seconds.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
   const doc = new DOMParser().parseFromString(html, 'text/html');
   // The documented Takeout container. Falling back to a heuristic would risk
   // silently repeating the truncation bug, so an unexpected layout should show
   // as zero entries and be dealt with deliberately.
   const cells = Array.from(doc.querySelectorAll('div.outer-cell'));
-  const all = cells.map(entryFrom);
-  const entries = all.filter((e) => /ai mode/i.test(e.product));
-
-  // A cell inside another cell would be counted twice, and would explain a
-  // total that grew without the history growing. Checked rather than assumed:
-  // the entry count tripled between two exports and only the previous total's
-  // worth of entries had dates, which is the shape over-counting makes.
-  const nested = cells.filter((cell) => cell.parentElement?.closest('div.outer-cell')).length;
   const titleNodes = Array.from(doc.querySelectorAll('p.mdl-typography--title'));
   const titles = titleNodes.length;
   const aiModeTitles = titleNodes.filter((node) => /ai mode/i.test(node.textContent ?? '')).length;
 
-  // How many submissions each cell actually holds. Counted from timestamps
-  // because a submission has exactly one, and from search links because it also
-  // has exactly one — two independent readings of the same question.
-  const stampsIn = (cell: Element): number => countTimestamps(clean(cell.textContent));
-  const linksIn = (cell: Element): number =>
-    cell.querySelectorAll('a[href*="q="]').length;
+  // ONE pass, and one serialisation of each cell.
+  //
+  // This was four or five passes over a 30MB document: entryFrom took each
+  // cell's textContent, the fingerprint took its innerHTML, the shape histogram
+  // took textContent again, and the timestamp count took it a third time. On a
+  // real export that is half a minute of a frozen window with nothing on screen
+  // to say why — which is the part that made it feel broken rather than slow.
+  const all: TakeoutEntry[] = [];
+  const perCell: { stamps: number; links: number; turns: number }[] = [];
+  let nested = 0;
+  for (let index = 0; index < cells.length; index += 1) {
+    const cell = cells[index];
+    if (cell.parentElement?.closest('div.outer-cell')) nested += 1;
+    const entry = entryFrom(cell);
+    all.push(entry);
+    perCell.push({
+      stamps: countTimestamps(clean(cell.textContent)),
+      links: cell.querySelectorAll('a[href*="q="]').length,
+      turns: entry.turns.length,
+    });
 
-  const perCell = cells.map((cell, index) => ({
-    stamps: stampsIn(cell),
-    links: linksIn(cell),
-    turns: all[index]?.turns.length ?? 0,
-  }));
+    // Every few hundred cells, hand the thread back so the window can paint and
+    // the count can move. The interval is a compromise: yielding per cell would
+    // add thousands of macrotasks and slow the whole thing down measurably.
+    if (index % 250 === 249) {
+      onProgress?.({ phase: 'reading', done: index + 1, total: cells.length });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  onProgress?.({ phase: 'reading', done: cells.length, total: cells.length });
+
+  const entries = all.filter((e) => /ai mode/i.test(e.product));
+  const undated = entries.filter((e) => !e.timestamp);
+  const unparsed = undated.filter((e) => e.timestampText);
   const biggest = perCell.reduce(
     (best, one) => (one.turns > best.turns ? one : best),
     { turns: 0, stamps: 0, links: 0 },
   );
-
-  const undated = entries.filter((e) => !e.timestamp);
-  const unparsed = undated.filter((e) => e.timestampText);
-
   const counts = entries.map((e) => e.turns.length).sort((a, b) => a - b);
+
+  onProgress?.({ phase: 'done', done: cells.length, total: cells.length });
   return {
     entries,
     scan: {
@@ -539,8 +566,6 @@ export function parseTakeoutHtml(html: string): { entries: TakeoutEntry[]; scan:
       })(),
       noDateText: undated.length - unparsed.length,
       unparsedDateText: unparsed.length,
-      // Dates only — no conversation text. The owner has asked that the
-      // contents not be read, and a date is not content.
       unparsedDateSamples: unparsed.slice(0, 5).map((e) => e.timestampText ?? ''),
       emptyCells: all.filter((e) => !e.query && e.turns.length === 0 && e.images.length === 0)
         .length,

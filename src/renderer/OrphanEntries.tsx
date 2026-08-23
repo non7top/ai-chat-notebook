@@ -5,6 +5,8 @@ import { displayDateTime } from './dateDisplay';
 
 interface Props {
   onChange: () => void;
+  /** Opening a link drives the live panel, so it has to be on screen. */
+  onNeedPanel: () => void;
 }
 
 /**
@@ -17,7 +19,9 @@ interface Props {
  * anything is decided about it, and adopting one gives it its own conversation
  * with its own id.
  */
-export default function OrphanEntries({ onChange }: Props) {
+export default function OrphanEntries({ onChange, onNeedPanel }: Props) {
+  const [note, setNote] = useState<string | null>(null);
+  const [busy, setBusy] = useState<number | null>(null);
   const [entries, setEntries] = useState<SourceEntryView[]>([]);
   const [openId, setOpenId] = useState<number | null>(null);
   const [turns, setTurns] = useState<Message[]>([]);
@@ -45,6 +49,7 @@ export default function OrphanEntries({ onChange }: Props) {
           ? 'No orphan entries — every stored entry belongs to a thread.'
           : `${entries.length} ${entries.length === 1 ? 'entry' : 'entries'} attached to no thread.`}
       </p>
+      {note && <p className="status-line">{note}</p>}
       {entries.map((entry) => (
         <div key={entry.id} className="orphan">
           <div className="orphan-head">
@@ -68,6 +73,39 @@ export default function OrphanEntries({ onChange }: Props) {
                 ? `${entry.imageCount} ${entry.imageCount === 1 ? 'image' : 'images'}`
                 : 'no image'}
             </span>
+            {/* Only for entries that HAVE a link. Lens searches and blank
+                records carry none, and the button would be a dead end. */}
+            {entry.href && (
+              <button
+                type="button"
+                disabled={busy !== null}
+                title="Open this entry's own link in the panel and capture the thread. Refuses to store anything if the page re-runs the prompt instead of opening the thread."
+                onClick={async () => {
+                  setBusy(entry.id);
+                  setNote(null);
+                  onNeedPanel();
+                  try {
+                    const result = await window.notebook.captureFromEntryLink(entry.id);
+                    setNote(
+                      result.rejected
+                        ? `Not stored — ${result.rejected}`
+                        : `Captured ${result.turns} turns, ${result.images} images ` +
+                          `(matched the export at ${result.distance} of 64 bits apart).`,
+                    );
+                    if (!result.rejected) {
+                      reload();
+                      onChange();
+                    }
+                  } catch (err) {
+                    setNote(err instanceof Error ? err.message : String(err));
+                  } finally {
+                    setBusy(null);
+                  }
+                }}
+              >
+                {busy === entry.id ? 'Opening…' : 'Open link'}
+              </button>
+            )}
             <button
               type="button"
               title="Adopt: give this entry a thread of its own"

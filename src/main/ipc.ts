@@ -17,6 +17,7 @@ import {
   cancelHarvest,
   captureTurns,
   harvestThreadList,
+  captureFromEntryLink,
   openChatInPanel,
   recaptureChat,
 } from './harvest';
@@ -59,6 +60,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('entries:adopt', (_event, entryId: number, folderId: number | null) =>
     db.adoptSourceEntry(entryId, folderId),
   );
+  // Navigates the live panel, so it needs the panel on screen — and it is the one
+  // route with a history of doing harm if the link re-runs rather than opens.
+  // captureFromEntryLink checks the page against the export's own reading before
+  // storing anything; see the note on it.
+  ipcMain.handle('entries:openLink', (_event, entryId: number) => captureFromEntryLink(entryId));
   ipcMain.handle('chats:similar', (_event, id: number) => db.similarChats(id));
   ipcMain.handle('chats:merge', (_event, keepId: number, mergeIds: number[]) =>
     db.mergeChats(keepId, mergeIds),

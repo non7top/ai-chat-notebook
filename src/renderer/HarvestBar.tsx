@@ -106,7 +106,19 @@ export default function HarvestBar({
     try {
       const picked = await window.notebook.pickTakeout();
       if (!picked) return;
-      const { entries, scan } = parseTakeoutHtml(picked.html);
+      // Progress reported as it goes. A 30MB export takes seconds to read, and
+      // with nothing on screen saying so the window reads as hung — which is the
+      // complaint, more than the wait itself.
+      const { entries, scan } = await parseTakeoutHtml(picked.html, (progress) => {
+        setTakeoutNote(
+          progress.phase === 'parsing'
+            ? 'Reading the export…'
+            : progress.total > 0
+              ? `Reading ${progress.done} of ${progress.total} records…`
+              : 'Reading the export…',
+        );
+      });
+      setTakeoutNote('Checking against what is already here…');
       setTakeout(picked);
       // The sweep. Reads only, and goes through the same placement rule the
       // import uses, so it describes the import that will actually run.
@@ -129,7 +141,14 @@ export default function HarvestBar({
     if (!takeout) return;
     setTakeoutBusy(true);
     try {
-      const { entries } = parseTakeoutHtml(takeout.html);
+      const { entries } = await parseTakeoutHtml(takeout.html, (progress) => {
+        setTakeoutNote(
+          progress.total > 0
+            ? `Reading ${progress.done} of ${progress.total} records…`
+            : 'Reading the export…',
+        );
+      });
+      setTakeoutNote('Importing…');
       const summary = await window.notebook.applyTakeout(
         takeout.folder,
         importRows(entries),

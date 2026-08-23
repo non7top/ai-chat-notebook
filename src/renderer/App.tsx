@@ -165,7 +165,7 @@ export default function App() {
           </div>
         ) : scope.kind === 'orphans' ? (
           <div className="pane pane-orphans">
-            <OrphanEntries onChange={reloadAll} />
+            <OrphanEntries onChange={reloadAll} onNeedPanel={() => setPanelVisible(true)} />
           </div>
         ) : (
           <>

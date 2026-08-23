@@ -249,6 +249,11 @@ export function initDb(userDataPath: string): void {
 }
 
 /** Adds a contributing source without losing the ones already recorded. */
+/** Exported as noteChatSource for callers outside this module. */
+export function noteChatSource(chatId: number, source: string): void {
+  noteSource(chatId, source);
+}
+
 function noteSource(chatId: number, source: string): void {
   const row = db.prepare('SELECT sources FROM chats WHERE id = ?').get(chatId) as unknown as
     | { sources: string | null }
@@ -2030,6 +2035,46 @@ export function attachEntryImage(ref: string, relativePath: string): void {
     JSON.stringify(payload),
     row.id,
   );
+}
+
+export interface EntryToOpen {
+  id: number;
+  href: string | null;
+  query: string | null;
+  /** The export's own reading, to check the page against. */
+  fingerprint: string | null;
+  chatId: number | null;
+}
+
+/** An entry's link and its own reading, for opening it in the panel. */
+export function getEntryToOpen(entryId: number): EntryToOpen | null {
+  const row = db
+    .prepare(
+      `SELECT e.id, e.href, e.query, e.payload_json,
+              (SELECT cs.chat_id FROM chat_sources cs
+                 JOIN chats c ON c.id = cs.chat_id
+                WHERE cs.source_entry_id = e.id AND c.merged_into IS NULL
+                LIMIT 1) AS chat_id
+         FROM source_entries e WHERE e.id = ?`,
+    )
+    .get(entryId) as
+    | { id: number; href: string | null; query: string | null; payload_json: string; chat_id: number | null }
+    | undefined;
+  if (!row) return null;
+  let fingerprint: string | null = null;
+  try {
+    const payload = JSON.parse(row.payload_json) as { textFingerprint?: string };
+    fingerprint = payload.textFingerprint ?? null;
+  } catch {
+    fingerprint = null;
+  }
+  return {
+    id: row.id,
+    href: row.href,
+    query: row.query,
+    fingerprint,
+    chatId: row.chat_id,
+  };
 }
 
 /** Gives an orphan entry a conversation of its own. */

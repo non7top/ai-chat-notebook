@@ -1,6 +1,7 @@
 import { BrowserWindow } from 'electron';
 import * as db from './db';
-import { ensureOnAiMode } from './aiModeView';
+import { hammingDistance, openingFingerprint } from '../shared/fingerprint.ts';
+import { ensureOnAiMode, navigateAiMode } from './aiModeView';
 import { assetHref, storeImage } from './assets';
 import {
   ensureHistorySidebarOpen,
@@ -244,6 +245,24 @@ async function captureOneChat(chat: { id: number; externalId: string; title: str
 }> {
   await ensureHistorySidebarOpen();
   await openThreadById(chat.externalId);
+  return storeRenderedThread(chat.id);
+}
+
+/**
+ * Reads whatever thread the panel is currently showing and stores it.
+ *
+ * Split out so the Takeout-link route uses the same code as the sidebar route
+ * rather than a second copy of it: the image pipeline, the settle check, the
+ * date, and the refusal to store a half-rendered thread all have to behave
+ * identically, and a parallel implementation would drift on the first one of
+ * them that changed.
+ */
+async function storeRenderedThread(chatId: number): Promise<{
+  turns: number;
+  images: number;
+  skipped: number;
+  failed: number;
+}> {
   await waitForTurnsToSettle();
   const { turns } = await readTurns();
 
@@ -309,11 +328,11 @@ async function captureOneChat(chat: { id: number; externalId: string; title: str
     });
   }
 
-  db.replaceTurns(chat.id, toSave, assets);
+  db.replaceTurns(chatId, toSave, assets);
   // After the turns, because replaceTurns writes the placeholder date for a
   // thread that has none — and this is the better answer where the panel gave
   // one.
-  if (panelDate) db.setPanelDate(chat.id, panelDate);
+  if (panelDate) db.setPanelDate(chatId, panelDate);
   return { turns: toSave.length, images, skipped, failed };
 }
 
@@ -372,6 +391,92 @@ export async function recaptureChat(chatId: number): Promise<{ turns: number; im
  * mints a new conversation. Reads nothing and stores nothing — this is "take me
  * there", not a capture.
  */
+export interface LinkCaptureResult {
+  /** How far the page's own opening is from the export's reading, 0 to 64. */
+  distance: number;
+  /** Set when the page did not show the thread the entry describes. */
+  rejected: string | null;
+  chatId: number | null;
+  turns: number;
+  images: number;
+}
+
+/**
+ * Opens an export entry by its own link and captures what the page shows.
+ *
+ * This route exists because the sidebar only lists a few hundred threads while
+ * the export holds 2026 records with a link — so most of the archive is reachable
+ * this way and no other. It is also the one route with a documented history of
+ * doing harm: navigating one of these links was reported to RE-RUN the prompt
+ * rather than open the thread, which costs a real query, produces a different
+ * answer, and once created a duplicate conversation in the owner's live history.
+ * The owner has since established that a properly authenticated session opens the
+ * thread intact, generated images included, and the panel is authenticated.
+ *
+ * Both accounts are treated as possible, because the cost of being wrong lands in
+ * someone's account rather than in a log. So the page is CHECKED against the
+ * export's own reading before anything is stored: if the prompt was re-run the
+ * answer differs, the opening fingerprints diverge, and the capture is rejected
+ * with the distance reported rather than written as though it were the thread.
+ *
+ * The threshold is deliberately generous. The export's text is rougher than the
+ * panel's, so a genuine match is not a small distance — measured on real
+ * material, the same thread across the two sources sat at 14 while unrelated
+ * threads sat at 24. Anything at or above 22 is treated as a different answer.
+ */
+const REJECT_AT_DISTANCE = 22;
+
+export async function captureFromEntryLink(entryId: number): Promise<LinkCaptureResult> {
+  const entry = db.getEntryToOpen(entryId);
+  if (!entry) throw new Error(`No source entry ${entryId}`);
+  if (!entry.href) {
+    throw new Error('This entry has no link — Lens searches and blank records carry none.');
+  }
+
+  await navigateAiMode(entry.href);
+  await waitForTurnsToSettle();
+  const { turns } = await readTurns();
+  if (turns.length === 0 || !turns.some((t) => t.role === 'ai')) {
+    throw new Error(`The page showed no answer turns (${turns.length} turn(s) seen)`);
+  }
+
+  const seen = openingFingerprint(turns.map((t) => ({ role: t.role, text: t.text })));
+  const distance = entry.fingerprint ? hammingDistance(entry.fingerprint, seen) : 64;
+
+  // An entry with no stored fingerprint predates it being recorded, and there is
+  // nothing to check against. Refused rather than trusted: the whole point of
+  // this route is that it is only safe when verifiable.
+  if (!entry.fingerprint) {
+    return {
+      distance,
+      rejected:
+        'This entry has no stored reading to check the page against, so there is no way ' +
+        'to tell an opened thread from a re-run prompt. Re-import the export first.',
+      chatId: null,
+      turns: 0,
+      images: 0,
+    };
+  }
+
+  if (distance >= REJECT_AT_DISTANCE) {
+    return {
+      distance,
+      rejected:
+        `The page's answer differs too much from the export's (${distance} of 64 bits). ` +
+        'That is what a re-run prompt looks like, so nothing was stored.',
+      chatId: null,
+      turns: 0,
+      images: 0,
+    };
+  }
+
+  // Only now is there a thread worth writing to.
+  const chatId = entry.chatId ?? db.adoptSourceEntry(entry.id, null).chatId;
+  const stored = await storeRenderedThread(chatId);
+  db.noteChatSource(chatId, 'link');
+  return { distance, rejected: null, chatId, turns: stored.turns, images: stored.images };
+}
+
 export async function openChatInPanel(chatId: number): Promise<void> {
   const chat = db.getChatForCapture(chatId);
   if (!chat) throw new Error(`No chat with id ${chatId}`);

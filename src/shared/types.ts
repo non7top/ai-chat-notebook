@@ -296,6 +296,16 @@ export interface TakeoutPreview {
   chatsTouched: number;
 }
 
+export interface LinkCaptureResult {
+  /** How far the page's opening is from the export's reading, 0 to 64. */
+  distance: number;
+  /** Set when the page did not show the thread the entry describes. */
+  rejected: string | null;
+  chatId: number | null;
+  turns: number;
+  images: number;
+}
+
 export interface NotebookApi {
   /** Reads the Takeout folder only — nothing is stored until applyTakeout. */
   pickTakeout(): Promise<TakeoutPick | null>;
@@ -359,6 +369,14 @@ export interface NotebookApi {
   /** One entry's full stored reading, for review before deciding where it goes. */
   sourceEntryTurns(entryId: number): Promise<Message[]>;
   adoptSourceEntry(entryId: number, folderId: number | null): Promise<{ chatId: number }>;
+  /**
+   * Opens an entry by its own link in the live panel and captures the thread.
+   *
+   * The route to the threads the sidebar no longer lists — most of the archive.
+   * Rejects the capture when the page's answer diverges from the export's, which
+   * is what a re-run prompt looks like, and reports the distance either way.
+   */
+  captureFromEntryLink(entryId: number): Promise<LinkCaptureResult>;
   similarChats(chatId: number): Promise<ChatSummary[]>;
   mergeChats(keepId: number, mergeIds: number[]): Promise<{ merged: number }>;
   unmergeChat(chatId: number): Promise<void>;
