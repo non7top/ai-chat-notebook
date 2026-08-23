@@ -727,10 +727,14 @@ const READ_TURNS_SCRIPT = `
           height: img.naturalHeight,
           kind: kindOf(img),
         }))
-        // Icons and spacers are not conversation content. 120px is above every
-        // UI glyph seen and below every real image. Kept as a floor even with
-        // kinds, since an unclassified image still has to clear it.
-        .filter((i) => i.src && (i.width >= 120 || i.height >= 120));
+        // A floor against spacers and 1px trackers only. It is NOT a way to
+        // tell content from chrome, and the note that used to stand here — "120px
+        // is above every UI glyph seen and below every real image" — was wrong:
+        // site favicons are served at 256px and larger now, so they cleared the
+        // bar comfortably and a thread came back reporting seventeen images of
+        // which none were the pictures it was about. Size cannot answer this
+        // question; kindOf can, which is why it exists.
+        .filter((i) => i.src && (i.width >= 32 || i.height >= 32));
 
     // Strip chrome from a COPY, so the live page is never modified — this runs
     // against the user's real session.

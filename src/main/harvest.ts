@@ -258,6 +258,19 @@ async function captureOneChat(chat: { id: number; externalId: string; title: str
     );
   }
 
+  // The earliest date the panel shows for this thread. Turns arrive in order, so
+  // the first one that carries a date is the thread's start. Anything that is not
+  // a full date is skipped rather than guessed at: the element shows a bare time
+  // for a turn from today, and today is exactly the value a placeholder already
+  // means.
+  const panelDate = (() => {
+    for (const turn of turns) {
+      const parsed = parsePanelStamp(turn.stamp);
+      if (parsed) return parsed;
+    }
+    return null;
+  })();
+
   const toSave: db.TurnToSave[] = [];
   const assets: db.AssetToSave[] = [];
   let images = 0;
@@ -297,6 +310,10 @@ async function captureOneChat(chat: { id: number; externalId: string; title: str
   }
 
   db.replaceTurns(chat.id, toSave, assets);
+  // After the turns, because replaceTurns writes the placeholder date for a
+  // thread that has none — and this is the better answer where the panel gave
+  // one.
+  if (panelDate) db.setPanelDate(chat.id, panelDate);
   return { turns: toSave.length, images, skipped, failed };
 }
 
@@ -306,6 +323,31 @@ async function captureOneChat(chat: { id: number; externalId: string; title: str
  * does not help conversations already in the database, and chatsWithoutTurns
  * deliberately skips anything that has turns.
  */
+/**
+ * A panel timestamp as an ISO date, or null.
+ *
+ * Accepts only the full-date form Google renders for older turns — "August 22,
+ * 2026". The bare-time form ("17:05") is refused deliberately: it means today,
+ * and stamping today's date as though the panel had told us is exactly the false
+ * confidence the placeholder was introduced to avoid.
+ *
+ * Noon rather than midnight, so the day cannot slip backwards when a viewer in a
+ * western timezone reads it — the whole point of a date-only value is the day.
+ */
+function parsePanelStamp(stamp: string | null): string | null {
+  if (!stamp) return null;
+  const match = /^([A-Z][a-z]+) (\d{1,2}), (\d{4})$/.exec(stamp.trim());
+  if (!match) return null;
+  const months = [
+    'january', 'february', 'march', 'april', 'may', 'june',
+    'july', 'august', 'september', 'october', 'november', 'december',
+  ];
+  const month = months.indexOf(match[1].toLowerCase());
+  if (month < 0) return null;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${match[3]}-${pad(month + 1)}-${pad(Number(match[2]))}T12:00:00`;
+}
+
 export async function recaptureChat(chatId: number): Promise<{ turns: number; images: number }> {
   const chat = db.getChatForCapture(chatId);
   if (!chat) throw new Error(`No chat with id ${chatId}`);

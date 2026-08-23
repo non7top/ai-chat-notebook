@@ -82,6 +82,15 @@ export interface ChatDetail extends ChatSummary {
   externalId: string;
   url: string | null;
   messages: Message[];
+  /**
+   * Relative paths of this thread's link previews and source thumbnails.
+   *
+   * The reader renders stored HTML and cannot tell a preview from a generated
+   * image, so they came out at natural size — a thread with thirteen of them
+   * read as a column of giant logos with the answer squeezed between. Kept and
+   * still shown, just small: they are part of what the answer looked like.
+   */
+  previewPaths: string[];
 }
 
 /** Which conversations the list pane is showing. */

@@ -170,9 +170,11 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
                   <span
                     className="date-inferred"
                     title={
-                      chat.dateBasis === 'activity'
-                        ? 'From the activity log, matched by prompt text — not from a thread id'
-                        : 'Inferred by matching the Takeout prompt text — not from a thread id'
+                      chat.dateBasis === 'panel'
+                        ? "Read off the panel's own timestamp — the day only, no time"
+                        : chat.dateBasis === 'activity'
+                          ? 'From the activity log, matched by prompt text — not from a thread id'
+                          : 'Inferred by matching the Takeout prompt text — not from a thread id'
                     }
                   >
                     ~{started}

@@ -67,7 +67,17 @@ function clean(node: Element): void {
   }
 }
 
-export function sanitizeHtml(html: string, assetsBaseUrl?: string): string {
+export function sanitizeHtml(
+  html: string,
+  assetsBaseUrl?: string,
+  /**
+   * Relative paths of images that are page furniture — link previews, source
+   * thumbnails. Marked so the reader can render them small. The class is set
+   * AFTER clean() has run, so it survives the attribute allowlist rather than
+   * needing an exception in it.
+   */
+  previewPaths?: string[],
+): string {
   // DOMParser builds a detached document: nothing here loads a resource or
   // runs a script, unlike assigning to innerHTML on a live node.
   const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -80,6 +90,10 @@ export function sanitizeHtml(html: string, assetsBaseUrl?: string): string {
   if (assetsBaseUrl) {
     for (const img of Array.from(doc.body.querySelectorAll('img[src^="assets/"]'))) {
       const src = img.getAttribute('src') ?? '';
+      // Marked before the path is rewritten, while it still matches what the
+      // database recorded. Page furniture is kept — it is part of what the
+      // answer looked like — but it must not out-shout the answer.
+      if (previewPaths?.includes(src)) img.setAttribute('class', 'preview-image');
       img.setAttribute('src', assetsBaseUrl + src.slice('assets/'.length));
     }
   }

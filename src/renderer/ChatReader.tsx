@@ -313,7 +313,9 @@ export default function ChatReader({ chat, onChange }: Props) {
               // why this is not left to capture time alone.
               <div
                 className="turn-body"
-                dangerouslySetInnerHTML={{ __html: sanitizeHtml(message.html, assetsBase) }}
+                dangerouslySetInnerHTML={{
+                  __html: sanitizeHtml(message.html, assetsBase, chat.previewPaths),
+                }}
               />
             ) : (
               <div className="turn-body">{message.text}</div>

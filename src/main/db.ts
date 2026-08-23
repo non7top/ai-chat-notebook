@@ -522,11 +522,27 @@ export function getChat(id: number): ChatDetail | null {
     html: m.html,
   }));
 
+  // Which of this thread's images are page furniture rather than content.
+  //
+  // The reader renders the stored HTML and cannot tell one <img> from another,
+  // so a rich link preview came out at its natural size — a thread with thirteen
+  // of them was mostly a column of giant YouTube buttons with the answer
+  // squeezed between them. The kinds are known here, so the reader is told which
+  // paths to render small.
+  const previewPaths = (
+    db
+      .prepare("SELECT local_path FROM assets WHERE chat_id = ? AND kind = 'other'")
+      .all(id) as unknown as { local_path: string }[]
+  )
+    .map((a) => assetHrefFor(a.local_path))
+    .filter((href): href is string => href !== null);
+
   return {
     ...toSummary(row),
     externalId: extra?.external_id ?? '',
     url: extra?.url ?? null,
     messages,
+    previewPaths,
   };
 }
 
@@ -1973,6 +1989,28 @@ export function attachExportImage(
  * was the export's own filename, so the orphan list could say an image existed
  * and never show it.
  */
+/**
+ * A date read off the panel, for a thread that has none.
+ *
+ * The panel's own timestamp element is adaptive display text — "17:05" for a turn
+ * from today, "August 22, 2026" for an older one — and it is not rendered for
+ * every turn, which is why it was recorded as unusable and thrown away. That was
+ * too strong: when it does say a date, it is a real one, and a real date to the
+ * day beats a placeholder saying only that the app saved the thread today.
+ *
+ * Only ever improves on a placeholder or on nothing. An export's date wins,
+ * because it is precise to the second while this is precise to the day, and a
+ * coarser fact must not overwrite a finer one.
+ */
+export function setPanelDate(chatId: number, isoDate: string): void {
+  db.prepare(
+    `UPDATE chats
+        SET started_at = ?, date_basis = 'panel'
+      WHERE id = ?
+        AND (started_at IS NULL OR date_basis = 'placeholder')`,
+  ).run(isoDate, chatId);
+}
+
 export function attachEntryImage(ref: string, relativePath: string): void {
   const row = db
     .prepare("SELECT id, payload_json FROM source_entries WHERE kind = 'takeout' AND external_ref = ?")

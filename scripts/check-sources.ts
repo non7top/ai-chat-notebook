@@ -292,6 +292,17 @@ repairScenario(true);
     throw new Error('the placeholder survived a real date — it must be displaced');
   }
 
+  // A date read off the panel replaces a placeholder, and an export's date then
+  // replaces THAT: the panel gives the day, the export gives the second, and a
+  // coarser fact must not overwrite a finer one.
+  const panelOnly = db.listChats({ kind: 'all' })[0];
+  db.setPanelDate(panelOnly.id, '2026-08-18T12:00:00');
+  const afterPanel = db.listChats({ kind: 'all' })[0];
+  console.log('panel date over a real one:', `${afterPanel.startedAt} basis=${afterPanel.dateBasis}`);
+  if (afterPanel.dateBasis !== 'takeout') {
+    throw new Error('a day-precision panel date overwrote a second-precision export date');
+  }
+
   // And a real date is not downgraded by a later capture.
   db.replaceTurns(chat.id, [{ seq: 0, role: 'user', text: 'again', html: null }], []);
   const after = db.listChats({ kind: 'all' }).find((c) => c.id === chat.id);

@@ -775,6 +775,21 @@ button:disabled {
   text-decoration: underline;
 }
 
+/* A site favicon or source thumbnail, shown at the size it is meant to be read
+   at rather than the size it was served at.
+
+   These are mostly favicons, and favicons are shipped at 256px and larger now —
+   so at natural size a thread with thirteen of them was a column of giant logos
+   with the answer squeezed between. Sized to the surrounding text and set
+   inline, because that is what they are: an icon beside a cited source. Kept
+   rather than dropped, since they are part of what the answer looked like. */
+.turn-body img.preview-image {
+  max-width: 1.25em;
+  max-height: 1.25em;
+  vertical-align: -0.2em;
+  object-fit: contain;
+}
+
 /* ----------------------------------------------------------------- report */
 
 /* The export report. Takes the list and reader panes together: it is prose and
