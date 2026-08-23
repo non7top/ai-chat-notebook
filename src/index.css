@@ -370,14 +370,21 @@ button:disabled {
   line-height: 1.55;
 }
 
-/* The question: tinted, boxed, narrower than the answer, and pushed to the
-   right. Side alone then identifies the speaker, which survives skim-reading a
-   long conversation better than colour does. */
+/* The question: tinted, boxed, hugging its own text, and pushed to the right.
+   Side alone then identifies the speaker, which survives skim-reading a long
+   conversation better than colour does.
+
+   fit-content is what makes it a bubble. A max-width alone left it a block, so a
+   fifteen-character question still drew a 46rem bar across the pane — nothing
+   like AI Mode, where the bubble ends where the words do. The max-width stays as
+   the ceiling for the long ones, which do exist: some prompts run past 2000
+   characters. */
 .turn-user .turn-body {
   background: #eef2ff;
   border: 1px solid #c7d2fe;
   border-radius: 8px;
   padding: 0.55rem 0.75rem;
+  width: fit-content;
   max-width: 46rem;
   margin-left: auto;
 }
