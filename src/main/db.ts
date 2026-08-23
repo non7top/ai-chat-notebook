@@ -98,6 +98,42 @@ export function initDb(userDataPath: string): void {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS assets_chat_sha ON assets(chat_id, sha256);
 
+    -- Every source record, preserved verbatim and never grouped, edited or
+    -- deduplicated. This is the durable layer: conversations are a CURATED VIEW
+    -- over these, so a wrong grouping is re-derivable without re-importing, and
+    -- a glue that turns out to join two separate conversations can be undone
+    -- without having lost either.
+    --
+    -- Learned the hard way. Every automatic grouping rule tried here was wrong
+    -- in at least one real case — collapsing distinct conversations that opened
+    -- alike, or discarding the second of two identical prompts entirely. Keeping
+    -- the originals means those mistakes cost a re-derivation rather than data.
+    CREATE TABLE IF NOT EXISTS source_entries (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      -- 'takeout' | 'capture' | 'harvest'
+      kind         TEXT NOT NULL,
+      -- Whatever the source calls it: a Google thread id, or opening+timestamp
+      -- for an export entry that carries no id at all.
+      external_ref TEXT NOT NULL,
+      query        TEXT,
+      query_key    TEXT,
+      occurred_at  TEXT,
+      href         TEXT,
+      -- The entry exactly as parsed: turns, image names, everything.
+      payload_json TEXT NOT NULL,
+      imported_at  TEXT NOT NULL,
+      UNIQUE(kind, external_ref)
+    );
+    CREATE INDEX IF NOT EXISTS source_entries_key ON source_entries(query_key);
+
+    -- Which source records a conversation was built from. Many-to-one, because
+    -- gluing several entries into one conversation is expected.
+    CREATE TABLE IF NOT EXISTS chat_sources (
+      chat_id         INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+      source_entry_id INTEGER NOT NULL REFERENCES source_entries(id) ON DELETE CASCADE,
+      PRIMARY KEY (chat_id, source_entry_id)
+    );
+
     -- Takeout entries. Deliberately NOT chats: an export carries no thread id,
     -- so nothing in it can identify a conversation, and an importer that
     -- created chats from it invented 736 of them out of 981 entries — mostly
@@ -686,60 +722,69 @@ export function importTakeoutConversations(
     turnsWritten: 0,
   };
 
-  // Group entries into conversations, then keep the fullest snapshot of each.
+  // NO automatic grouping. Successive snapshots of one conversation, the same
+  // query asked twice, and Google's own clones are indistinguishable without
+  // judgement, and every automatic rule tried here was wrong in one of those
+  // three cases — collapsing distinct conversations, or discarding one
+  // outright. Each entry is therefore imported in full and kept reviewable, and
+  // gluing them together is a deliberate action (see mergeChats).
   //
-  // Grouping by opening prompt ALONE loses data: the same query may have been
-  // asked twice, producing two genuinely different conversations, and Google
-  // sometimes clones an entry as well. Keeping only the longest per prompt would
-  // silently discard the other conversation entirely.
-  //
-  // So entries join a group only if their turn sequences do not contradict each
-  // other — one being a prefix of the other, which is what successive snapshots
-  // of the same conversation look like. Divergence at any turn starts a new
-  // group.
-  const norm = (t: string) => t.toLowerCase().replace(/\s+/g, ' ').trim();
-  const sequence = (row: TakeoutImportRow) => row.turns.map((t) => `${t.role}:${norm(t.text)}`);
-  const compatible = (a: string[], b: string[]) => {
-    const shared = Math.min(a.length, b.length);
-    for (let i = 0; i < shared; i += 1) if (a[i] !== b[i]) return false;
-    return true;
-  };
-
-  const groups: { key: string; seq: string[]; row: TakeoutImportRow; members: number }[] = [];
+  // The cost is more rows than conversations; the benefit is that nothing is
+  // silently lost or silently welded, and the duplicates are visible.
+  const best = new Map<string, { row: TakeoutImportRow; members: number }>();
   for (const row of rows) {
     const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
     if (!opening.trim()) continue;
-    const key = contentKeyFor(opening);
-    const seq = sequence(row);
-    const group = groups.find((g) => g.key === key && compatible(g.seq, seq));
-    if (!group) {
-      groups.push({ key, seq, row, members: 1 });
-      continue;
-    }
-    group.members += 1;
-    // Keep the longer reading; it is the conversation further along.
-    if (seq.length > group.seq.length) {
-      group.seq = seq;
-      group.row = row;
-    }
+    // Opening plus exact time: one row per submission, so asking the same thing
+    // twice yields two conversations rather than one overwriting the other.
+    best.set(`${contentKeyFor(opening)}@${row.timestamp ?? 'nodate'}`, { row, members: 1 });
   }
-  const best = new Map<string, { row: TakeoutImportRow; members: number }>();
-  groups.forEach((g, index) => {
-    // Distinct groups sharing an opening need distinct handles.
-    const handle = groups.filter((o) => o.key === g.key).length > 1 ? `${g.key}#${index}` : g.key;
-    best.set(handle, { row: g.row, members: g.members });
-  });
   result.conversations = best.size;
+
+  // Preserve every entry first, before any interpretation of it. If the
+  // grouping below is wrong, this is what makes it fixable without going back
+  // to the export.
+  const keepEntry = db.prepare(
+    `INSERT OR IGNORE INTO source_entries
+       (kind, external_ref, query, query_key, occurred_at, href, payload_json, imported_at)
+     VALUES ('takeout', ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const findEntry = db.prepare(
+    "SELECT id FROM source_entries WHERE kind = 'takeout' AND external_ref = ?",
+  );
+  const entryIdByRef = new Map<string, number>();
+  db.exec('BEGIN');
+  try {
+    const now = new Date().toISOString();
+    for (const row of rows) {
+      const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+      if (!opening.trim()) continue;
+      const ref = `${contentKeyFor(opening)}@${row.timestamp ?? 'nodate'}`;
+      keepEntry.run(
+        ref,
+        row.query,
+        contentKeyFor(opening),
+        row.timestamp,
+        row.href,
+        JSON.stringify({ turns: row.turns, images: row.imageFiles }),
+        now,
+      );
+      const found = findEntry.get(ref) as unknown as { id: number } | undefined;
+      if (found) entryIdByRef.set(ref, found.id);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
 
   db.exec('BEGIN');
   try {
-    for (const [groupKey, { row, members }] of best) {
+    for (const [, { row, members }] of best) {
       const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
-      // groupKey may carry a "#n" suffix distinguishing conversations that share
-      // an opening; content_key must stay the plain hash so duplicate detection
-      // still finds them.
+      // content_key stays the plain hash of the opening, so conversations that
+      // start alike remain findable as candidates for gluing.
       const key = contentKeyFor(opening);
-      const isAmbiguousGroup = groupKey.includes('#');
 
       // Prefer an existing conversation with this opening — but the opening
       // prompt is NOT an identity. Two conversations can start with the same
@@ -768,7 +813,7 @@ export function importTakeoutConversations(
       };
 
       let chatId: number;
-      if (!isAmbiguousGroup && candidates.length === 1 && agreesWith(candidates[0].id)) {
+      if (candidates.length === 1 && agreesWith(candidates[0].id)) {
         chatId = candidates[0].id;
         if (candidates[0].source === 'capture') {
           // The panel version wins on content: it has the uploads and generated
@@ -847,6 +892,13 @@ export function importTakeoutConversations(
       });
       result.turnsWritten += row.turns.length;
       noteSource(chatId, 'takeout');
+      const openingRef = `${key}@${row.timestamp ?? 'nodate'}`;
+      const entryId = entryIdByRef.get(openingRef);
+      if (entryId !== undefined) {
+        db.prepare(
+          'INSERT OR IGNORE INTO chat_sources (chat_id, source_entry_id) VALUES (?, ?)',
+        ).run(chatId, entryId);
+      }
     }
     db.exec('COMMIT');
   } catch (error) {
@@ -854,6 +906,50 @@ export function importTakeoutConversations(
     throw error;
   }
   return result;
+}
+
+/**
+ * Glues conversations together: the losers are marked as merged into the
+ * keeper rather than deleted.
+ *
+ * Deliberately manual. Deciding whether two conversations that open with the
+ * same prompt are one conversation, two separate attempts, or a clone Google
+ * made is a judgement about intent, and every automatic rule attempted here got
+ * one of those three wrong. Reversible for the same reason: merged_into is set,
+ * nothing is destroyed, so a wrong glue can be undone.
+ */
+export function mergeChats(keepId: number, mergeIds: number[]): { merged: number } {
+  const ids = mergeIds.filter((id) => id !== keepId);
+  if (ids.length === 0) return { merged: 0 };
+  db.exec('BEGIN');
+  try {
+    const placeholders = ids.map(() => '?').join(',');
+    // Folder and hand-typed title survive on the keeper; the merged rows keep
+    // their own turns so the glue can be inspected and reversed.
+    db.prepare(`UPDATE chats SET merged_into = ? WHERE id IN (${placeholders})`).run(keepId, ...ids);
+    noteSource(keepId, 'glued');
+    db.exec('COMMIT');
+    return { merged: ids.length };
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+export function unmergeChat(chatId: number): void {
+  db.prepare('UPDATE chats SET merged_into = NULL WHERE id = ?').run(chatId);
+}
+
+/** Conversations sharing this one's opening prompt — glue candidates, not facts. */
+export function similarChats(chatId: number): ChatSummary[] {
+  const row = db.prepare('SELECT content_key FROM chats WHERE id = ?').get(chatId) as unknown as
+    | { content_key: string | null }
+    | undefined;
+  if (!row?.content_key) return [];
+  const rows = db
+    .prepare(`${CHAT_SUMMARY_SQL} WHERE c.content_key = ? AND c.id != ? ORDER BY c.started_at`)
+    .all(row.content_key, chatId) as unknown as ChatSummaryRow[];
+  return rows.map(toSummary);
 }
 
 export interface ActivityMatchResult {
