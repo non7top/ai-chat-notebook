@@ -8,7 +8,7 @@
  *
  *   npm run check:dates
  */
-import { parseTimestamp } from '../src/renderer/parseTakeout.ts';
+import { countTimestamps, parseTimestamp } from '../src/renderer/parseTakeout.ts';
 
 let failures = 0;
 function check(what: string, got: unknown, want: unknown): void {
@@ -60,6 +60,31 @@ check(
   true,
 );
 check('nothing dateish returns no text either', rawOf('just words'), null);
+
+// Counting timestamps is what tells one long conversation from several merged
+// into a cell: a submission carries exactly one. This is the measurement behind
+// the "190 turns" question, so it is checked rather than assumed to work.
+check('one submission counts once', countTimestamps('xAug 22, 2026, 3:09:33 AM GMT+07:00 body'), 1);
+check(
+  'three submissions in one cell count three',
+  countTimestamps(
+    'aAug 22, 2026, 3:09:33 AM GMT+07:00 one' +
+      'bAug 21, 2026, 4:00:00 PM GMT+07:00 two' +
+      'cAug 20, 2026, 1:00:00 AM GMT+07:00 three',
+  ),
+  3,
+);
+check('no timestamps counts zero', countTimestamps('nothing dateish'), 0);
+// A global regex keeps lastIndex between calls unless it is reset, which would
+// make every second call return a different answer for identical input.
+check(
+  'counting twice gives the same answer',
+  [
+    countTimestamps('xAug 22, 2026, 3:09:33 AM GMT+07:00'),
+    countTimestamps('xAug 22, 2026, 3:09:33 AM GMT+07:00'),
+  ],
+  [1, 1],
+);
 
 if (failures > 0) throw new Error(`${failures} check(s) failed`);
 console.log('OK');

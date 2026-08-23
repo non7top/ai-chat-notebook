@@ -39,7 +39,11 @@ export default function TakeoutReport({ report, busy, onApply, onClose }: Props)
   // harvested or captured one, or updating one an earlier import created.
   const existing = sweep.wouldEnrich + sweep.wouldUpdate;
   const problems =
-    scan.nestedCells + scan.emptyCells + scan.unparsedDateText + sweep.wouldOrphan;
+    scan.nestedCells +
+    scan.emptyCells +
+    scan.unparsedDateText +
+    sweep.wouldOrphan +
+    scan.multiStampEntries;
 
   return (
     <div className="report">
@@ -127,6 +131,41 @@ export default function TakeoutReport({ report, busy, onApply, onClose }: Props)
               {' '}
               — kept in full under Orphan entries rather than discarded, since nothing here
               can say which conversation they belong to
+            </span>
+          </p>
+        )}
+
+        {/* The decisive figure for a turn count that looks impossible. A
+            submission carries exactly one timestamp and one search link, so a
+            cell holding several holds several submissions — and only the first
+            date and first query of those are recorded while every turn is glued
+            together. */}
+        {scan.multiStampEntries > 0 && (
+          <p className="report-figure bad">
+            {scan.multiStampEntries} cells contain more than one submission
+            <span className="report-aside">
+              {' '}
+              — up to {scan.maxStamps} in one. Those conversations are run together: only
+              the first date and first prompt of each cell are kept. Do not import until
+              this is fixed.
+            </span>
+          </p>
+        )}
+
+        {/* Reported even when nothing is wrong, because it is the answer to
+            "where does a 190-turn entry come from" — one timestamp and one link
+            means one long conversation; more means several merged. */}
+        {scan.largestEntry.turns > 2 * scan.turnCounts.median && (
+          <p className="report-figure">
+            Longest entry: {scan.largestEntry.turns} turns
+            <span className="report-aside">
+              {' '}
+              — with {scan.largestEntry.stamps} timestamp
+              {scan.largestEntry.stamps === 1 ? '' : 's'} and {scan.largestEntry.links} search
+              link{scan.largestEntry.links === 1 ? '' : 's'} in the same cell.{' '}
+              {scan.largestEntry.stamps <= 1 && scan.largestEntry.links <= 1
+                ? 'One of each, so this is a single long conversation.'
+                : 'More than one of either means separate submissions were merged into it.'}
             </span>
           </p>
         )}

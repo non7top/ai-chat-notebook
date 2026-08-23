@@ -43,6 +43,21 @@ const TIMESTAMP_RE =
 // date" well enough to quote it back, not to parse it.
 const LOOSE_TIMESTAMP_RE = /[A-Za-z]{3,}\s+\d{1,2},?\s+(19|20)\d{2}[^<\n]{0,40}/;
 
+/**
+ * How many submissions a cell's text holds.
+ *
+ * A Takeout submission carries exactly one timestamp, so this is what separates
+ * one long conversation from several merged into a single cell — the question a
+ * 190-turn entry against a median of 2 raises and nothing else can answer.
+ *
+ * A fresh regex per call, deliberately. A module-level global one keeps
+ * lastIndex between calls, so the same input would count differently depending
+ * on what was counted before it.
+ */
+export function countTimestamps(text: string): number {
+  return (text.match(new RegExp(TIMESTAMP_RE.source, 'g')) ?? []).length;
+}
+
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 /** The labels Google uses to delimit turns inside an entry. */
@@ -93,6 +108,24 @@ export interface TakeoutScan {
    * inherits the error.
    */
   nestedCells: number;
+  /**
+   * Entries whose cell contains more than one timestamp.
+   *
+   * A submission carries exactly one, so a cell with several holds several
+   * submissions — and the parser records only the FIRST date and the FIRST
+   * query while gluing every turn in the cell together. That is the other
+   * explanation for a 190-turn entry against a median of 2, the first being a
+   * genuinely long conversation, and nothing else here can tell them apart.
+   */
+  multiStampEntries: number;
+  /** The most timestamps seen in a single cell. 1 means each cell is one submission. */
+  maxStamps: number;
+  /**
+   * The entry with the most turns, described structurally. Turn count alone
+   * cannot say whether it is one long conversation or several run together;
+   * the number of timestamps and links inside it can.
+   */
+  largestEntry: { turns: number; stamps: number; links: number };
   /** Undated entries carrying no date-like text at all — a gap in the export. */
   noDateText: number;
   /** Undated entries that DO carry date text — a gap in the parser instead. */
@@ -233,6 +266,23 @@ export function parseTakeoutHtml(html: string): { entries: TakeoutEntry[]; scan:
   // worth of entries had dates, which is the shape over-counting makes.
   const nested = cells.filter((cell) => cell.parentElement?.closest('div.outer-cell')).length;
 
+  // How many submissions each cell actually holds. Counted from timestamps
+  // because a submission has exactly one, and from search links because it also
+  // has exactly one — two independent readings of the same question.
+  const stampsIn = (cell: Element): number => countTimestamps(clean(cell.textContent));
+  const linksIn = (cell: Element): number =>
+    cell.querySelectorAll('a[href*="q="]').length;
+
+  const perCell = cells.map((cell, index) => ({
+    stamps: stampsIn(cell),
+    links: linksIn(cell),
+    turns: all[index]?.turns.length ?? 0,
+  }));
+  const biggest = perCell.reduce(
+    (best, one) => (one.turns > best.turns ? one : best),
+    { turns: 0, stamps: 0, links: 0 },
+  );
+
   const undated = entries.filter((e) => !e.timestamp);
   const unparsed = undated.filter((e) => e.timestampText);
 
@@ -255,6 +305,9 @@ export function parseTakeoutHtml(html: string): { entries: TakeoutEntry[]; scan:
       },
       multiTurnEntries: entries.filter((e) => e.turns.length > 2).length,
       nestedCells: nested,
+      multiStampEntries: perCell.filter((c) => c.stamps > 1).length,
+      maxStamps: perCell.reduce((most, c) => Math.max(most, c.stamps), 0),
+      largestEntry: biggest,
       noDateText: undated.length - unparsed.length,
       unparsedDateText: unparsed.length,
       // Dates only — no conversation text. The owner has asked that the
