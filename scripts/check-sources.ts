@@ -302,5 +302,102 @@ repairScenario(true);
   fs.rmSync(scratch, { recursive: true, force: true });
 }
 
+// ---------------------------------------------------------------------------
+// The sweep must predict the import.
+//
+// A preview that reimplements the decision is worse than none: it would
+// describe an import that never happens, and the gap would show up as lost
+// conversations rather than as a wrong number. Both go through placeEntry, and
+// this is what holds them to it.
+{
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'notebook-sweep-'));
+  db.initDb(scratch);
+
+  // A conversation already known from the sidebar, so the enrichment case is
+  // exercised and not just creation.
+  db.upsertThreadFromList('thread-sweep', 'a question asked once', null, 0);
+  const solo = {
+    query: 'a question asked once',
+    timestamp: '2026-08-18T10:00:00+07:00',
+    timestampText: 'Aug 18, 2026, 10:00:00 AM GMT+07:00',
+    href: null,
+    turns: [turn('user', 'a question asked once'), turn('ai', 'answered')],
+    imageFiles: [],
+  };
+  const batch = [solo, ...rows];
+
+  const before = db.previewTakeoutImport(batch as never);
+  console.log('\nsweep:', JSON.stringify(before));
+  const actual = db.importTakeoutConversations(batch as never);
+  console.log('import:', JSON.stringify(actual));
+
+  const claims: [string, number, number][] = [
+    ['created', before.wouldCreate, actual.created],
+    ['ambiguous', before.ambiguous, actual.ambiguousOpenings],
+    // wouldEnrich covers both the capture merge and the plain extend, which the
+    // import counts in two different fields.
+    ['enriched', before.wouldEnrich, actual.extended + actual.mergedIntoHarvested],
+  ];
+  for (const [what, predicted, got] of claims) {
+    console.log(`  ${what}: predicted ${predicted}, got ${got}`);
+    if (predicted !== got) throw new Error(`sweep mispredicted ${what}: ${predicted} vs ${got}`);
+  }
+
+  // Run twice: the second sweep must report everything as already known, and
+  // the second import must create nothing.
+  const second = db.previewTakeoutImport(batch as never);
+  console.log('second sweep:', JSON.stringify(second));
+  if (second.alreadyKnown !== batch.length) {
+    throw new Error(`re-sweep should know all ${batch.length}, knew ${second.alreadyKnown}`);
+  }
+  if (second.wouldCreate !== 0) throw new Error('a re-import would create duplicates');
+  fs.rmSync(scratch, { recursive: true, force: true });
+}
+
+// ---------------------------------------------------------------------------
+// Nothing is ever lost.
+//
+// An entry with no opening prompt cannot be made into a conversation — there is
+// nothing to identify it by. It used to be skipped before being stored at all,
+// which is the one outcome this design does not allow. It must survive as an
+// orphan: kept verbatim, attached to nothing, and reachable.
+{
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'notebook-noloss-'));
+  db.initDb(scratch);
+
+  const placeless = {
+    query: '',
+    timestamp: null,
+    timestampText: null,
+    href: null,
+    turns: [turn('ai', 'an answer with no prompt above it')],
+    imageFiles: [],
+  };
+  // Two of them, differing only in content, to prove the payload-derived
+  // identity keeps them apart instead of collapsing them into one.
+  const alsoPlaceless = {
+    ...placeless,
+    turns: [turn('ai', 'a different answer with no prompt above it')],
+  };
+
+  const sweep = db.previewTakeoutImport([placeless, alsoPlaceless] as never);
+  const result = db.importTakeoutConversations([placeless, alsoPlaceless] as never);
+  console.log('\nplaceless entries — sweep says orphan:', sweep.wouldOrphan);
+  console.log('  import orphaned:', result.orphaned, '| conversations made:', result.created);
+  const orphans = db.orphanSourceEntries();
+  console.log('  listed as orphans:', orphans.length, '| turns readable:', orphans.map((e) => e.turnCount));
+  if (sweep.wouldOrphan !== 2) throw new Error(`sweep should predict 2 orphans, said ${sweep.wouldOrphan}`);
+  if (result.created !== 0) throw new Error('a promptless entry became a conversation');
+  if (orphans.length !== 2) throw new Error(`both entries must survive, found ${orphans.length}`);
+  if (db.sourceEntryTurns(orphans[0].id).length !== 1) throw new Error('an orphan lost its turn');
+
+  // Re-importing must recognise them, not duplicate them.
+  db.importTakeoutConversations([placeless, alsoPlaceless] as never);
+  const again = db.orphanSourceEntries();
+  console.log('  after re-import:', again.length);
+  if (again.length !== 2) throw new Error(`re-import duplicated orphans: ${again.length}`);
+  fs.rmSync(scratch, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('OK');

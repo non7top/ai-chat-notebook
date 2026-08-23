@@ -575,8 +575,18 @@ button:disabled {
    provenance, not content, but it must be reachable on every conversation
    rather than only on ones that look ambiguous. */
 .sources {
+  /* flex: none, because .reader is a flex column and this was competing with
+     the conversation for height: an ambiguous opening can list dozens of
+     candidate entries, and an unbounded block of them pushed the chat off the
+     screen. It is chrome about the conversation, not part of it. */
+  flex: none;
+  /* Inset to match .reader-head and .reader-body. Without this the rows ran
+     flush to the pane edge while every other line was indented, which is what
+     made it read as garbling the conversation rather than framing it. */
+  padding: 0 0.8rem;
   border-top: 1px solid var(--border);
-  margin: 0 0 12px;
+  border-bottom: 1px solid var(--border);
+  background: #fafafa;
 }
 .sources-toggle {
   background: none;
@@ -597,6 +607,10 @@ button:disabled {
   flex-direction: column;
   gap: 4px;
   padding-bottom: 8px;
+  /* Scrolls within itself rather than growing without limit — the conversation
+     keeps the rest of the pane no matter how many candidates there are. */
+  max-height: 40vh;
+  overflow-y: auto;
 }
 .sources-empty {
   margin: 0;
@@ -605,6 +619,8 @@ button:disabled {
 }
 .source-entry {
   display: flex;
+  /* Long prompts must not stretch the row; the facts and the button stay put. */
+  min-width: 0;
   align-items: baseline;
   gap: 8px;
   font-size: 12px;
@@ -625,7 +641,11 @@ button:disabled {
 }
 .source-facts {
   flex: 1;
+  min-width: 0;
   color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .source-entry button {
   font-size: 11px;

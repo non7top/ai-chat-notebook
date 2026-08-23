@@ -757,7 +757,240 @@ export interface TakeoutConversationResult {
   regrouped: number;
   /** Entries whose date text the parser could not read. */
   unreadableDates: number;
+  /**
+   * Entries kept but attached to nothing, because nothing here can say where
+   * they belong. They are listed under Orphan entries — never dropped.
+   */
+  orphaned: number;
   turnsWritten: number;
+}
+
+/** Where one entry would land, decided without writing anything. */
+export interface EntryPlacement {
+  /** Identity of the raw entry: opening prompt plus its timestamp. */
+  ref: string;
+  /** Hash of the opening prompt. Shared by entries that merely start alike. */
+  key: string;
+  /** This opening is shared by another entry in the same import. */
+  ambiguous: boolean;
+  /** Already stored from an earlier import of the same export. */
+  knownEntry: boolean;
+  /**
+   * An existing conversation the app learned about some other way — a sidebar
+   * listing or a panel capture — that this entry would enrich. Null when there
+   * is no such conversation, when the opening is ambiguous, or when the
+   * candidate's turns already contradict this entry's.
+   */
+  enrich: { id: number; source: string } | null;
+  /** The export-owned conversation for this entry, and whether it exists yet. */
+  ownExternalId: string;
+  ownChatId: number | null;
+}
+
+/**
+ * Decides where an entry belongs, reading the database but writing nothing.
+ *
+ * Extracted so the sweep and the import cannot disagree. A preview that
+ * reimplements the rule is worse than no preview: it would describe an import
+ * that never happens, and the discrepancy would surface as data loss rather
+ * than as a wrong number.
+ */
+export function placeEntry(
+  row: TakeoutImportRow,
+  openingCount: number,
+): EntryPlacement {
+  const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+  const key = contentKeyFor(opening);
+  const ref = `${key}@${row.timestamp ?? 'nodate'}`;
+  const ambiguous = openingCount > 1;
+
+  const known =
+    (db
+      .prepare("SELECT 1 AS n FROM source_entries WHERE kind = 'takeout' AND external_ref = ?")
+      .get(ref) as unknown as { n: number } | undefined) !== undefined;
+
+  // An entry already attached to a conversation stays there. This has to come
+  // first, and skipping it was a bug: an entry that enriched a harvested
+  // conversation on the first import found, on the second, that the candidate
+  // query now excluded that conversation — correctly, since it already holds an
+  // export entry — while its own takeout: row had never been created. So it
+  // created a standalone duplicate of a conversation it had already enriched,
+  // and every re-import would have made another.
+  //
+  // The importer's own link is preferred over one made by hand, because that is
+  // the one it is entitled to rewrite; a hand-glued conversation may hold
+  // several entries and is not this entry's alone to overwrite.
+  const placed = db
+    .prepare(
+      `SELECT cs.chat_id AS id FROM source_entries e
+         JOIN chat_sources cs ON cs.source_entry_id = e.id
+         JOIN chats c ON c.id = cs.chat_id
+        WHERE e.kind = 'takeout' AND e.external_ref = ? AND c.merged_into IS NULL
+          -- Only conversations the app learned about some other way. An
+          -- export-owned row is deliberately NOT rescued here: when an earlier
+          -- import grouped two entries into one of those, the link is the
+          -- mistake, and honouring it would send the entry straight back into
+          -- the grouping the re-import exists to undo.
+          AND c.external_id NOT LIKE 'takeout:%' AND c.external_id NOT LIKE 'entry:%'
+        ORDER BY CASE cs.linked_by WHEN 'import' THEN 0 ELSE 1 END
+        LIMIT 1`,
+    )
+    .get(ref) as { id: number } | undefined;
+  if (placed) {
+    return {
+      ref,
+      key,
+      ambiguous,
+      knownEntry: known,
+      enrich: null,
+      ownExternalId: `takeout:${key.slice(0, 16)}:${row.timestamp ?? 'nodate'}`,
+      ownChatId: placed.id,
+    };
+  }
+
+  // An entry may attach to a conversation the app learned about some OTHER way
+  // — a sidebar listing, or a panel capture. That is the enrichment case, and
+  // it is the whole reason for matching: the export carries text and a date,
+  // the panel carries the images, and together they describe one conversation.
+  //
+  // It may NOT attach to a conversation that came from another export entry.
+  // Two entries opening with the same prompt are indistinguishable from outside
+  // — one conversation logged twice, the same question asked twice, or a clone
+  // Google made on its own — and an earlier version of this check verified only
+  // that the second entry's prompts STARTED the same way, which is true in all
+  // three cases. The first entry's turns were then deleted and replaced by the
+  // second's, so a 2-turn conversation and a 4-turn one became a single 4-turn
+  // one and the shorter reading was gone.
+  //
+  // And the match must be unambiguous on both sides. When several entries in
+  // one import share an opening, at most one of them is that conversation and
+  // nothing here can tell which — so none of them claim it.
+  const candidates = ambiguous
+    ? []
+    : (db
+        .prepare(
+          `SELECT id, source FROM chats
+            WHERE content_key = ? AND merged_into IS NULL
+              AND external_id NOT LIKE 'takeout:%' AND external_id NOT LIKE 'entry:%'
+              AND NOT EXISTS (
+                    SELECT 1 FROM chat_sources cs
+                      JOIN source_entries e ON e.id = cs.source_entry_id
+                     WHERE cs.chat_id = chats.id AND e.kind = 'takeout'
+                  )
+            LIMIT 2`,
+        )
+        .all(key) as unknown as { id: number; source: string }[]);
+
+  const agreesWith = (candidateId: number): boolean => {
+    const existing = db
+      .prepare("SELECT text FROM messages WHERE chat_id = ? AND role = 'user' ORDER BY seq LIMIT 2")
+      .all(candidateId) as unknown as { text: string }[];
+    // No turns stored yet (a bare sidebar listing) — nothing to contradict.
+    if (existing.length === 0) return true;
+    const norm = (t: string) => t.toLowerCase().replace(/\s+/g, ' ').trim();
+    const mine = row.turns.filter((t) => t.role === 'user').map((t) => norm(t.text));
+    const theirs = existing.map((t) => norm(t.text));
+    // Compare as far as both go. Divergence at the second prompt means two
+    // different conversations that happen to open alike, and merging them would
+    // fabricate a conversation that never existed.
+    return theirs.every((t, i) => mine[i] === undefined || mine[i] === t);
+  };
+
+  const enrich =
+    candidates.length === 1 && agreesWith(candidates[0].id) ? candidates[0] : null;
+
+  // Distinguished by timestamp as well as opening, so two conversations that
+  // begin identically get separate rows instead of overwriting each other —
+  // including Google's own clones.
+  const ownExternalId = `takeout:${key.slice(0, 16)}:${row.timestamp ?? 'nodate'}`;
+  const own = db.prepare('SELECT id FROM chats WHERE external_id = ?').get(ownExternalId) as
+    | { id: number }
+    | undefined;
+
+  return {
+    ref,
+    key,
+    ambiguous,
+    knownEntry: known,
+    enrich,
+    ownExternalId,
+    ownChatId: own?.id ?? null,
+  };
+}
+
+/** How many entries in one import open with each prompt. */
+export function openingCounts(rows: TakeoutImportRow[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+    if (!opening.trim()) continue;
+    const key = contentKeyFor(opening);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+export interface TakeoutPreview {
+  entries: number;
+  /**
+   * Entries with no opening prompt. They are still stored — nothing is dropped —
+   * and become orphans for review rather than conversations.
+   */
+  wouldOrphan: number;
+  /** Already stored by an earlier import of the same export. */
+  alreadyKnown: number;
+  /** Would attach to a conversation harvested or captured from the panel. */
+  wouldEnrich: number;
+  /** Would update a conversation an earlier import of this export created. */
+  wouldUpdate: number;
+  /** Would create a conversation of its own. */
+  wouldCreate: number;
+  /** Openings shared by several entries, so none of them claim a match. */
+  ambiguous: number;
+  /** Existing conversations that would be touched. */
+  chatsTouched: number;
+}
+
+/**
+ * The sweep: what an import would do, before it does any of it.
+ *
+ * Reads only. Uses placeEntry, so it describes the import that will actually
+ * run rather than a second implementation of the same intent.
+ */
+export function previewTakeoutImport(rows: TakeoutImportRow[]): TakeoutPreview {
+  const counts = openingCounts(rows);
+  const preview: TakeoutPreview = {
+    entries: rows.length,
+    wouldOrphan: 0,
+    alreadyKnown: 0,
+    wouldEnrich: 0,
+    wouldUpdate: 0,
+    wouldCreate: 0,
+    ambiguous: 0,
+    chatsTouched: 0,
+  };
+  const touched = new Set<number>();
+  for (const row of rows) {
+    const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+    if (!opening.trim()) {
+      preview.wouldOrphan += 1;
+      continue;
+    }
+    const placement = placeEntry(row, counts.get(contentKeyFor(opening)) ?? 1);
+    if (placement.knownEntry) preview.alreadyKnown += 1;
+    if (placement.ambiguous) preview.ambiguous += 1;
+    if (placement.enrich) {
+      preview.wouldEnrich += 1;
+      touched.add(placement.enrich.id);
+    } else if (placement.ownChatId !== null) {
+      preview.wouldUpdate += 1;
+      touched.add(placement.ownChatId);
+    } else {
+      preview.wouldCreate += 1;
+    }
+  }
+  preview.chatsTouched = touched.size;
+  return preview;
 }
 
 /**
@@ -767,16 +1000,11 @@ export interface TakeoutConversationResult {
  * text of every conversation including ones Google has since dropped, while
  * only the panel still has the original uploads and generated images.
  *
- * Entries are deduplicated by opening query first. The export contains far more
- * entries than conversations — roughly 981 against 300 — because it appears to
- * record a snapshot per submission, each containing the conversation so far. Of
- * the entries sharing an opening query, the one with the most turns is the
- * furthest along, so that is the conversation and the rest are its earlier
- * states.
- *
- * A harvested conversation with the same opening query is EXTENDED rather than
- * duplicated, keeping its Google thread id — which is the only real identifier
- * in the system and the thing that makes a later panel capture possible.
+ * Nothing is grouped automatically — see the note in the body, and placeEntry
+ * for where each entry lands. A conversation the app already knows about from
+ * the sidebar or the panel is EXTENDED rather than duplicated, keeping its
+ * Google thread id, which is the only real identifier in the system and the
+ * thing that makes a later panel capture possible.
  */
 export function importTakeoutConversations(
   rows: TakeoutImportRow[],
@@ -790,6 +1018,7 @@ export function importTakeoutConversations(
     ambiguousOpenings: 0,
     regrouped: 0,
     unreadableDates: 0,
+    orphaned: 0,
     turnsWritten: 0,
   };
 
@@ -829,8 +1058,23 @@ export function importTakeoutConversations(
     const now = new Date().toISOString();
     for (const row of rows) {
       const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
-      if (!opening.trim()) continue;
-      const ref = `${contentKeyFor(opening)}@${row.timestamp ?? 'nodate'}`;
+      // EVERY entry is stored, including ones with no opening prompt. They used
+      // to be skipped here, before being written at all — which is a loss, and
+      // the one thing this design does not permit. An entry nothing can place
+      // becomes an orphan: kept verbatim, attached to nothing, listed under
+      // Orphan entries and reviewable there. Unplaceable is a statement about
+      // what can be worked out, not a licence to discard.
+      //
+      // Its identity is the payload rather than the opening, since there is no
+      // opening to key on and every such entry would otherwise collide with
+      // every other. Content-addressed, so re-importing the same export
+      // recognises them instead of piling up copies.
+      const ref = opening.trim()
+        ? `${contentKeyFor(opening)}@${row.timestamp ?? 'nodate'}`
+        : `payload:${contentKeyFor(
+            JSON.stringify({ turns: row.turns, images: row.imageFiles, href: row.href }),
+          )}`;
+      if (!opening.trim()) result.orphaned += 1;
       // A row with date text but no parsed timestamp is a parser failure, not
       // a gap in the export, and the two need different responses — so it is
       // counted separately and the raw text is kept on the entry so it can be
@@ -839,7 +1083,7 @@ export function importTakeoutConversations(
       keepEntry.run(
         ref,
         row.query,
-        contentKeyFor(opening),
+        opening.trim() ? contentKeyFor(opening) : null,
         row.timestamp,
         row.href,
         JSON.stringify({
@@ -858,16 +1102,10 @@ export function importTakeoutConversations(
     throw error;
   }
 
-  // How many entries in this import open with each prompt. An opening shared by
-  // several entries cannot identify any one of them, so it disqualifies
-  // automatic matching outright rather than handing the conversation to
-  // whichever entry the loop happens to reach last.
-  const openingCounts = new Map<string, number>();
-  for (const [, { row }] of best) {
-    const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
-    const key = contentKeyFor(opening);
-    openingCounts.set(key, (openingCounts.get(key) ?? 0) + 1);
-  }
+  // An opening shared by several entries cannot identify any one of them, so it
+  // disqualifies automatic matching outright rather than handing the
+  // conversation to whichever entry the loop happens to reach last.
+  const counts = openingCounts([...best.values()].map((b) => b.row));
 
   db.exec('BEGIN');
   try {
@@ -877,68 +1115,15 @@ export function importTakeoutConversations(
       // start alike remain findable as candidates for gluing.
       const key = contentKeyFor(opening);
 
-      // An entry may attach to a conversation the app learned about some OTHER
-      // way — a sidebar listing, or a panel capture. That is the enrichment
-      // case, and it is the whole reason for matching: the export carries text
-      // and a date, the panel carries the images, and together they describe
-      // one conversation.
-      //
-      // It may NOT attach to a conversation that came from another export
-      // entry. Two entries opening with the same prompt are indistinguishable
-      // from outside — one conversation logged twice, the same question asked
-      // twice, or a clone Google made on its own — and this check verified
-      // that the SECOND entry's prompts merely started the same way, which is
-      // true in all three cases. The first entry's turns were then deleted and
-      // replaced by the second's, so a 2-turn conversation and a 4-turn one
-      // became a single 4-turn one and the shorter reading was gone. Gluing
-      // those is a judgement, so it is a manual action: see mergeChats.
-      //
-      // And the match must be unambiguous on both sides. When several entries
-      // in this import share an opening, at most one of them is the harvested
-      // conversation and nothing here can tell which — so none of them claim
-      // it. Letting them all match is how a harvested conversation ended up
-      // holding the last entry's turns and none of the others': each match
-      // replaced the previous one's turns wholesale, so of three readings only
-      // the one that happened to be processed last survived.
-      const ambiguous = (openingCounts.get(key) ?? 0) > 1;
-      if (ambiguous) result.ambiguousOpenings += 1;
-      const candidates = ambiguous
-        ? []
-        : (db
-            .prepare(
-              `SELECT id, source FROM chats
-                WHERE content_key = ? AND merged_into IS NULL
-                  AND external_id NOT LIKE 'takeout:%' AND external_id NOT LIKE 'entry:%'
-                  AND NOT EXISTS (
-                        SELECT 1 FROM chat_sources cs
-                          JOIN source_entries e ON e.id = cs.source_entry_id
-                         WHERE cs.chat_id = chats.id AND e.kind = 'takeout'
-                      )
-                LIMIT 2`,
-            )
-            .all(key) as unknown as { id: number; source: string }[]);
-
-      const agreesWith = (candidateId: number): boolean => {
-        const existing = db
-          .prepare(
-            "SELECT text FROM messages WHERE chat_id = ? AND role = 'user' ORDER BY seq LIMIT 2",
-          )
-          .all(candidateId) as unknown as { text: string }[];
-        // No turns stored yet (a bare sidebar listing) — nothing to contradict.
-        if (existing.length === 0) return true;
-        const norm = (t: string) => t.toLowerCase().replace(/\s+/g, ' ').trim();
-        const mine = row.turns.filter((t) => t.role === 'user').map((t) => norm(t.text));
-        const theirs = existing.map((t) => norm(t.text));
-        // Compare as far as both go. Divergence at the second prompt means two
-        // different conversations that happen to open alike, and merging them
-        // would fabricate a conversation that never existed.
-        return theirs.every((t, i) => mine[i] === undefined || mine[i] === t);
-      };
+      // One shared rule, so the sweep cannot promise an import that differs
+      // from the one that runs.
+      const placement = placeEntry(row, counts.get(key) ?? 1);
+      if (placement.ambiguous) result.ambiguousOpenings += 1;
 
       let chatId: number;
-      if (candidates.length === 1 && agreesWith(candidates[0].id)) {
-        chatId = candidates[0].id;
-        if (candidates[0].source === 'capture') {
+      if (placement.enrich) {
+        chatId = placement.enrich.id;
+        if (placement.enrich.source === 'capture') {
           // The panel version wins on content: it has the uploads and generated
           // images Takeout lacks, and Takeout's text is rougher.
           //
@@ -985,15 +1170,9 @@ export function importTakeoutConversations(
         }
         result.extended += 1;
       } else {
-        // Distinguished by timestamp as well as opening, so two conversations
-        // that begin identically get separate rows instead of overwriting each
-        // other — including Google's own clones.
-        const externalId = `takeout:${key.slice(0, 16)}:${row.timestamp ?? 'nodate'}`;
-        const found = db.prepare('SELECT id FROM chats WHERE external_id = ?').get(externalId) as
-          | { id: number }
-          | undefined;
-        if (found) {
-          chatId = found.id;
+        const externalId = placement.ownExternalId;
+        if (placement.ownChatId !== null) {
+          chatId = placement.ownChatId;
           result.extended += 1;
         } else {
           const { lastInsertRowid } = db

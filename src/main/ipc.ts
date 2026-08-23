@@ -125,6 +125,11 @@ export function registerIpcHandlers(): void {
     (_event, folder: string, rows: db.TakeoutImportRow[]) => importTakeout(folder, rows),
   );
 
+  // Reads only. Deliberately a separate call from 'apply' so the sweep can be
+  // run and read before anything is written.
+  ipcMain.handle('takeout:preview', (_event, rows: db.TakeoutImportRow[]) =>
+    db.previewTakeoutImport(rows),
+  );
   ipcMain.handle('takeout:undo', () => db.undoTakeoutImport());
   ipcMain.handle('takeout:rematch', () => rematchActivity());
   ipcMain.handle('takeout:stats', () => db.activityStats());

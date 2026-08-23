@@ -3,9 +3,10 @@ import type {
   ActivityStats,
   CaptureProgress,
   HarvestProgress,
+  TakeoutImportRow,
   TakeoutPick,
 } from '../shared/types';
-import { parseTakeoutHtml } from './parseTakeout';
+import { type TakeoutEntry, parseTakeoutHtml } from './parseTakeout';
 
 interface Props {
   /** Harvesting scrapes the live sidebar, so the panel has to be on screen. */
@@ -28,6 +29,21 @@ interface Props {
 const CAPTURE_BATCH = 25;
 // Far above any plausible history, so "all" means all.
 const CAPTURE_ALL_LIMIT = 100_000;
+
+/**
+ * Parsed entries as import rows. Shared by the sweep and the apply — two copies
+ * would let the preview describe rows the import never receives.
+ */
+function importRows(entries: TakeoutEntry[]): TakeoutImportRow[] {
+  return entries.map((e) => ({
+    query: e.query,
+    timestamp: e.timestamp,
+    timestampText: e.timestampText,
+    href: e.href,
+    turns: e.turns,
+    imageFiles: e.images,
+  }));
+}
 
 export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activity }: Props) {
   const [progress, setProgress] = useState<HarvestProgress | null>(null);
@@ -66,15 +82,19 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activi
 
   // Two steps on purpose. Scanning reports what the parser found so a layout
   // change shows up as counts that look wrong, rather than as a silent import
-  // of nothing.
+  // of nothing — and it now also reports what an import WOULD do to what is
+  // already stored, which is the question the counts alone cannot answer.
   const scanTakeout = async () => {
     setTakeoutBusy(true);
     setTakeoutNote(null);
     try {
       const picked = await window.notebook.pickTakeout();
       if (!picked) return;
-      const { scan } = parseTakeoutHtml(picked.html);
+      const { entries, scan } = parseTakeoutHtml(picked.html);
       setTakeout(picked);
+      // The sweep. Reads only, and goes through the same placement rule the
+      // import uses, so it describes the import that will actually run.
+      const sweep = await window.notebook.previewTakeout(importRows(entries));
       setTakeoutNote(
         `${scan.entryCount} cells, ${scan.aiModeEntries} AI Mode · ` +
           `${scan.withTimestamp} dated · ${scan.withQuery} titled · ` +
@@ -92,6 +112,14 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activi
             ? ` · ${scan.unparsedDateText} dates unread, e.g. ${scan.unparsedDateSamples
                 .map((t) => `"${t}"`)
                 .join(', ')}`
+            : '') +
+          `\nsweep: ${sweep.wouldCreate} new, ${sweep.wouldEnrich} would extend a ` +
+          `conversation already here, ${sweep.wouldUpdate} would update one from an ` +
+          `earlier import (${sweep.chatsTouched} existing touched) · ` +
+          `${sweep.alreadyKnown} entries already stored · ` +
+          `${sweep.ambiguous} share an opening, left to glue by hand` +
+          (sweep.wouldOrphan > 0
+            ? ` · ${sweep.wouldOrphan} with no prompt → kept as orphans`
             : ''),
       );
     } catch (err) {
@@ -108,14 +136,7 @@ export default function HarvestBar({ onNeedPanel, onFinished, uncaptured, activi
       const { entries } = parseTakeoutHtml(takeout.html);
       const summary = await window.notebook.applyTakeout(
         takeout.folder,
-        entries.map((e) => ({
-          query: e.query,
-          timestamp: e.timestamp,
-          timestampText: e.timestampText,
-          href: e.href,
-          turns: e.turns,
-          imageFiles: e.images,
-        })),
+        importRows(entries),
       );
       setTakeoutNote(
         `${summary.entries} entries → ${summary.conversations} conversations ` +

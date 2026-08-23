@@ -216,9 +216,36 @@ export interface SourceEntryView {
   dateText: string | null;
 }
 
+export interface TakeoutPreview {
+  entries: number;
+  /**
+   * Entries with no opening prompt. Still stored — nothing is dropped — and
+   * listed under Orphan entries for review rather than made into conversations.
+   */
+  wouldOrphan: number;
+  /** Already stored by an earlier import of the same export. */
+  alreadyKnown: number;
+  /** Would attach to a conversation harvested or captured from the panel. */
+  wouldEnrich: number;
+  /** Would update a conversation an earlier import of this export created. */
+  wouldUpdate: number;
+  /** Would create a conversation of its own. */
+  wouldCreate: number;
+  /** Openings shared by several entries, so none of them claim a match. */
+  ambiguous: number;
+  /** Existing conversations that would be touched. */
+  chatsTouched: number;
+}
+
 export interface NotebookApi {
   /** Reads the Takeout folder only — nothing is stored until applyTakeout. */
   pickTakeout(): Promise<TakeoutPick | null>;
+  /**
+   * The sweep: what an import would do, before it does any of it. Reads only,
+   * and shares its decision with applyTakeout so it cannot promise a different
+   * import from the one that runs.
+   */
+  previewTakeout(rows: TakeoutImportRow[]): Promise<TakeoutPreview>;
   applyTakeout(folder: string, rows: TakeoutImportRow[]): Promise<TakeoutImportSummary>;
   /** Removes conversations a previous, broken import created; harvested chats survive. */
   undoTakeout(): Promise<{ deleted: number; reverted: number }>;
