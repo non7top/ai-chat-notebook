@@ -853,9 +853,16 @@ export function takeoutEntryRef(
   timestamp: string | null,
   payload: { turns: unknown; images: unknown; href: unknown },
 ): string {
-  return opening.trim()
-    ? `${contentKeyFor(opening)}@${timestamp ?? 'nodate'}`
-    : `payload:${contentKeyFor(JSON.stringify(payload))}`;
+  if (opening.trim()) return `${contentKeyFor(opening)}@${timestamp ?? 'nodate'}`;
+  // The timestamp is part of the identity, not decoration. An empty cell — no
+  // prompt, no turns, no images — has a payload identical to every other empty
+  // cell, so hashing the payload alone gave all 259 of them the same reference
+  // and INSERT OR IGNORE kept exactly one. The date is the only thing that tells
+  // them apart, and they are supposed to be preserved.
+  //
+  // Two cells with the same content AND the same timestamp are genuinely
+  // indistinguishable, and collapsing those is right.
+  return `payload:${contentKeyFor(JSON.stringify(payload))}@${timestamp ?? 'nodate'}`;
 }
 
 /** Where one entry would land, decided without writing anything. */

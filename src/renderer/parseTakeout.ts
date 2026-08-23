@@ -61,6 +61,8 @@ export function countTimestamps(text: string): number {
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 /** The labels Google uses to delimit turns inside an entry. */
+const LENS_ACTIVITY = /searched with google lens/i;
+
 const USER_LABEL = /^your prompt:?$/i;
 const AI_LABEL = /^(search's response|response):?$/i;
 
@@ -89,6 +91,20 @@ export interface TakeoutEntry {
   turns: TakeoutTurn[];
   /** Product label, e.g. "AI Mode" — an export can mix products. */
   product: string;
+  /**
+   * What kind of activity this cell records.
+   *
+   * The folder holds more than conversations. "Searched with Google Lens"
+   * entries carry a date and sometimes an image, but no prompt and no response —
+   * Google did not save either. They were being counted as entries with no
+   * prompt, which is true and useless: it reads as data loss when it is a
+   * different kind of record.
+   *
+   * 'conversation' — has labelled turns.
+   * 'lens'         — a Lens search: no prompt, no response, maybe an image.
+   * 'other'        — dated, but nothing recognisable in it.
+   */
+  activity: 'conversation' | 'lens' | 'other';
 }
 
 export interface TakeoutScan {
@@ -139,6 +155,13 @@ export interface TakeoutScan {
    * three pieces — but the shapes can.
    */
   cellShapes: { shape: string; count: number }[];
+  /**
+   * Cells by what kind of record they are. The folder is not all conversations:
+   * "Searched with Google Lens" records carry a date and sometimes an image but
+   * no prompt and no response, and counting those as prompt-less entries makes a
+   * different kind of record look like a loss.
+   */
+  activityCounts: { conversation: number; lens: number; other: number };
   /** Undated entries carrying no date-like text at all — a gap in the export. */
   noDateText: number;
   /** Undated entries that DO carry date text — a gap in the parser instead. */
@@ -261,7 +284,23 @@ function entryFrom(cell: Element): TakeoutEntry {
     images: [...new Set(images)],
     turns: bodyCell ? turnsFrom(bodyCell) : [],
     product,
+    activity: activityOf(bodyText, bodyCell ? turnsFrom(bodyCell) : []),
   };
+}
+
+/**
+ * What kind of record a cell is.
+ *
+ * Turns decide it first: anything with a labelled prompt or response is a
+ * conversation whatever else the cell says. A Lens search has neither — Google
+ * saved the date, sometimes the image, and neither the prompt nor the response —
+ * so it was being reported as an entry with no prompt, which reads as data lost
+ * rather than as a different kind of record entirely.
+ */
+function activityOf(bodyText: string, turns: TakeoutTurn[]): TakeoutEntry['activity'] {
+  if (turns.length > 0) return 'conversation';
+  if (LENS_ACTIVITY.test(bodyText)) return 'lens';
+  return 'other';
 }
 
 export function parseTakeoutHtml(html: string): { entries: TakeoutEntry[]; scan: TakeoutScan } {
@@ -321,6 +360,11 @@ export function parseTakeoutHtml(html: string): { entries: TakeoutEntry[]; scan:
       multiStampEntries: perCell.filter((c) => c.stamps > 1).length,
       maxStamps: perCell.reduce((most, c) => Math.max(most, c.stamps), 0),
       largestEntry: biggest,
+      activityCounts: {
+        conversation: entries.filter((e) => e.activity === 'conversation').length,
+        lens: entries.filter((e) => e.activity === 'lens').length,
+        other: entries.filter((e) => e.activity === 'other').length,
+      },
       cellShapes: (() => {
         const tally = new Map<string, number>();
         for (const cell of perCell) {

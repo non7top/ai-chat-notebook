@@ -106,6 +106,21 @@ export default function TakeoutReport({ report, busy, onApply, onClose }: Props)
           <dd>
             {scan.entryCount} cells, {scan.aiModeEntries} of them AI Mode
           </dd>
+          <dt>Kinds</dt>
+          <dd>
+            {scan.activityCounts.conversation} conversations
+            {scan.activityCounts.lens > 0 && (
+              <>
+                , {scan.activityCounts.lens} Lens searches
+                <span className="report-aside">
+                  {' '}
+                  — a date and sometimes an image; Google saved neither the prompt nor the
+                  response
+                </span>
+              </>
+            )}
+            {scan.activityCounts.other > 0 && `, ${scan.activityCounts.other} other`}
+          </dd>
           <dt>With a prompt</dt>
           <dd>{scan.withQuery}</dd>
           <dt>Turns</dt>
@@ -157,8 +172,10 @@ export default function TakeoutReport({ report, busy, onApply, onClose }: Props)
             {sweep.wouldOrphan} entries have no prompt
             <span className="report-aside">
               {' '}
-              — kept in full under Orphan entries rather than discarded, since nothing here
-              can say which conversation they belong to
+              — mostly Lens searches and empty records. Every one is kept in full under
+              Orphan entries, each with its own date, rather than discarded: nothing here
+              can say which conversation they belong to, and that is not a reason to lose
+              them.
             </span>
           </p>
         )}

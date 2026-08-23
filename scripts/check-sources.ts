@@ -396,6 +396,26 @@ repairScenario(true);
   const again = db.orphanSourceEntries();
   console.log('  after re-import:', again.length);
   if (again.length !== 2) throw new Error(`re-import duplicated orphans: ${again.length}`);
+
+  // Wholly empty cells: no prompt, no turns, no images. Their payloads are
+  // IDENTICAL, so hashing the payload alone gave every one of them the same
+  // reference and kept a single row — 259 records collapsing to one. Only the
+  // timestamp tells them apart, and they are meant to be preserved.
+  const empties = [
+    { query: '', timestamp: '2026-08-02T07:42:02+07:00', timestampText: null, href: null, turns: [], imageFiles: [] },
+    { query: '', timestamp: '2026-08-03T07:42:02+07:00', timestampText: null, href: null, turns: [], imageFiles: [] },
+    { query: '', timestamp: '2026-08-04T07:42:02+07:00', timestampText: null, href: null, turns: [], imageFiles: [] },
+  ];
+  db.importTakeoutConversations(empties as never);
+  const withEmpties = db.orphanSourceEntries();
+  console.log('  empty cells preserved:', withEmpties.length - again.length, 'of 3');
+  if (withEmpties.length !== again.length + 3) {
+    throw new Error(`empty cells collapsed: kept ${withEmpties.length - again.length} of 3`);
+  }
+  // And each keeps its own date, which is the only thing it has.
+  const dates = withEmpties.filter((e) => e.turnCount === 0).map((e) => e.occurredAt).sort();
+  console.log('  their dates:', dates);
+  if (new Set(dates).size !== 3) throw new Error('empty cells lost their distinct dates');
   fs.rmSync(scratch, { recursive: true, force: true });
 }
 
