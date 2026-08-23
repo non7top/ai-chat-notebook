@@ -11,5 +11,7 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "jsx": "react-jsx"
-  }
+  },
+  "include": ["src", "env.d.ts", "electron.vite.config.ts"],
+  "exclude": ["scripts"]
 }

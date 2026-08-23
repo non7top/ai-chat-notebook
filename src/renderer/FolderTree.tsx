@@ -271,6 +271,17 @@ export default function FolderTree({ folders, scope, onScopeChange, onChange, on
         <span className="tree-name">Unfiled</span>
       </div>
 
+      {/* Raw entries belonging to no conversation. Kept beside Unfiled rather
+          than hidden behind a menu: an entry the app has stored but shows
+          nowhere is stored and lost at the same time. */}
+      <div
+        className={`tree-row${sameScope(scope, { kind: 'orphans' }) ? ' selected' : ''}`}
+        onClick={() => onScopeChange({ kind: 'orphans' })}
+      >
+        <span className="twisty-spacer" />
+        <span className="tree-name">Orphan entries</span>
+      </div>
+
       <div className="tree-divider" />
       {roots.map((folder) => renderFolder(folder, 0))}
 

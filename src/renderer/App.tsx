@@ -8,6 +8,7 @@ import type {
   Folder,
 } from '../shared/types';
 import ChatList from './ChatList';
+import OrphanEntries from './OrphanEntries';
 import ChatReader from './ChatReader';
 import FolderTree from './FolderTree';
 import HarvestBar from './HarvestBar';
@@ -123,16 +124,27 @@ export default function App() {
             onError={setError}
           />
         </div>
-        <div className="pane pane-list">
-          <ChatList chats={chats} selectedId={selectedId} onSelect={setSelectedId} />
-        </div>
-        <div className="pane pane-reader">
-          {chat ? (
-            <ChatReader chat={chat} onChange={reloadAll} />
-          ) : (
-            <p className="hint empty">Select a conversation to read it.</p>
-          )}
-        </div>
+        {/* Orphan entries are not conversations, so they get the list and
+            reader panes to themselves rather than being forced into a chat
+            list that would have to lie about what they are. */}
+        {scope.kind === 'orphans' ? (
+          <div className="pane pane-orphans">
+            <OrphanEntries onChange={reloadAll} />
+          </div>
+        ) : (
+          <>
+            <div className="pane pane-list">
+              <ChatList chats={chats} selectedId={selectedId} onSelect={setSelectedId} />
+            </div>
+            <div className="pane pane-reader">
+              {chat ? (
+                <ChatReader chat={chat} onChange={reloadAll} />
+              ) : (
+                <p className="hint empty">Select a conversation to read it.</p>
+              )}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

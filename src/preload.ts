@@ -47,6 +47,17 @@ const api: NotebookApi = {
   setChatTitle: (chatId, userTitle) => ipcRenderer.invoke('chats:setTitle', chatId, userTitle),
   deleteChat: (id) => ipcRenderer.invoke('chats:delete', id),
   openChatInPanel: (chatId) => ipcRenderer.invoke('chats:openInPanel', chatId),
+  sourceEntries: (chatId) => ipcRenderer.invoke('chats:sourceEntries', chatId),
+  linkSourceEntry: (chatId, entryId) => ipcRenderer.invoke('chats:linkSource', chatId, entryId),
+  unglueSourceEntry: (chatId, entryId) =>
+    ipcRenderer.invoke('chats:unglueSource', chatId, entryId),
+  orphanEntries: () => ipcRenderer.invoke('entries:orphans'),
+  sourceEntryTurns: (entryId) => ipcRenderer.invoke('entries:turns', entryId),
+  adoptSourceEntry: (entryId, folderId) =>
+    ipcRenderer.invoke('entries:adopt', entryId, folderId),
+  similarChats: (chatId) => ipcRenderer.invoke('chats:similar', chatId),
+  mergeChats: (keepId, mergeIds) => ipcRenderer.invoke('chats:merge', keepId, mergeIds),
+  unmergeChat: (chatId) => ipcRenderer.invoke('chats:unmerge', chatId),
 
   getAiModeStatus: () => ipcRenderer.invoke('aiMode:getStatus'),
   navigateAiMode: (url) => ipcRenderer.invoke('aiMode:navigate', url),

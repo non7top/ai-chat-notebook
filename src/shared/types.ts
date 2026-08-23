@@ -66,7 +66,12 @@ export interface ChatDetail extends ChatSummary {
 }
 
 /** Which conversations the list pane is showing. */
-export type ChatScope = { kind: 'all' } | { kind: 'unfiled' } | { kind: 'folder'; id: number };
+export type ChatScope =
+  | { kind: 'all' }
+  | { kind: 'unfiled' }
+  /** Raw entries attached to no conversation — not chats, so rendered apart. */
+  | { kind: 'orphans' }
+  | { kind: 'folder'; id: number };
 
 export interface HarvestProgress {
   phase: 'scanning' | 'done' | 'cancelled' | 'error';
@@ -141,6 +146,12 @@ export interface TakeoutImportSummary {
   createdChats: number;
   extendedChats: number;
   datedHarvested: number;
+  /**
+   * Entries whose opening prompt is shared by another entry in the same import.
+   * None were matched to an existing conversation — nothing can tell which of
+   * them it is — so each stands alone until someone glues them by hand.
+   */
+  ambiguousOpenings: number;
   turnsWritten: number;
   inserted: number;
   duplicates: number;
@@ -165,6 +176,19 @@ export interface ActivityStats {
   matched: number;
   orphans: number;
   dated: number;
+}
+
+export interface SourceEntryView {
+  id: number;
+  kind: string;
+  occurredAt: string | null;
+  href: string | null;
+  query: string | null;
+  turnCount: number;
+  imageCount: number;
+  linked: boolean;
+  /** Conversations this entry is attached to — the link is many-to-many. */
+  chatCount: number;
 }
 
 export interface NotebookApi {
@@ -214,6 +238,19 @@ export interface NotebookApi {
    * mtid links create duplicate conversations.
    */
   openChatInPanel(chatId: number): Promise<void>;
+  /** The data entries behind a conversation, plus unlinked candidates. */
+  sourceEntries(chatId: number): Promise<SourceEntryView[]>;
+  linkSourceEntry(chatId: number, entryId: number): Promise<void>;
+  /** Detaches an entry into a conversation of its own, and returns its id. */
+  unglueSourceEntry(chatId: number, entryId: number): Promise<{ chatId: number }>;
+  /** Entries attached to no conversation — stored but otherwise unreachable. */
+  orphanEntries(): Promise<SourceEntryView[]>;
+  /** One entry's full stored reading, for review before deciding where it goes. */
+  sourceEntryTurns(entryId: number): Promise<Message[]>;
+  adoptSourceEntry(entryId: number, folderId: number | null): Promise<{ chatId: number }>;
+  similarChats(chatId: number): Promise<ChatSummary[]>;
+  mergeChats(keepId: number, mergeIds: number[]): Promise<{ merged: number }>;
+  unmergeChat(chatId: number): Promise<void>;
 
   getAiModeStatus(): Promise<AiModeStatus>;
   navigateAiMode(url: string): Promise<void>;

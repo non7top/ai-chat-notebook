@@ -12,6 +12,7 @@
     "make": "electron-vite build && electron-builder --publish never",
     "publish": "electron-vite build && electron-builder --publish always",
     "lint": "biome lint .",
+    "check:sources": "node --experimental-strip-types --no-warnings scripts/check-sources.ts",
     "check:bundle": "node scripts/check-bundle-externals.mjs"
   },
   "keywords": [],

@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { ChatDetail, ChatSummary, Folder, Message } from '../shared/types';
+import type { ChatDetail, ChatScope, ChatSummary, Folder, Message } from '../shared/types';
 
 let db: DatabaseSync;
 let assetsDir: string;
@@ -330,7 +330,10 @@ function toSummary(row: ChatSummaryRow): ChatSummary {
   };
 }
 
-export type ChatScope = { kind: 'all' } | { kind: 'unfiled' } | { kind: 'folder'; id: number };
+// Re-exported rather than redeclared: the duplicate definition here drifted
+// from the shared one the moment a scope was added, and the two disagreeing is
+// exactly the kind of mismatch the type checker cannot see across an IPC hop.
+export type { ChatScope };
 
 export function listChats(scope: ChatScope): ChatSummary[] {
   // merged_into IS NULL everywhere: a chat merged away is kept (so the merge
@@ -355,6 +358,12 @@ export function listChats(scope: ChatScope): ChatSummary[] {
       db.prepare(`${base} AND c.folder_id IS NULL${order}`).all() as unknown as ChatSummaryRow[]
     ).map(toSummary);
   }
+  // Orphans are raw entries, not conversations — they are listed by
+  // orphanSourceEntries and rendered on their own. Returning nothing here
+  // matters: without this branch the scope fell through to the folder query
+  // and `scope.id` was undefined, which quietly matched no rows and looked
+  // like "no orphans" rather than "wrong query".
+  if (scope.kind === 'orphans') return [];
   return (
     db.prepare(`${base} AND c.folder_id = ?${order}`).all(scope.id) as unknown as ChatSummaryRow[]
   ).map(toSummary);
@@ -689,6 +698,12 @@ export interface TakeoutConversationResult {
   created: number;
   extended: number;
   mergedIntoHarvested: number;
+  /**
+   * Openings shared by more than one entry in this import. None of them were
+   * matched to an existing conversation — see the loop below — so this is the
+   * count of conversations left for a person to glue by hand.
+   */
+  ambiguousOpenings: number;
   turnsWritten: number;
 }
 
@@ -719,6 +734,7 @@ export function importTakeoutConversations(
     created: 0,
     extended: 0,
     mergedIntoHarvested: 0,
+    ambiguousOpenings: 0,
     turnsWritten: 0,
   };
 
@@ -778,6 +794,17 @@ export function importTakeoutConversations(
     throw error;
   }
 
+  // How many entries in this import open with each prompt. An opening shared by
+  // several entries cannot identify any one of them, so it disqualifies
+  // automatic matching outright rather than handing the conversation to
+  // whichever entry the loop happens to reach last.
+  const openingCounts = new Map<string, number>();
+  for (const [, { row }] of best) {
+    const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+    const key = contentKeyFor(opening);
+    openingCounts.set(key, (openingCounts.get(key) ?? 0) + 1);
+  }
+
   db.exec('BEGIN');
   try {
     for (const [, { row, members }] of best) {
@@ -786,14 +813,46 @@ export function importTakeoutConversations(
       // start alike remain findable as candidates for gluing.
       const key = contentKeyFor(opening);
 
-      // Prefer an existing conversation with this opening — but the opening
-      // prompt is NOT an identity. Two conversations can start with the same
-      // prompt and then diverge completely, and Google sometimes clones an
-      // entry outright. So uniqueness of the key is necessary and not
-      // sufficient: the conversations must also actually agree so far.
-      const candidates = db
-        .prepare('SELECT id, source FROM chats WHERE content_key = ? AND merged_into IS NULL LIMIT 2')
-        .all(key) as unknown as { id: number; source: string }[];
+      // An entry may attach to a conversation the app learned about some OTHER
+      // way — a sidebar listing, or a panel capture. That is the enrichment
+      // case, and it is the whole reason for matching: the export carries text
+      // and a date, the panel carries the images, and together they describe
+      // one conversation.
+      //
+      // It may NOT attach to a conversation that came from another export
+      // entry. Two entries opening with the same prompt are indistinguishable
+      // from outside — one conversation logged twice, the same question asked
+      // twice, or a clone Google made on its own — and this check verified
+      // that the SECOND entry's prompts merely started the same way, which is
+      // true in all three cases. The first entry's turns were then deleted and
+      // replaced by the second's, so a 2-turn conversation and a 4-turn one
+      // became a single 4-turn one and the shorter reading was gone. Gluing
+      // those is a judgement, so it is a manual action: see mergeChats.
+      //
+      // And the match must be unambiguous on both sides. When several entries
+      // in this import share an opening, at most one of them is the harvested
+      // conversation and nothing here can tell which — so none of them claim
+      // it. Letting them all match is how a harvested conversation ended up
+      // holding the last entry's turns and none of the others': each match
+      // replaced the previous one's turns wholesale, so of three readings only
+      // the one that happened to be processed last survived.
+      const ambiguous = (openingCounts.get(key) ?? 0) > 1;
+      if (ambiguous) result.ambiguousOpenings += 1;
+      const candidates = ambiguous
+        ? []
+        : (db
+            .prepare(
+              `SELECT id, source FROM chats
+                WHERE content_key = ? AND merged_into IS NULL
+                  AND external_id NOT LIKE 'takeout:%' AND external_id NOT LIKE 'entry:%'
+                  AND NOT EXISTS (
+                        SELECT 1 FROM chat_sources cs
+                          JOIN source_entries e ON e.id = cs.source_entry_id
+                         WHERE cs.chat_id = chats.id AND e.kind = 'takeout'
+                      )
+                LIMIT 2`,
+            )
+            .all(key) as unknown as { id: number; source: string }[]);
 
       const agreesWith = (candidateId: number): boolean => {
         const existing = db
@@ -927,6 +986,47 @@ export function mergeChats(keepId: number, mergeIds: number[]): { merged: number
     // Folder and hand-typed title survive on the keeper; the merged rows keep
     // their own turns so the glue can be inspected and reversed.
     db.prepare(`UPDATE chats SET merged_into = ? WHERE id IN (${placeholders})`).run(keepId, ...ids);
+
+    // The data entries move to the keeper, and this is the substance of the
+    // glue rather than bookkeeping after it: one conversation with several
+    // entries attached to it IS what gluing means, and the keeper's entry list
+    // is where those entries are seen and taken apart again.
+    //
+    // Leaving them behind broke both ends. The keeper listed only its own
+    // entry, so a glue of three showed one. And a merged-away conversation is
+    // hidden from every list, so an entry attached only to one was held by
+    // something unreachable and never appeared among the orphans either —
+    // present in the database and absent from the app.
+    //
+    // Which entries moved is recorded on each loser so unmerging is an exact
+    // reversal rather than a guess at what was there before.
+    const moveLinks = db.prepare(
+      'UPDATE OR IGNORE chat_sources SET chat_id = ? WHERE chat_id = ?',
+    );
+    const dropLeftovers = db.prepare('DELETE FROM chat_sources WHERE chat_id = ?');
+    for (const id of ids) {
+      const moved = (
+        db
+          .prepare('SELECT source_entry_id AS id FROM chat_sources WHERE chat_id = ?')
+          .all(id) as unknown as { id: number }[]
+      ).map((r) => r.id);
+      moveLinks.run(keepId, id);
+      // UPDATE OR IGNORE leaves behind any row whose (keeper, entry) pair
+      // already existed — the entry is on the keeper either way, and the
+      // duplicate on the loser would otherwise survive the glue.
+      dropLeftovers.run(id);
+      const raw = db.prepare('SELECT raw_json FROM chats WHERE id = ?').get(id) as
+        | { raw_json: string }
+        | undefined;
+      let parsed: Record<string, unknown> = {};
+      try {
+        parsed = raw ? JSON.parse(raw.raw_json) : {};
+      } catch {
+        parsed = {};
+      }
+      parsed.glue = { into: keepId, movedEntries: moved };
+      db.prepare('UPDATE chats SET raw_json = ? WHERE id = ?').run(JSON.stringify(parsed), id);
+    }
     noteSource(keepId, 'glued');
     db.exec('COMMIT');
     return { merged: ids.length };
@@ -936,8 +1036,383 @@ export function mergeChats(keepId: number, mergeIds: number[]): { merged: number
   }
 }
 
+/** Reverses a glue, giving the conversation back the entries it brought. */
 export function unmergeChat(chatId: number): void {
-  db.prepare('UPDATE chats SET merged_into = NULL WHERE id = ?').run(chatId);
+  db.exec('BEGIN');
+  try {
+    const raw = db.prepare('SELECT raw_json FROM chats WHERE id = ?').get(chatId) as
+      | { raw_json: string }
+      | undefined;
+    let moved: number[] = [];
+    try {
+      const parsed = raw ? (JSON.parse(raw.raw_json) as { glue?: { movedEntries?: number[] } }) : {};
+      moved = parsed.glue?.movedEntries ?? [];
+    } catch {
+      moved = [];
+    }
+    // Read before clearing it: merged_into IS the record of which conversation
+    // to take the entries back from, so clearing it first loses the answer.
+    const keeper = db.prepare('SELECT merged_into FROM chats WHERE id = ?').get(chatId) as
+      | { merged_into: number | null }
+      | undefined;
+    db.prepare('UPDATE chats SET merged_into = NULL WHERE id = ?').run(chatId);
+    // Taken off the keeper as well: after unmerging, the entry describes this
+    // conversation and not the one it was glued into. An entry deliberately
+    // attached to both by hand is a separate decision and is made again by
+    // hand — guessing which of the two a link was would be worse than either.
+    const give = db.prepare(
+      'INSERT OR IGNORE INTO chat_sources (chat_id, source_entry_id) VALUES (?, ?)',
+    );
+    const takeBack = db.prepare('DELETE FROM chat_sources WHERE chat_id = ? AND source_entry_id = ?');
+    for (const entryId of moved) {
+      give.run(chatId, entryId);
+      if (keeper?.merged_into != null) takeBack.run(keeper.merged_into, entryId);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+export interface SourceEntryView {
+  id: number;
+  kind: string;
+  occurredAt: string | null;
+  href: string | null;
+  query: string | null;
+  turnCount: number;
+  imageCount: number;
+  linked: boolean;
+  /**
+   * How many conversations this entry is attached to. Normally one, but the
+   * link table is many-to-many on purpose and that is not a case to design
+   * away: one export entry can be evidence for two conversations that Google
+   * cloned apart, and the same entry can legitimately be cited by both until
+   * someone decides otherwise. A count above one is a fact worth showing, not
+   * a corruption to repair.
+   */
+  chatCount: number;
+}
+
+/**
+ * The data entries behind a conversation, and the unlinked ones that share its
+ * opening prompt.
+ *
+ * A conversation is a view over these: each contributes different fields — one
+ * may carry the only timestamp, another the only image, a third the fullest
+ * text — so which entries are attached is the substance of the record, not
+ * metadata about it. Unlinked candidates are listed alongside so attaching one
+ * is a decision made with everything in sight.
+ */
+export function sourceEntriesForChat(chatId: number): SourceEntryView[] {
+  const rows = db
+    .prepare(
+      `SELECT e.id, e.kind, e.occurred_at, e.href, e.query, e.payload_json,
+              (SELECT COUNT(*) FROM chat_sources cs WHERE cs.source_entry_id = e.id) AS chat_count,
+              EXISTS (
+                SELECT 1 FROM chat_sources cs
+                 WHERE cs.source_entry_id = e.id AND cs.chat_id = ?
+              ) AS linked
+         FROM source_entries e
+        WHERE EXISTS (
+                SELECT 1 FROM chat_sources cs
+                 WHERE cs.source_entry_id = e.id AND cs.chat_id = ?
+              )
+           OR e.query_key = (SELECT content_key FROM chats WHERE id = ?)
+        ORDER BY linked DESC, e.occurred_at`,
+    )
+    .all(chatId, chatId, chatId) as unknown as {
+    id: number;
+    kind: string;
+    occurred_at: string | null;
+    href: string | null;
+    query: string | null;
+    payload_json: string;
+    linked: number;
+    chat_count: number;
+  }[];
+
+  return rows.map((row) => {
+    let turnCount = 0;
+    let imageCount = 0;
+    try {
+      const payload = JSON.parse(row.payload_json) as {
+        turns?: unknown[];
+        images?: unknown[];
+      };
+      turnCount = payload.turns?.length ?? 0;
+      imageCount = payload.images?.length ?? 0;
+    } catch {
+      // A payload that will not parse is still worth listing: its existence is
+      // the point, and hiding it would make the record look complete.
+    }
+    return {
+      id: row.id,
+      kind: row.kind,
+      occurredAt: row.occurred_at,
+      href: row.href,
+      query: row.query,
+      turnCount,
+      imageCount,
+      linked: row.linked === 1,
+      chatCount: row.chat_count,
+    };
+  });
+}
+
+/**
+ * Attaches a data entry to a conversation by hand — the entry-level glue.
+ *
+ * Does not detach anything it displaces. An entry may end up attached to
+ * several conversations, and that is allowed: see SourceEntryView.chatCount.
+ */
+export function linkSourceEntry(chatId: number, entryId: number): void {
+  db.prepare('INSERT OR IGNORE INTO chat_sources (chat_id, source_entry_id) VALUES (?, ?)').run(
+    chatId,
+    entryId,
+  );
+}
+
+/** Writes an entry's own reading of the conversation as the chat's turns. */
+function writeTurnsFromEntries(chatId: number, entryIds: number[]): number {
+  db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
+  if (entryIds.length === 0) return 0;
+  const insert = db.prepare(
+    'INSERT INTO messages (chat_id, seq, role, text, html) VALUES (?, ?, ?, ?, ?)',
+  );
+  const get = db.prepare('SELECT payload_json FROM source_entries WHERE id = ?');
+  let seq = 0;
+  for (const entryId of entryIds) {
+    const row = get.get(entryId) as unknown as { payload_json: string } | undefined;
+    if (!row) continue;
+    let turns: { role: string; text: string; html?: string }[] = [];
+    try {
+      turns = (JSON.parse(row.payload_json) as { turns?: typeof turns }).turns ?? [];
+    } catch {
+      continue;
+    }
+    for (const turn of turns) {
+      insert.run(chatId, seq, turn.role, turn.text, turn.html || null);
+      seq += 1;
+    }
+  }
+  return seq;
+}
+
+/**
+ * Ungluing: detaches one data entry and gives it a conversation of its own.
+ *
+ * The case this exists for is two entries that were glued together only
+ * because they open with the same prompt — the same question asked twice, or a
+ * clone Google made — which is a mistake nothing but a person can recognise.
+ * So it is a manual action, and it produces a real conversation: its own
+ * internal id, its own external id, and its own link to the entry. Merely
+ * dropping the link would leave the entry attached to nothing, which loses the
+ * reading it carries.
+ *
+ * The entry keeps the identity: the new external id is derived from the entry
+ * row, so ungluing the same entry twice reuses the conversation it already
+ * made rather than piling up near-duplicates.
+ *
+ * The conversation left behind is rebuilt from whatever entries remain — the
+ * "conversation is a view over its entries" rule actually applied — unless it
+ * has been read from the panel, which is a better reading than any export and
+ * must not be overwritten by one.
+ */
+export function unglueSourceEntry(chatId: number, entryId: number): { chatId: number } {
+  db.exec('BEGIN');
+  try {
+    db.prepare('DELETE FROM chat_sources WHERE chat_id = ? AND source_entry_id = ?').run(
+      chatId,
+      entryId,
+    );
+    const folder = db.prepare('SELECT folder_id FROM chats WHERE id = ?').get(chatId) as
+      | { folder_id: number | null }
+      | undefined;
+    const newChatId = adoptEntry(entryId, folder?.folder_id ?? null, chatId);
+
+    // The conversation left behind is rebuilt from whatever entries remain —
+    // the "conversation is a view over its entries" rule actually applied —
+    // unless it has been read from the panel, which is a fuller reading than
+    // any export and must not be overwritten by one.
+    const remaining = (
+      db
+        .prepare(
+          `SELECT cs.source_entry_id AS id FROM chat_sources cs
+             JOIN source_entries e ON e.id = cs.source_entry_id
+            WHERE cs.chat_id = ? ORDER BY e.occurred_at`,
+        )
+        .all(chatId) as unknown as { id: number }[]
+    ).map((r) => r.id);
+    const left = db.prepare('SELECT sources FROM chats WHERE id = ?').get(chatId) as
+      | { sources: string | null }
+      | undefined;
+    if (remaining.length > 0 && !(left?.sources ?? '').split(',').includes('capture')) {
+      writeTurnsFromEntries(chatId, remaining);
+    }
+    db.prepare('UPDATE chats SET takeout_entries = ? WHERE id = ?').run(remaining.length, chatId);
+
+    db.exec('COMMIT');
+    return { chatId: newChatId };
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/**
+ * Gives one entry a conversation of its own. Caller holds the transaction.
+ *
+ * The entry keeps the identity: the external id is derived from the entry row,
+ * so adopting the same entry twice reuses the conversation it already made
+ * rather than piling up near-duplicates.
+ */
+function adoptEntry(entryId: number, folderId: number | null, from?: number): number {
+  const entry = db
+    .prepare(
+      'SELECT id, kind, query, query_key, occurred_at, href FROM source_entries WHERE id = ?',
+    )
+    .get(entryId) as unknown as
+    | {
+        id: number;
+        kind: string;
+        query: string | null;
+        query_key: string | null;
+        occurred_at: string | null;
+        href: string | null;
+      }
+    | undefined;
+  if (!entry) throw new Error(`No source entry ${entryId}`);
+
+  const externalId = `entry:${entry.id}`;
+  let chatId: number;
+  const existing = db.prepare('SELECT id FROM chats WHERE external_id = ?').get(externalId) as
+    | { id: number }
+    | undefined;
+  if (existing) {
+    chatId = existing.id;
+    // A previous split of this entry was merged away; splitting again is a
+    // reversal of that, so bring it back rather than making a third row.
+    db.prepare('UPDATE chats SET merged_into = NULL WHERE id = ?').run(chatId);
+  } else {
+    const { lastInsertRowid } = db
+      .prepare(
+        `INSERT INTO chats
+           (folder_id, external_id, content_key, url, title, started_at, last_seen_at,
+            source, raw_json, list_rank)
+         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL)`,
+      )
+      .run(
+        folderId,
+        externalId,
+        entry.query_key,
+        (entry.query ?? '(untitled)').slice(0, 300),
+        entry.occurred_at,
+        new Date().toISOString(),
+        entry.kind,
+        JSON.stringify({ adopted: { from: from ?? null, entry: entry.id, href: entry.href } }),
+      );
+    chatId = Number(lastInsertRowid);
+  }
+
+  db.prepare('INSERT OR IGNORE INTO chat_sources (chat_id, source_entry_id) VALUES (?, ?)').run(
+    chatId,
+    entryId,
+  );
+  writeTurnsFromEntries(chatId, [entryId]);
+  // Both: where the content came from, and how this conversation came to
+  // exist. Recording only the latter would make an unglued conversation look
+  // like it had no source at all.
+  noteSource(chatId, entry.kind);
+  noteSource(chatId, from === undefined ? 'adopted' : 'unglued');
+  return chatId;
+}
+
+/** Gives an orphan entry a conversation of its own. */
+export function adoptSourceEntry(entryId: number, folderId: number | null): { chatId: number } {
+  db.exec('BEGIN');
+  try {
+    const chatId = adoptEntry(entryId, folderId);
+    db.exec('COMMIT');
+    return { chatId };
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/**
+ * Entries attached to no conversation at all.
+ *
+ * These are the ones with nowhere to be seen from: an import that could not
+ * decide where an entry belonged, or an entry left behind when a wrong glue was
+ * taken apart. Without a list of them they would be present in the database and
+ * absent from the app, which is the worst of both — stored, and lost.
+ */
+export function orphanSourceEntries(): SourceEntryView[] {
+  const rows = db
+    .prepare(
+      `SELECT e.id, e.kind, e.occurred_at, e.href, e.query, e.payload_json
+         FROM source_entries e
+        WHERE NOT EXISTS (SELECT 1 FROM chat_sources cs WHERE cs.source_entry_id = e.id)
+        ORDER BY e.occurred_at DESC, e.id DESC`,
+    )
+    .all() as unknown as {
+    id: number;
+    kind: string;
+    occurred_at: string | null;
+    href: string | null;
+    query: string | null;
+    payload_json: string;
+  }[];
+  return rows.map((row) => {
+    let turnCount = 0;
+    let imageCount = 0;
+    try {
+      const payload = JSON.parse(row.payload_json) as { turns?: unknown[]; images?: unknown[] };
+      turnCount = payload.turns?.length ?? 0;
+      imageCount = payload.images?.length ?? 0;
+    } catch {
+      // Listed regardless — see sourceEntriesForChat.
+    }
+    return {
+      id: row.id,
+      kind: row.kind,
+      occurredAt: row.occurred_at,
+      href: row.href,
+      query: row.query,
+      turnCount,
+      imageCount,
+      linked: false,
+      chatCount: 0,
+    };
+  });
+}
+
+/**
+ * One entry's full stored reading — what it actually says, not a summary of it.
+ * Reviewing an entry before deciding where it belongs needs the whole thing.
+ */
+export function sourceEntryTurns(entryId: number): Message[] {
+  const row = db.prepare('SELECT payload_json FROM source_entries WHERE id = ?').get(entryId) as
+    | { payload_json: string }
+    | undefined;
+  if (!row) return [];
+  try {
+    const turns =
+      (JSON.parse(row.payload_json) as { turns?: { role: string; text: string; html?: string }[] })
+        .turns ?? [];
+    return turns.map((turn, index) => ({
+      id: index,
+      seq: index,
+      role: turn.role === 'user' ? 'user' : 'ai',
+      text: turn.text,
+      html: turn.html || null,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 /** Conversations sharing this one's opening prompt — glue candidates, not facts. */

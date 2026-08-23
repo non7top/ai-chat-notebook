@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import * as db from './db';
+import type { TakeoutImportSummary } from '../shared/types';
 import { getAssetsDir } from './db';
 
 /**
@@ -13,23 +14,11 @@ import { getAssetsDir } from './db';
  * be regenerated, whereas text that Google has dropped cannot be recovered from
  * anywhere else.
  */
-export interface TakeoutImportSummary {
-  entries: number;
-  conversations: number;
-  createdChats: number;
-  extendedChats: number;
-  datedHarvested: number;
-  turnsWritten: number;
-  inserted: number;
-  duplicates: number;
-  skipped: number;
-  matchedToChat: number;
-  matchedToTurn: number;
-  ambiguous: number;
-  orphans: number;
-  imagesCopied: number;
-  imagesMissing: number;
-}
+// Re-exported rather than redeclared. The copy that used to live here drifted
+// from the shared one the moment a field was added, and because the renderer
+// reads the shared type while the main process satisfied this one, the type
+// checker could not see that the two disagreed across the IPC hop.
+export type { TakeoutImportSummary };
 
 const EXTENSION_MIME: Record<string, string> = {
   '.jpg': 'image/jpeg',
@@ -91,6 +80,7 @@ export function importTakeout(
     createdChats: conversations.created,
     extendedChats: conversations.extended,
     datedHarvested: conversations.mergedIntoHarvested,
+    ambiguousOpenings: conversations.ambiguousOpenings,
     turnsWritten: conversations.turnsWritten,
     inserted: stored.inserted,
     duplicates: stored.duplicates,

@@ -47,6 +47,23 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle('chats:delete', (_event, id: number) => db.deleteChat(id));
   ipcMain.handle('chats:openInPanel', (_event, id: number) => openChatInPanel(id));
+  ipcMain.handle('chats:sourceEntries', (_event, id: number) => db.sourceEntriesForChat(id));
+  ipcMain.handle('chats:linkSource', (_event, chatId: number, entryId: number) =>
+    db.linkSourceEntry(chatId, entryId),
+  );
+  ipcMain.handle('chats:unglueSource', (_event, chatId: number, entryId: number) =>
+    db.unglueSourceEntry(chatId, entryId),
+  );
+  ipcMain.handle('entries:orphans', () => db.orphanSourceEntries());
+  ipcMain.handle('entries:turns', (_event, entryId: number) => db.sourceEntryTurns(entryId));
+  ipcMain.handle('entries:adopt', (_event, entryId: number, folderId: number | null) =>
+    db.adoptSourceEntry(entryId, folderId),
+  );
+  ipcMain.handle('chats:similar', (_event, id: number) => db.similarChats(id));
+  ipcMain.handle('chats:merge', (_event, keepId: number, mergeIds: number[]) =>
+    db.mergeChats(keepId, mergeIds),
+  );
+  ipcMain.handle('chats:unmerge', (_event, id: number) => db.unmergeChat(id));
 
   // Routed through the main process rather than window.confirm. Electron does
   // support confirm(), but it does NOT support prompt() — that threw
