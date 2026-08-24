@@ -844,10 +844,11 @@ const READ_TURNS_SCRIPT = `
         // inside controls — so a third of the sources a thread cited were being
         // dropped at capture.
         //
-        // The panel is the ONLY source for these. Reading one export record's
-        // stored answer showed no anchors at all in the body: the export carries a
-        // single link per record, its own URL, and no citations. So a link lost
-        // here is lost outright, with nothing to recover it from.
+        // Not recoverable from the export, which carries its own three inline
+        // anchors in the prose and not these. The two readings cite differently —
+        // the export links words in the sentence, the panel puts chips beside it —
+        // so each holds sources the other does not, and a chip dropped here is
+        // dropped for good.
         //
         // Google's own links are NOT citations. support.google.com and
         // policies.google.com belong to the disclaimer, and rescuing those would

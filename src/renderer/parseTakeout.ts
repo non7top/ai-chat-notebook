@@ -25,9 +25,15 @@
  *
  * - Structure survives: h3, ul, li and strong are all present, which is what the
  *   turn splitter was rewritten to keep.
- * - There are NO citation anchors in the body. The export carries one link per
- *   record — its own URL — and none of the sources the answer cites. The panel
- *   has those; the export does not, so a citation dropped at capture is gone.
+ * - Citations ARE inline. One record's answer carried three anchors inside the
+ *   prose — "VinBus website", "Klook", "City Tour website" — at offsets 1125,
+ *   1698 and 1797 of a 2,503-character string. An earlier note here claimed there
+ *   were none, from printing the first 700 and last 400 characters and concluding
+ *   about the whole; all three sat in the gap. Count, do not sample.
+ * - The panel renders the same sentences with that text PLAIN, and puts its
+ *   sources in chips beside them instead — 37 anchors in the same answer, 13 of
+ *   them inside controls. So both readings carry citations and neither carries the
+ *   other's: inline in the export, chips in the panel.
  * - Maths is stored as LaTeX source, e.g. "$\leftrightarrow$" where the page
  *   renders an arrow. Anything comparing export text against page text has to
  *   expect that, and the fingerprint's normalisation drops it as punctuation
