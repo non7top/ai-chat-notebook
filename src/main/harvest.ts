@@ -597,6 +597,16 @@ export interface LinkRunSummary {
  * this working correctly, and if the links turn out to re-run rather than open,
  * the whole run refuses and stores nothing, which is the outcome to want.
  */
+/**
+ * The longest one thread may take before the run moves on.
+ *
+ * Two settle waits plus a page load plus its images, with room to spare. The run
+ * stopped dead at thread 413 on an image URL that never answered, so this exists
+ * to make that class of failure survivable rather than fatal, without needing to
+ * know in advance which await was the one that hung.
+ */
+const PER_THREAD_DEADLINE_MS = 240_000;
+
 export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
   const summary: LinkRunSummary = {
     attempted: 0,
@@ -624,13 +634,34 @@ export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
         done: summary.fetched,
         total: queue.length,
         errors: summary.errors,
-        current: `link: ${item.title.slice(0, 60)}`,
+        // The tallies travel with the progress, so a run that has stopped
+        // advancing shows WHAT it was doing rather than only a number that no
+        // longer moves.
+        current:
+          `#${summary.attempted} of ${queue.length} · ${summary.fetched} ok · ` +
+          `${summary.rejected} no match · ${summary.notReady} slow · ` +
+          `${summary.errors} errors · ${item.title.slice(0, 40)}`,
       });
       try {
-        const result = await captureFromEntryLink(item.entryId);
+        // A hard ceiling per thread, whatever the cause. The image fetch is
+        // bounded now, but the lesson generalises: one thread must never be able
+        // to stop the run, and the run must not depend on having predicted every
+        // way a page can fail to finish.
+        const result = await Promise.race([
+          captureFromEntryLink(item.entryId),
+          new Promise<never>((_resolve, reject) =>
+            setTimeout(
+              () => reject(new PageNotReadyError(-1)),
+              PER_THREAD_DEADLINE_MS,
+            ),
+          ),
+        ]);
         if (result.rejected) {
           summary.rejected += 1;
           summary.failures.push({ title: item.title.slice(0, 60), reason: result.rejected });
+          // captureFromEntryLink records the rejection itself where it knows the
+          // thread; this covers the case where the entry had no thread yet.
+          db.setLinkState(item.chatId, 'rejected', result.rejected.slice(0, 200));
         } else {
           summary.fetched += 1;
           summary.turns += result.turns;
@@ -650,10 +681,20 @@ export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
         // marked — and it does not push the run toward giving up.
         if (error instanceof PageNotReadyError) {
           summary.notReady += 1;
+          db.setLinkState(
+            item.chatId,
+            'error',
+            error.message.includes('(-1') ? 'Took too long; will be tried again' : error.message,
+          );
           await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS * 2));
           continue;
         }
         consecutiveErrors += 1;
+        db.setLinkState(
+          item.chatId,
+          'error',
+          error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
+        );
         if (consecutiveErrors >= CONSECUTIVE_FAILURE_LIMIT) {
           summary.stoppedEarly =
             `Stopped after ${consecutiveErrors} consecutive errors — something systemic ` +

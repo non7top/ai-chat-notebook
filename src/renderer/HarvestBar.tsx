@@ -355,6 +355,28 @@ export default function HarvestBar({
         </button>
       )}
 
+      {/* What went wrong, on demand. A run's own summary vanishes with the run;
+          this reads the record the fetch leaves behind. */}
+      {more && (
+        <button
+          type="button"
+          title="Threads whose link was tried and did not simply succeed, with the reason"
+          onClick={async () => {
+            const outcomes = await window.notebook.linkOutcomes();
+            const byState = new Map<string, number>();
+            for (const o of outcomes) byState.set(o.state, (byState.get(o.state) ?? 0) + 1);
+            setTakeoutNote(
+              outcomes.length === 0
+                ? 'every link tried so far succeeded'
+                : `${[...byState].map(([s, n]) => `${n} ${s}`).join(' · ')} — first: ` +
+                  `#${outcomes[0].chatId} ${outcomes[0].note ?? ''}`.slice(0, 200),
+            );
+          }}
+        >
+          Link failures
+        </button>
+      )}
+
       {/* Only offered while there is something to repair, so it disappears once
           the archive is clean rather than sitting there inviting a no-op. */}
       {more && inlineImages > 0 && (

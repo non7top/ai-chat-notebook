@@ -240,6 +240,10 @@ export function initDb(userDataPath: string): void {
   // rather than of the moment: retrying gains nothing. Without this the queue
   // never shrank on rejection, so every run walked the same links again.
   ensureColumn('chats', 'link_state', 'link_state TEXT');
+  // Why, alongside what. Without it a failed fetch left a state and no account of
+  // itself, so there was no way to tell a timeout from a page that was not the
+  // thread.
+  ensureColumn('chats', 'link_note', 'link_note TEXT');
   db.exec("UPDATE chats SET date_basis = 'takeout' WHERE started_at IS NOT NULL AND date_basis IS NULL");
   db.exec('CREATE INDEX IF NOT EXISTS chats_list_rank ON chats(list_rank);');
 
@@ -2805,9 +2809,47 @@ export function addAssetForMessage(
   ).run(chatId, messageId, asset.sha256, asset.mime, asset.localPath, asset.bytes, kind);
 }
 
-/** Records the verdict from opening a thread's export link. */
-export function setLinkState(chatId: number, state: 'rejected' | 'fetched'): void {
-  db.prepare('UPDATE chats SET link_state = ? WHERE id = ?').run(state, chatId);
+/**
+ * Records the verdict from opening a thread's export link, and why.
+ *
+ * The reason is stored, not just the state. A run that stopped left no record of
+ * which threads it had tried or how they went — "I don't know if it has failed
+ * some entry or not" is not a question the archive should be unable to answer
+ * about itself.
+ *
+ * 'error' is deliberately NOT excluded from the queue: it means something went
+ * wrong this time, and a later run should try again. Only 'rejected' — the page
+ * was not this thread — is permanent.
+ */
+export function setLinkState(
+  chatId: number,
+  state: 'rejected' | 'fetched' | 'error',
+  reason?: string,
+): void {
+  db.prepare('UPDATE chats SET link_state = ?, link_note = ? WHERE id = ?').run(
+    state,
+    reason ?? null,
+    chatId,
+  );
+}
+
+export interface LinkOutcome {
+  chatId: number;
+  title: string;
+  state: string;
+  note: string | null;
+}
+
+/** Every thread whose link has been tried, and how it went. */
+export function linkOutcomes(): LinkOutcome[] {
+  return db
+    .prepare(
+      `SELECT id AS chatId, ${CHAT_TITLE_SQL} AS title, link_state AS state, link_note AS note
+         FROM chats
+        WHERE link_state IS NOT NULL AND link_state <> 'fetched'
+        ORDER BY link_state, id`,
+    )
+    .all() as unknown as LinkOutcome[];
 }
 
 export function threadsWithLinksToFetch(limit: number): ThreadToFetch[] {
@@ -2825,6 +2867,8 @@ export function threadsWithLinksToFetch(limit: number): ThreadToFetch[] {
           -- reach the same conclusion — and with rejections dominating, every run
           -- would otherwise re-walk the entire queue.
           AND COALESCE(c.link_state, '') <> 'rejected'
+          -- 'error' stays in the queue on purpose: it says this attempt went
+          -- wrong, not that the thread cannot be had.
         GROUP BY c.id
         -- Newest first: an older thread is likelier to have been dropped by
         -- Google altogether, so the ones most likely to still be there go first.

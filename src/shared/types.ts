@@ -483,6 +483,12 @@ export interface NotebookApi {
   fetchFromLinks(limit: number): Promise<LinkRunSummary>;
   countLinksToFetch(): Promise<number>;
   /**
+   * Every thread whose link has been tried and did not simply succeed, with the
+   * reason. Exists because a run that stopped left no account of which threads it
+   * had reached or how they went.
+   */
+  linkOutcomes(): Promise<{ chatId: number; title: string; state: string; note: string | null }[]>;
+  /**
    * Matches stored entries to stored threads after the fact.
    *
    * Deciding during an import decides too early — only the threads that existed
