@@ -169,6 +169,23 @@ export function hammingDistance(left: string, right: string): number {
  * about the end: the panel holds turns added after the export was taken, and
  * Google truncates its own records. They agree about how a thread started.
  */
+/**
+ * The opening PROMPT alone.
+ *
+ * Preferred over prompt-plus-answer for checking that a page is the thread an
+ * entry describes, and the reason is measured. Opening a real archived thread
+ * from January returned 6,689 characters where the export held 1,775 — the export
+ * truncates, so the answer is a partial subset and the distance between the two
+ * came out at 28 of 64 bits: further apart than two unrelated threads measured in
+ * the fixtures. The check rejected a genuine recovery.
+ *
+ * A prompt does not have that problem. It is what the person typed, both sources
+ * record it in full, and neither has any reason to shorten it.
+ */
+export function promptFingerprint(turns: { role: 'user' | 'ai'; text: string }[]): string {
+  return textFingerprint(turns.find((t) => t.role === 'user')?.text ?? '');
+}
+
 export function openingFingerprint(
   turns: { role: 'user' | 'ai'; text: string }[],
 ): string {

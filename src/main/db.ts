@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { hammingDistance, openingFingerprint } from '../shared/fingerprint.ts';
+import { hammingDistance, openingFingerprint, promptFingerprint } from '../shared/fingerprint.ts';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -2561,8 +2561,17 @@ export interface EntryToOpen {
   id: number;
   href: string | null;
   query: string | null;
-  /** The export's own reading, to check the page against. */
+  /** The export's own reading of the whole opening exchange. */
   fingerprint: string | null;
+  /**
+   * The opening PROMPT alone. What a page is checked against, because the export
+   * truncates answers — a real archived thread returned 6,689 characters where
+   * the export held 1,775, so comparing answers rejected a genuine recovery.
+   */
+  promptFingerprint: string | null;
+  /** When the export says this happened. The page states its own date, and they
+   * either agree or this is not that thread. */
+  occurredAt: string | null;
   chatId: number | null;
 }
 
@@ -2827,7 +2836,7 @@ export function countThreadsWithLinksToFetch(): number {
 export function getEntryToOpen(entryId: number): EntryToOpen | null {
   const row = db
     .prepare(
-      `SELECT e.id, e.href, e.query, e.payload_json,
+      `SELECT e.id, e.href, e.query, e.payload_json, e.occurred_at,
               (SELECT cs.chat_id FROM chat_sources cs
                  JOIN chats c ON c.id = cs.chat_id
                 WHERE cs.source_entry_id = e.id AND c.merged_into IS NULL
@@ -2835,13 +2844,28 @@ export function getEntryToOpen(entryId: number): EntryToOpen | null {
          FROM source_entries e WHERE e.id = ?`,
     )
     .get(entryId) as
-    | { id: number; href: string | null; query: string | null; payload_json: string; chat_id: number | null }
+    | {
+        id: number;
+        href: string | null;
+        query: string | null;
+        payload_json: string;
+        occurred_at: string | null;
+        chat_id: number | null;
+      }
     | undefined;
   if (!row) return null;
   let fingerprint: string | null = null;
+  let prompt: string | null = null;
   try {
-    const payload = JSON.parse(row.payload_json) as { textFingerprint?: string };
+    const payload = JSON.parse(row.payload_json) as {
+      textFingerprint?: string;
+      turns?: { role: 'user' | 'ai'; text: string }[];
+    };
     fingerprint = payload.textFingerprint ?? null;
+    // Computed from the stored turns rather than read from a field, so it works
+    // for entries imported before the field existed — which is all of them in an
+    // archive imported before today.
+    prompt = payload.turns ? promptFingerprint(payload.turns) : null;
   } catch {
     fingerprint = null;
   }
@@ -2850,6 +2874,8 @@ export function getEntryToOpen(entryId: number): EntryToOpen | null {
     href: row.href,
     query: row.query,
     fingerprint,
+    promptFingerprint: prompt,
+    occurredAt: row.occurred_at,
     chatId: row.chat_id,
   };
 }

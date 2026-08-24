@@ -1,6 +1,6 @@
 import { BrowserWindow } from 'electron';
 import * as db from './db';
-import { hammingDistance, openingFingerprint } from '../shared/fingerprint.ts';
+import { hammingDistance, promptFingerprint } from '../shared/fingerprint.ts';
 import { ensureOnAiMode, navigateAiMode } from './aiModeView';
 import { assetHref, storeImage } from './assets';
 import { rewriteImageSources } from '../shared/rewriteImages.ts';
@@ -435,7 +435,17 @@ export interface LinkCaptureResult {
  * material, the same thread across the two sources sat at 14 while unrelated
  * threads sat at 24. Anything at or above 22 is treated as a different answer.
  */
-const REJECT_AT_DISTANCE = 22;
+/**
+ * How far apart two openings may be and still be the same thread.
+ *
+ * Applied to the PROMPT, not the whole opening exchange. Measured against a real
+ * archived thread: the page's answer ran to 6,689 characters where the export
+ * held 1,775, so comparing answers put a genuine match at 28 of 64 bits — beyond
+ * where unrelated threads sat — and the check refused a recovery it should have
+ * allowed. The export truncates; the prompt is what the person typed and neither
+ * source shortens it.
+ */
+const REJECT_AT_DISTANCE = 12;
 
 export async function captureFromEntryLink(entryId: number): Promise<LinkCaptureResult> {
   const entry = db.getEntryToOpen(entryId);
@@ -451,13 +461,33 @@ export async function captureFromEntryLink(entryId: number): Promise<LinkCapture
     throw new Error(`The page showed no answer turns (${turns.length} turn(s) seen)`);
   }
 
-  const seen = openingFingerprint(turns.map((t) => ({ role: t.role, text: t.text })));
-  const distance = entry.fingerprint ? hammingDistance(entry.fingerprint, seen) : 64;
+  const pageTurns = turns.map((t) => ({ role: t.role, text: t.text }));
+  const seen = promptFingerprint(pageTurns);
+  const distance = entry.promptFingerprint
+    ? hammingDistance(entry.promptFingerprint, seen)
+    : 64;
+
+  // The strongest evidence available, and it costs nothing: the page states the
+  // date of its own turns. An archived thread is dated when it happened; a page
+  // that re-ran the prompt is dated today. Opening thread #2660 showed
+  // "January 11, 2026", which is what settled the question of whether these links
+  // open or re-run — after the answer-length comparison had suggested the wrong
+  // answer. Where the page gives a date, it decides.
+  const pageDate = (() => {
+    for (const turn of turns) {
+      const parsed = parsePanelStamp(turn.stamp);
+      if (parsed) return parsed.slice(0, 10);
+    }
+    return null;
+  })();
+  const entryDate = entry.occurredAt ? entry.occurredAt.slice(0, 10) : null;
+  const datesAgree = pageDate !== null && entryDate !== null && pageDate === entryDate;
+  const datesDiffer = pageDate !== null && entryDate !== null && pageDate !== entryDate;
 
   // An entry with no stored fingerprint predates it being recorded, and there is
   // nothing to check against. Refused rather than trusted: the whole point of
   // this route is that it is only safe when verifiable.
-  if (!entry.fingerprint) {
+  if (!entry.promptFingerprint) {
     return {
       distance,
       rejected:
@@ -469,7 +499,24 @@ export async function captureFromEntryLink(entryId: number): Promise<LinkCapture
     };
   }
 
-  if (distance >= REJECT_AT_DISTANCE) {
+  // A page dated differently from the record is not that record, whatever its
+  // text resembles.
+  if (datesDiffer) {
+    return {
+      distance,
+      rejected:
+        `The page's turns are dated ${pageDate} while this record is dated ${entryDate}. ` +
+        'That is a different thread, or a prompt that has just been re-run, so nothing ' +
+        'was stored.',
+      chatId: null,
+      turns: 0,
+      images: 0,
+    };
+  }
+
+  // Dates agreeing is near-conclusive on its own — a re-run cannot be dated in
+  // the past — so a truncated or reworded answer no longer blocks a recovery.
+  if (!datesAgree && distance >= REJECT_AT_DISTANCE) {
     // Recorded so the queue lets go of it. The verdict is about the link, not
     // about today, and a thread that keeps its place in the queue after being
     // rejected makes every subsequent run repeat the same work.
