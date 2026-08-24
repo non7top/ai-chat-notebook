@@ -27,6 +27,7 @@ const api: NotebookApi = {
   rematchActivity: () => ipcRenderer.invoke('takeout:rematch'),
   activityStats: () => ipcRenderer.invoke('takeout:stats'),
   getAssetsBaseUrl: () => ipcRenderer.invoke('assets:baseUrl'),
+  openExternal: (url) => ipcRenderer.invoke('shell:open', url),
   captureTurns: (limit) => ipcRenderer.invoke('capture:turns', limit),
   cancelCapture: () => ipcRenderer.invoke('capture:cancel'),
   recaptureChat: (chatId) => ipcRenderer.invoke('capture:recapture', chatId),

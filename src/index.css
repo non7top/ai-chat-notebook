@@ -427,6 +427,16 @@ button:disabled {
   margin-bottom: 0;
 }
 
+/* Citations look clickable now that they are. They were styled as plain text
+   while nothing happened on click, which was at least honest; leaving them that
+   way once they open a browser would hide the only route out of the archive. */
+.turn-body a {
+  color: #1d4ed8;
+  text-decoration: underline;
+  text-decoration-color: #93b4fc;
+  cursor: pointer;
+}
+
 /* Captured markup carries no stylesheet of its own — these keep third-party
    HTML from breaking the pane's layout. */
 .turn-body img {

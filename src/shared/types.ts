@@ -400,6 +400,12 @@ export interface NotebookApi {
   rematchActivity(): Promise<ActivityMatchResult>;
   activityStats(): Promise<ActivityStats>;
 
+  /**
+   * Opens a captured citation in the user's own browser. Only http and https —
+   * the main process refuses anything else rather than handing the OS a string
+   * that might run instead of browse.
+   */
+  openExternal(url: string): Promise<void>;
   /** file:// base for resolving the relative asset paths in stored HTML. */
   getAssetsBaseUrl(): Promise<string>;
   captureTurns(limit: number): Promise<CaptureSummary>;

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -99,6 +99,25 @@ export function registerIpcHandlers(): void {
   // being moved. The renderer loads from inside the app bundle, so a relative
   // path there would resolve against the bundle and every image would break —
   // it needs the real base to resolve against at read time.
+  /**
+   * Opens a captured citation in the user's own browser.
+   *
+   * Answers carry real sources — one measured answer cited 37 links — and until
+   * now every one of them was inert: the reader swallows clicks to stop a link
+   * navigating the app's own window away from the app, which leaves the archive
+   * with no way out to a source.
+   *
+   * The scheme is checked here rather than trusted from the renderer. This hands
+   * a string to the operating system's URL handler, and file: or a custom scheme
+   * would be handing it something that runs rather than something that browses.
+   */
+  ipcMain.handle('shell:open', async (_event, url: string) => {
+    if (!/^https?:\/\//i.test(url)) {
+      throw new Error(`Refusing to open ${url.slice(0, 40)} — only http and https.`);
+    }
+    await shell.openExternal(url);
+  });
+
   ipcMain.handle('assets:baseUrl', () => `${pathToFileURL(db.getAssetsDir()).href}/`);
 
   // Takeout import is split in two so the parse is verifiable before anything

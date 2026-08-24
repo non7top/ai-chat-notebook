@@ -467,7 +467,26 @@ export default function ChatReader({ chat, onChange }: Props) {
         </div>
       )}
 
-      <div className="reader-body" onClick={(event) => event.preventDefault()}>
+      {/* Clicks are still intercepted at the container — a stored link must never
+          navigate the app's own window away from the app — but a citation now
+          leaves for the system browser instead of doing nothing at all. Answers
+          cite real sources, one measured answer carrying 37 of them, and an
+          archive you cannot follow out of is a worse archive. */}
+      <div
+        className="reader-body"
+        onClick={(event) => {
+          event.preventDefault();
+          const anchor = (event.target as HTMLElement).closest?.('a[href]');
+          const href = anchor?.getAttribute('href');
+          // The scheme is checked again in the main process; this is only to
+          // avoid asking it about the local asset paths in the same markup.
+          if (href && /^https?:\/\//i.test(href)) {
+            window.notebook.openExternal(href).catch(() => {
+              /* Refused by the main process; the click simply does nothing. */
+            });
+          }
+        }}
+      >
         {reading !== 'stored' && shown.length === 0 && (
           <p className="hint">That entry holds no turns.</p>
         )}
