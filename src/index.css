@@ -96,6 +96,14 @@ button:disabled {
   flex: none;
 }
 
+/* A plain banner carries progress, so it needs a ground of its own — without one
+   it reads as part of the toolbar above it. */
+.banner:not(.error) {
+  background: #eff6ff;
+  color: #1e3a5f;
+  font-size: 0.8rem;
+}
+
 .banner.error {
   background: #fee2e2;
   color: #991b1b;

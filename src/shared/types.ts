@@ -314,6 +314,12 @@ export interface TakeoutPreview {
   chatsTouched: number;
 }
 
+export interface ArchiveProgress {
+  phase: 'database' | 'counting' | 'copying' | 'done';
+  done: number;
+  total: number;
+}
+
 export interface SuspectCopyGroup {
   fingerprint: string;
   chatIds: number[];
@@ -358,6 +364,8 @@ export interface NotebookApi {
    * Copies the whole archive — database and images — to a folder of the user's
    * choosing. Returns null if the dialog was cancelled.
    */
+  /** Backup and restore progress. Broadcast, since the menu can start either. */
+  onArchiveProgress(callback: (progress: ArchiveProgress) => void): () => void;
   exportArchive(): Promise<{
     folder: string;
     dbBytes: number;

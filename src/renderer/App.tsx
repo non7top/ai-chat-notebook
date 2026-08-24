@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type {
   ActivityStats,
+  ArchiveProgress,
   SuspectCopyGroup,
   AiModeStatus,
   ChatDetail,
@@ -25,6 +26,18 @@ export default function App() {
   const [query, setQuery] = useState('');
   const [report, setReport] = useState<TakeoutReportData | null>(null);
   const [copies, setCopies] = useState<SuspectCopyGroup[] | null>(null);
+  const [archive, setArchive] = useState<ArchiveProgress | null>(null);
+
+  // Shown as a banner rather than in the toolbar: a backup can be started from
+  // the menu with no toolbar in the picture, and the complaint that prompted this
+  // was not the wait but having nothing on screen during it.
+  useEffect(
+    () =>
+      window.notebook.onArchiveProgress((progress) =>
+        setArchive(progress.phase === 'done' ? null : progress),
+      ),
+    [],
+  );
   const [applying, setApplying] = useState(false);
   const [chat, setChat] = useState<ChatDetail | null>(null);
   const [status, setStatus] = useState<AiModeStatus>({ connected: false });
@@ -120,6 +133,16 @@ export default function App() {
         uncaptured={uncaptured}
         activity={activity}
       />
+
+      {archive && (
+        <div className="banner">
+          {archive.phase === 'database'
+            ? 'Backing up the database…'
+            : archive.phase === 'counting'
+              ? 'Counting images…'
+              : `Copying images — ${archive.done} of ${archive.total}`}
+        </div>
+      )}
 
       {error && (
         <div className="banner error">

@@ -310,11 +310,16 @@ function assetHrefFor(localPath: string | null): string | null {
  * Assets are copied beside it, because a database of conversations whose images
  * live somewhere else is not a backup of the conversations.
  */
-export function exportArchive(destDir: string): {
-  dbBytes: number;
-  assetFiles: number;
-  assetBytes: number;
-} {
+export interface ArchiveProgress {
+  phase: 'database' | 'counting' | 'copying' | 'done';
+  done: number;
+  total: number;
+}
+
+export async function exportArchive(
+  destDir: string,
+  onProgress?: (progress: ArchiveProgress) => void,
+): Promise<{ dbBytes: number; assetFiles: number; assetBytes: number }> {
   fs.mkdirSync(destDir, { recursive: true });
   const dbPath = path.join(destDir, 'notebook.sqlite');
   if (fs.existsSync(dbPath)) {
@@ -322,6 +327,12 @@ export function exportArchive(destDir: string): {
       `${dbPath} already exists. Pick an empty folder — refusing to overwrite an existing backup.`,
     );
   }
+
+  onProgress?.({ phase: 'database', done: 0, total: 0 });
+  // Yielded before the blocking call so the phase actually paints. VACUUM INTO
+  // cannot be broken up — node:sqlite is synchronous — but it is seconds, where
+  // the asset copy below is minutes.
+  await new Promise((resolve) => setTimeout(resolve, 0));
   // The path is interpolated because VACUUM INTO takes no parameters. Quotes are
   // doubled, which is SQLite's own escape for a string literal, so a folder name
   // containing an apostrophe cannot end the statement early.
@@ -331,19 +342,41 @@ export function exportArchive(destDir: string): {
   const assetsDest = path.join(destDir, 'assets');
   let assetFiles = 0;
   let assetBytes = 0;
+
   if (fs.existsSync(assetsSource)) {
-    fs.cpSync(assetsSource, assetsDest, { recursive: true });
+    onProgress?.({ phase: 'counting', done: 0, total: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Enumerated first so the copy has a total to report against. An archive of
+    // image generation runs to thousands of files, and "copying…" with no
+    // denominator is the same unhelpful silence as no message at all.
+    const files: string[] = [];
     const walk = (dir: string): void => {
       for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, item.name);
         if (item.isDirectory()) walk(full);
-        else {
-          assetFiles += 1;
-          assetBytes += fs.statSync(full).size;
-        }
+        else files.push(full);
       }
     };
-    walk(assetsDest);
+    walk(assetsSource);
+
+    // Copied in batches with the thread handed back between them. cpSync over
+    // the whole tree froze every window for the duration — synchronous work in
+    // the main process blocks the compositor, so the app was not slow, it was
+    // unresponsive with nothing on screen to say why.
+    const BATCH = 200;
+    for (let i = 0; i < files.length; i += BATCH) {
+      for (const file of files.slice(i, i + BATCH)) {
+        const relative = path.relative(assetsSource, file);
+        const target = path.join(assetsDest, relative);
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.copyFileSync(file, target);
+        assetFiles += 1;
+        assetBytes += fs.statSync(target).size;
+      }
+      onProgress?.({ phase: 'copying', done: assetFiles, total: files.length });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
   }
 
   const counts = db
@@ -375,6 +408,7 @@ export function exportArchive(destDir: string): {
     )}\n`,
   );
 
+  onProgress?.({ phase: 'done', done: assetFiles, total: assetFiles });
   return { dbBytes: fs.statSync(dbPath).size, assetFiles, assetBytes };
 }
 
@@ -390,7 +424,11 @@ export function exportArchive(destDir: string): {
  * because a file cannot be replaced underneath an open SQLite connection and
  * have the connection notice.
  */
-export function importArchive(srcDir: string, userDataPath: string): { movedTo: string } {
+export async function importArchive(
+  srcDir: string,
+  userDataPath: string,
+  onProgress?: (progress: ArchiveProgress) => void,
+): Promise<{ movedTo: string }> {
   const manifestPath = path.join(srcDir, 'manifest.json');
   if (!fs.existsSync(manifestPath)) {
     throw new Error(`No manifest.json in ${srcDir} — that is not an archive folder.`);
@@ -420,11 +458,38 @@ export function importArchive(srcDir: string, userDataPath: string): { movedTo: 
   const currentAssets = getAssetsDir();
   if (fs.existsSync(currentAssets)) fs.renameSync(currentAssets, path.join(asideDir, 'assets'));
 
+  onProgress?.({ phase: 'database', done: 0, total: 0 });
   fs.copyFileSync(incomingDb, currentDb);
+
   const incomingAssets = path.join(srcDir, 'assets');
   if (fs.existsSync(incomingAssets)) {
-    fs.cpSync(incomingAssets, currentAssets, { recursive: true });
+    // Batched for the same reason as the backup: cpSync over thousands of files
+    // blocks the main process, which blocks every window, and a restore is
+    // exactly the moment a frozen app is least welcome.
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, item.name);
+        if (item.isDirectory()) walk(full);
+        else files.push(full);
+      }
+    };
+    walk(incomingAssets);
+
+    const BATCH = 200;
+    let done = 0;
+    for (let i = 0; i < files.length; i += BATCH) {
+      for (const file of files.slice(i, i + BATCH)) {
+        const target = path.join(currentAssets, path.relative(incomingAssets, file));
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.copyFileSync(file, target);
+        done += 1;
+      }
+      onProgress?.({ phase: 'copying', done, total: files.length });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
   }
+  onProgress?.({ phase: 'done', done: 0, total: 0 });
   return { movedTo: asideDir };
 }
 

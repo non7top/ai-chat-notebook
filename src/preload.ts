@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   AiModeStatus,
+  ArchiveProgress,
   CaptureProgress,
   HarvestProgress,
   NotebookApi,
@@ -12,6 +13,12 @@ const api: NotebookApi = {
   pickTakeout: () => ipcRenderer.invoke('takeout:pick'),
   applyTakeout: (folder, rows) => ipcRenderer.invoke('takeout:apply', folder, rows),
   previewTakeout: (rows) => ipcRenderer.invoke('takeout:preview', rows),
+  onArchiveProgress: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: ArchiveProgress) =>
+      callback(progress);
+    ipcRenderer.on('archive:progress', listener);
+    return () => ipcRenderer.removeListener('archive:progress', listener);
+  },
   exportArchive: () => ipcRenderer.invoke('archive:export'),
   importArchive: () => ipcRenderer.invoke('archive:import'),
   undoTakeout: () => ipcRenderer.invoke('takeout:undo'),
