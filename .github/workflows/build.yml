@@ -215,7 +215,12 @@ jobs:
           # rename step above (when it ran) is what actually names this.
           name: windows-installer
           path: ${{ steps.artifact_names.outputs.exe_path || 'dist/*.exe' }}
-          retention-days: 14
+          # Three days, not fourteen. A 99MB installer per push filled the
+          # account's 10GB artifact quota in a single day of iteration — twenty
+          # builds — and the failure lands on the upload step of an otherwise
+          # green build, which reads as a broken build rather than a full disk.
+          # These exist to be installed within minutes of being made.
+          retention-days: 3
           # Setup.exe is already a compressed archive internally, so the
           # action's own zip wrapper is pure overhead.
           archive: false
