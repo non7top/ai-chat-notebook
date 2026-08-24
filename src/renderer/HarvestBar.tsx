@@ -365,7 +365,8 @@ export default function HarvestBar({
             try {
               const r = await window.notebook.rematchEntries();
               setTakeoutNote(
-                `matched ${r.attached} of ${r.considered} entries · ${r.declined} too close to call`,
+                `${r.relinked} links repaired · ${r.attached} threads glued of ${r.considered} ` +
+                  `considered · ${r.declined} too close to call`,
               );
               onFinished();
             } finally {

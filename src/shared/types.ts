@@ -452,7 +452,13 @@ export interface NotebookApi {
    * then could be considered. Run afterwards, everything is on the table, which
    * is what makes "fetch the threads first, match second" work.
    */
-  rematchEntries(): Promise<{ attached: number; considered: number; declined: number }>;
+  rematchEntries(): Promise<{
+    attached: number;
+    considered: number;
+    declined: number;
+    /** Links an earlier import should have made and did not. */
+    relinked: number;
+  }>;
   /**
    * Threads holding identical conversations. Detects the damage from a bug where
    * clicking a missing sidebar row silently stored the previously shown thread

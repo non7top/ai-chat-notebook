@@ -907,10 +907,28 @@ repairScenario(true);
     { seq: 1, role: 'ai', text: answer, html: null },
   ], []);
 
+  // The state a real archive was found in: an import created the thread and wrote
+  // its turns, then failed to link the entry it came from — the linking code
+  // rebuilt the reference string in the old format and missed every entry keyed
+  // by Google's mstk token. The link is repaired rather than the export
+  // re-imported, since reference shapes changed between those builds and a
+  // re-import would store the same entries again instead of recognising them.
+  const importedThread = db
+    .listChats({ kind: 'all' })
+    .find((c) => c.sources === 'takeout')?.id as number;
+  const raw = new DatabaseSync(path.join(scratch, 'notebook.sqlite'));
+  raw.prepare('DELETE FROM chat_sources WHERE chat_id = ?').run(importedThread);
+  raw.close();
+  const strandedBefore = db.sourceEntriesForChat(importedThread).filter((e) => e.linked).length;
+
   // Two threads now hold the same conversation: the one the import made and the
   // one that was captured. That is the duplicate the list shows.
   const listedBefore = db.listChats({ kind: 'all' }).length;
   const r = db.rematchEntriesToThreads();
+  console.log(
+    `  stranded entry links: ${strandedBefore} before, repaired ${r.relinked}`,
+  );
+  if (r.relinked !== 1) throw new Error(`the stranded link was not repaired (${r.relinked})`);
   const listedAfter = db.listChats({ kind: 'all' });
   const linkedAfter = db.sourceEntriesForChat(late).filter((e) => e.linked).length;
   console.log(

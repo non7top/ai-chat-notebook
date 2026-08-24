@@ -2587,6 +2587,61 @@ export interface RematchResult {
   attached: number;
   considered: number;
   declined: number;
+  /** Links an earlier import should have made and did not. See repairEntryLinks. */
+  relinked: number;
+}
+
+/**
+ * Restores links an earlier import failed to make.
+ *
+ * Found in a real archive: threads created by an import, each with exactly one
+ * entry carrying the right query and the right URL, and no link between them. The
+ * cause was a bug since fixed — the linking code rebuilt the entry's reference
+ * string locally instead of calling takeoutEntryRef, so it looked up the old
+ * format and missed every entry keyed by Google's mstk token, which is the common
+ * case. The import wrote the turns and then failed to record where they came
+ * from.
+ *
+ * Repairing beats re-importing. A re-import would work, but references changed
+ * shape between those builds, so entries stored under the old form would be
+ * stored again under the new one rather than recognised — turning a repair into a
+ * duplication.
+ *
+ * Only unambiguous pairs are linked: one export-owned thread, one unlinked entry
+ * with that opening. Where several entries share it there is nothing here to
+ * choose between them, and guessing is what the rest of this file exists to
+ * avoid.
+ */
+function repairEntryLinks(): number {
+  const orphanedThreads = db
+    .prepare(
+      `SELECT id, content_key FROM chats
+        WHERE merged_into IS NULL
+          AND external_id LIKE 'takeout:%'
+          AND content_key IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM chat_sources cs WHERE cs.chat_id = chats.id)`,
+    )
+    .all() as unknown as { id: number; content_key: string }[];
+
+  let relinked = 0;
+  for (const thread of orphanedThreads) {
+    const entries = db
+      .prepare(
+        `SELECT e.id FROM source_entries e
+          WHERE e.kind = 'takeout' AND e.query_key = ?
+            AND NOT EXISTS (SELECT 1 FROM chat_sources cs WHERE cs.source_entry_id = e.id)
+          LIMIT 2`,
+      )
+      .all(thread.content_key) as unknown as { id: number }[];
+    if (entries.length !== 1) continue;
+    db.prepare(
+      `INSERT INTO chat_sources (chat_id, source_entry_id, linked_by)
+       VALUES (?, ?, 'import')
+       ON CONFLICT (chat_id, source_entry_id) DO NOTHING`,
+    ).run(thread.id, entries[0].id);
+    relinked += 1;
+  }
+  return relinked;
 }
 
 /**
@@ -2608,7 +2663,8 @@ export interface RematchResult {
  * which matters because this runs over the whole archive at once.
  */
 export function rematchEntriesToThreads(): RematchResult {
-  const result: RematchResult = { attached: 0, considered: 0, declined: 0 };
+  const result: RematchResult = { attached: 0, considered: 0, declined: 0, relinked: 0 };
+  result.relinked = repairEntryLinks();
   const exportThreads = db
     .prepare(
       `SELECT id, content_key, text_fingerprint FROM chats
