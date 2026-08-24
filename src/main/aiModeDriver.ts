@@ -837,8 +837,32 @@ const READ_TURNS_SCRIPT = `
         const rescued = Array.from(junk.querySelectorAll('img')).filter((img) =>
           keep.has(img.currentSrc || img.getAttribute('src') || ''),
         );
-        if (rescued.length > 0) {
-          junk.replaceWith.apply(junk, rescued);
+
+        // Citations are rescued too, for the same reason the images are: Google
+        // puts a source link inside a clickable chip, and removing the chip took
+        // the link with it. Measured on one real answer — 37 anchors, 13 of them
+        // inside controls — so a third of the sources a thread cited were being
+        // dropped at capture. The export keeps them inline, which is how the
+        // difference became visible: prose that is a hyperlink there was plain
+        // text here.
+        //
+        // Google's own links are NOT citations. support.google.com and
+        // policies.google.com belong to the disclaimer, and rescuing those would
+        // put boilerplate back into every answer. Host, not class, because the
+        // classes churn.
+        const rescuedLinks = Array.from(junk.querySelectorAll('a[href]')).filter((a) => {
+          const href = a.getAttribute('href') || '';
+          if (!/^https?:/i.test(href)) return false;
+          try {
+            const host = new URL(href).hostname;
+            return !/(^|\.)google\.com$/i.test(host);
+          } catch {
+            return false;
+          }
+        });
+        const survivors = rescued.concat(rescuedLinks);
+        if (survivors.length > 0) {
+          junk.replaceWith.apply(junk, survivors);
         } else {
           junk.remove();
         }
