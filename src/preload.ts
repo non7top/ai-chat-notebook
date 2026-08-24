@@ -55,6 +55,7 @@ const api: NotebookApi = {
   deleteFolder: (id) => ipcRenderer.invoke('folders:delete', id),
 
   listChats: (scope) => ipcRenderer.invoke('chats:list', scope),
+  scopeCounts: () => ipcRenderer.invoke('chats:counts'),
   getChat: (id) => ipcRenderer.invoke('chats:get', id),
   setChatFolder: (chatId, folderId) => ipcRenderer.invoke('chats:setFolder', chatId, folderId),
   setChatTitle: (chatId, userTitle) => ipcRenderer.invoke('chats:setTitle', chatId, userTitle),

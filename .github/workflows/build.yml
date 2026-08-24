@@ -81,6 +81,12 @@ jobs:
       - name: Check reader sanitising
         run: docker compose run --rm dev npm run check:sanitize
 
+      # A count computed by a query that is subtly not the list's query looks
+      # authoritative and is wrong, and it is the LIST that then appears broken.
+      # Every tree count is asserted against the length of the list it labels.
+      - name: Check the tree's counts
+        run: docker compose run --rm dev npm run check:counts
+
       - name: Check title matching
         run: docker compose run --rm dev npm run check:find
 

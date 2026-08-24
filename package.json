@@ -22,6 +22,7 @@
     "check:sources": "node --experimental-strip-types --no-warnings scripts/check-sources.ts",
     "check:inline": "node --experimental-strip-types --no-warnings scripts/check-inline.ts",
     "check:sanitize": "node --experimental-strip-types --no-warnings scripts/check-sanitize.ts",
+    "check:counts": "node --experimental-strip-types --no-warnings scripts/check-counts.ts",
     "check:not-debug": "node scripts/check-not-debug.mjs",
     "check:bundle": "node scripts/check-bundle-externals.mjs"
   },

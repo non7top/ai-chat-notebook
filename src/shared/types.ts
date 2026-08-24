@@ -112,6 +112,12 @@ export interface ChatDetail extends ChatSummary {
 export type ChatScope =
   | { kind: 'all' }
   | { kind: 'unfiled' }
+  /**
+   * Everything placed in a folder, whichever one. The counterpart to unfiled:
+   * a folder answers "what is in this folder", which is not the same question
+   * as "what have I organised at all".
+   */
+  | { kind: 'filed' }
   /** Raw entries attached to no thread — not threads, so rendered apart. */
   | { kind: 'orphans' }
   /**
@@ -121,6 +127,23 @@ export type ChatScope =
    */
   | { kind: 'empty' }
   | { kind: 'folder'; id: number };
+
+/**
+ * How many threads sit behind each row of the tree.
+ *
+ * Every figure is produced by the same predicate as the query that fills the
+ * pane it labels, so a count and its list can never disagree — see scopeCounts.
+ */
+export interface ScopeCounts {
+  all: number;
+  unfiled: number;
+  filed: number;
+  empty: number;
+  /** Entries, not threads: the orphan pane lists a different kind of thing. */
+  orphans: number;
+  /** Threads directly in each folder, by folder id. Subfolders are not included. */
+  byFolder: Record<number, number>;
+}
 
 export interface HarvestProgress {
   phase: 'scanning' | 'done' | 'cancelled' | 'error';
@@ -462,6 +485,8 @@ export interface NotebookApi {
   deleteFolder(id: number): Promise<void>;
 
   listChats(scope: ChatScope): Promise<ChatSummary[]>;
+  /** Row counts for the tree, in one call. */
+  scopeCounts(): Promise<ScopeCounts>;
   getChat(id: number): Promise<ChatDetail | null>;
   setChatFolder(chatId: number, folderId: number | null): Promise<void>;
   setChatTitle(chatId: number, userTitle: string): Promise<void>;

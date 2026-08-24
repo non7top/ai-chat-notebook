@@ -9,6 +9,7 @@ import type {
   ChatSummary,
   Folder,
   Message,
+  ScopeCounts,
   TakeoutImportRow,
 } from '../shared/types';
 
@@ -709,6 +710,55 @@ function toSummary(row: ChatSummaryRow): ChatSummary {
 // exactly the kind of mismatch the type checker cannot see across an IPC hop.
 export type { ChatScope };
 
+/**
+ * How many threads each scope holds, in one call.
+ *
+ * The tree named five scopes and put a number on none of them, so "Unfiled" and
+ * "All threads" were two rows that looked the same and listed nearly the same
+ * 2848 conversations — nothing on screen said that 2846 of them were unfiled,
+ * which is the single most useful fact about this archive's state.
+ *
+ * Every count here uses the SAME predicate as the query that fills the pane it
+ * labels — merged_into IS NULL, and the scope's own clause. A count that
+ * disagrees with the list it sits beside is worse than no count, because the
+ * list is then the thing that looks wrong.
+ *
+ * One round trip rather than one per row: it is called on every reload, and six
+ * synchronous IPC hops on the main thread is how the last performance complaint
+ * started. All of it is over `chats` — 2848 rows, indexed — and measured under a
+ * millisecond.
+ */
+export function scopeCounts(): ScopeCounts {
+  const one = (sql: string): number =>
+    Number((db.prepare(sql).get() as unknown as { n: number }).n ?? 0);
+  const live = 'FROM chats c WHERE c.merged_into IS NULL';
+  const byFolder: Record<number, number> = {};
+  const rows = db
+    .prepare(
+      `SELECT c.folder_id AS folderId, COUNT(*) AS n ${live}
+         AND c.folder_id IS NOT NULL GROUP BY c.folder_id`,
+    )
+    .all() as unknown as { folderId: number; n: number }[];
+  for (const row of rows) byFolder[row.folderId] = Number(row.n);
+  return {
+    all: one(`SELECT COUNT(*) AS n ${live}`),
+    unfiled: one(`SELECT COUNT(*) AS n ${live} AND c.folder_id IS NULL`),
+    filed: one(`SELECT COUNT(*) AS n ${live} AND c.folder_id IS NOT NULL`),
+    empty: one(
+      `SELECT COUNT(*) AS n ${live}
+         AND NOT EXISTS (SELECT 1 FROM messages m2 WHERE m2.chat_id = c.id)`,
+    ),
+    // Entries, not threads — counted from the entry side for the same reason
+    // listChats returns nothing for that scope: they are a different kind of
+    // thing and the pane that shows them is a different pane.
+    orphans: one(
+      `SELECT COUNT(*) AS n FROM source_entries e
+        WHERE NOT EXISTS (SELECT 1 FROM chat_sources cs WHERE cs.source_entry_id = e.id)`,
+    ),
+    byFolder,
+  };
+}
+
 export function listChats(scope: ChatScope): ChatSummary[] {
   // merged_into IS NULL everywhere: a chat merged away is kept (so the merge
   // stays undoable) but must not show up as a separate conversation.
@@ -748,6 +798,15 @@ export function listChats(scope: ChatScope): ChatSummary[] {
   if (scope.kind === 'unfiled') {
     return (
       db.prepare(`${base} AND c.folder_id IS NULL${order}`).all() as unknown as ChatSummaryRow[]
+    ).map(toSummary);
+  }
+  // The counterpart, and the reason it exists: with 2846 of 2848 threads
+  // unfiled, "All threads" and "Unfiled" show near-identical lists, so neither
+  // answers "what have I actually organised". A folder answers it one folder at
+  // a time, which is not the same question.
+  if (scope.kind === 'filed') {
+    return (
+      db.prepare(`${base} AND c.folder_id IS NOT NULL${order}`).all() as unknown as ChatSummaryRow[]
     ).map(toSummary);
   }
   // Orphans are raw entries, not conversations — they are listed by

@@ -41,6 +41,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('folders:delete', (_event, id: number) => db.deleteFolder(id));
 
   ipcMain.handle('chats:list', (_event, scope: ChatScope) => db.listChats(scope));
+  ipcMain.handle('chats:counts', () => db.scopeCounts());
   ipcMain.handle('chats:get', (_event, id: number) => db.getChat(id));
   ipcMain.handle('chats:setFolder', (_event, chatId: number, folderId: number | null) =>
     db.setChatFolder(chatId, folderId),

@@ -196,6 +196,32 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* Counts sit right of the name and left of the row actions, so revealing the
+   actions on hover does not shift them. Tabular figures because a column of
+   numbers that jitters as the digits change is harder to read than one that
+   does not. */
+.tree-count {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  padding: 0 0.15rem;
+}
+
+/* An empty folder still shows its 0 — the number is how you tell "nothing here"
+   from "not loaded yet" — but quietly. */
+.tree-count.zero {
+  opacity: 0.45;
+}
+
+/* The subtree total, beside the folder's own count. Bracketed so two adjacent
+   numbers cannot be read as one. */
+.tree-count.subtree::before {
+  content: '(';
+}
+.tree-count.subtree::after {
+  content: ')';
+}
+
 .twisty,
 .row-action {
   border: none;

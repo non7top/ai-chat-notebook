@@ -1,8 +1,14 @@
 import { useMemo, useState } from 'react';
-import type { ChatScope, Folder } from '../shared/types';
+import type { ChatScope, Folder, ScopeCounts } from '../shared/types';
 
 interface Props {
   folders: Folder[];
+  /**
+   * How many threads sit behind each row. Null until the first load, and the
+   * rows render without numbers rather than with zeroes — a confident 0 beside
+   * a folder that holds forty is the kind of wrong number that gets believed.
+   */
+  counts: ScopeCounts | null;
   scope: ChatScope;
   onScopeChange: (scope: ChatScope) => void;
   onChange: () => void;
@@ -71,12 +77,52 @@ function NameInput({
   );
 }
 
-export default function FolderTree({ folders, scope, onScopeChange, onChange, onError }: Props) {
+/**
+ * A count, or nothing at all while the numbers are still loading.
+ *
+ * Rendered by the tree rather than folded into the name so it can be styled
+ * apart and, more to the point, so a missing count is a missing element rather
+ * than a zero.
+ */
+function Count({ n, title }: { n: number | undefined; title?: string }) {
+  if (n === undefined) return null;
+  return (
+    <span className={n === 0 ? 'tree-count zero' : 'tree-count'} title={title}>
+      {n}
+    </span>
+  );
+}
+
+export default function FolderTree({
+  folders,
+  counts,
+  scope,
+  onScopeChange,
+  onChange,
+  onError,
+}: Props) {
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
   const [dropTarget, setDropTarget] = useState<number | null | 'none'>('none');
   const [editing, setEditing] = useState<Editing>(null);
 
   const roots = useMemo(() => childrenOf(folders, null), [folders]);
+
+  // Threads in a folder AND everything under it. Computed here rather than in
+  // SQL because the renderer already has the whole tree and a recursive CTE for
+  // a few dozen folders would be work for its own sake. Without it a collapsed
+  // parent reads 0 while holding hundreds in its children, which is exactly the
+  // moment a number stops being trusted.
+  const subtree = useMemo(() => {
+    const totals: Record<number, number> = {};
+    const walk = (id: number): number => {
+      let sum = counts?.byFolder[id] ?? 0;
+      for (const kid of childrenOf(folders, id)) sum += walk(kid.id);
+      totals[id] = sum;
+      return sum;
+    };
+    for (const root of childrenOf(folders, null)) walk(root.id);
+    return totals;
+  }, [folders, counts]);
 
   const toggle = (id: number) =>
     setCollapsed((prev) => {
@@ -187,6 +233,17 @@ export default function FolderTree({ folders, scope, onScopeChange, onChange, on
           ) : (
             <>
               <span className="tree-name">{folder.name}</span>
+              <Count
+                n={counts?.byFolder[folder.id] ?? (counts ? 0 : undefined)}
+                title="Threads in this folder"
+              />
+              {/* Only when the subtree holds more than this folder does, so a
+                  leaf shows one number and a parent shows the two that differ. */}
+              {counts && subtree[folder.id] > (counts.byFolder[folder.id] ?? 0) && (
+                <span className="tree-count subtree" title="Including subfolders">
+                  {subtree[folder.id]}
+                </span>
+              )}
               <button
                 type="button"
                 className="row-action"
@@ -254,6 +311,7 @@ export default function FolderTree({ folders, scope, onScopeChange, onChange, on
       >
         <span className="twisty-spacer" />
         <span className="tree-name">All threads</span>
+        <Count n={counts?.all} title="Every thread, filed or not" />
       </div>
       <div
         className={`tree-row${sameScope(scope, { kind: 'unfiled' }) ? ' selected' : ''}${
@@ -269,6 +327,21 @@ export default function FolderTree({ folders, scope, onScopeChange, onChange, on
       >
         <span className="twisty-spacer" />
         <span className="tree-name">Unfiled</span>
+        <Count n={counts?.unfiled} title="Threads in no folder — drop one here to unfile it" />
+      </div>
+
+      {/* The counterpart to Unfiled, and the reason both now carry a number:
+          with almost everything unfiled, "All threads" and "Unfiled" listed
+          nearly the same 2848 rows and nothing on screen said so. This is the
+          pile you have actually sorted, across every folder at once — which no
+          single folder can show. */}
+      <div
+        className={`tree-row${sameScope(scope, { kind: 'filed' }) ? ' selected' : ''}`}
+        onClick={() => onScopeChange({ kind: 'filed' })}
+      >
+        <span className="twisty-spacer" />
+        <span className="tree-name">Filed</span>
+        <Count n={counts?.filed} title="Threads placed in some folder" />
       </div>
 
       {/* The capture backlog. A thread with no turns is indistinguishable from a
@@ -280,6 +353,7 @@ export default function FolderTree({ folders, scope, onScopeChange, onChange, on
       >
         <span className="twisty-spacer" />
         <span className="tree-name">Empty threads</span>
+        <Count n={counts?.empty} title="Threads the app knows of but holds no turns for" />
       </div>
 
       {/* Raw entries belonging to no conversation. Kept beside Unfiled rather
@@ -291,6 +365,7 @@ export default function FolderTree({ folders, scope, onScopeChange, onChange, on
       >
         <span className="twisty-spacer" />
         <span className="tree-name">Orphan entries</span>
+        <Count n={counts?.orphans} title="Export entries attached to no thread" />
       </div>
 
       <div className="tree-divider" />

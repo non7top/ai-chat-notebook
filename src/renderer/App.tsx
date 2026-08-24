@@ -8,6 +8,7 @@ import type {
   ChatScope,
   ChatSummary,
   Folder,
+  ScopeCounts,
 } from '../shared/types';
 import ChatList from './ChatList';
 import OrphanEntries from './OrphanEntries';
@@ -20,6 +21,7 @@ import PanelBar from './PanelBar';
 
 export default function App() {
   const [folders, setFolders] = useState<Folder[]>([]);
+  const [counts, setCounts] = useState<ScopeCounts | null>(null);
   const [scope, setScope] = useState<ChatScope>({ kind: 'all' });
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -48,6 +50,10 @@ export default function App() {
 
   const reloadFolders = useCallback(async () => {
     setFolders(await window.notebook.listFolders());
+    // Loaded with the folders because it labels them, and because every action
+    // that changes one changes the other: filing a thread, deleting a folder,
+    // finishing an import.
+    setCounts(await window.notebook.scopeCounts());
   }, []);
 
   const reloadChats = useCallback(async () => {
@@ -162,6 +168,7 @@ export default function App() {
         <div className="pane pane-tree">
           <FolderTree
             folders={folders}
+            counts={counts}
             scope={scope}
             onScopeChange={(next) => {
               setScope(next);
