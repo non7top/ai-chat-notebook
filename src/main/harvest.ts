@@ -402,6 +402,21 @@ export async function recaptureChat(chatId: number): Promise<{ turns: number; im
  * mints a new conversation. Reads nothing and stores nothing — this is "take me
  * there", not a capture.
  */
+/**
+ * The page had not rendered its turns in time.
+ *
+ * Its own type because it must not count toward the systemic-failure abort. Each
+ * of these is one slow page load, and a run of them means a slow network rather
+ * than a broken session — conflating the two stopped a 500-thread run after nine
+ * threads, which is what "it stops randomly" turned out to be.
+ */
+export class PageNotReadyError extends Error {
+  constructor(turnsSeen: number) {
+    super(`The page had not rendered its turns yet (${turnsSeen} seen)`);
+    this.name = 'PageNotReadyError';
+  }
+}
+
 export interface LinkCaptureResult {
   /** How far the page's own opening is from the export's reading, 0 to 64. */
   distance: number;
@@ -455,10 +470,22 @@ export async function captureFromEntryLink(entryId: number): Promise<LinkCapture
   }
 
   await navigateAiMode(entry.href);
-  await waitForTurnsToSettle();
-  const { turns } = await readTurns();
+  // Longer than a sidebar click gets, because this is a whole page load against
+  // Google rather than a render inside a page already open — and tried twice.
+  // A page that has not finished is the ordinary case here, not a fault, and
+  // treating it as one is what stopped runs after nine threads.
+  await waitForTurnsToSettle(90_000);
+  let { turns } = await readTurns();
   if (turns.length === 0 || !turns.some((t) => t.role === 'ai')) {
-    throw new Error(`The page showed no answer turns (${turns.length} turn(s) seen)`);
+    await new Promise((resolve) => setTimeout(resolve, 4000));
+    await waitForTurnsToSettle(60_000);
+    turns = (await readTurns()).turns;
+  }
+  if (turns.length === 0 || !turns.some((t) => t.role === 'ai')) {
+    // Thrown as a distinguishable type so the runner can tell "this page was not
+    // ready" from "the session is broken". Ten slow pages in a row is a slow
+    // network; ten navigation failures is something else entirely.
+    throw new PageNotReadyError(turns.length);
   }
 
   const pageTurns = turns.map((t) => ({ role: t.role, text: t.text }));
@@ -549,6 +576,8 @@ export interface LinkRunSummary {
   /** Pages whose answer did not match the export's — a re-run, not the thread. */
   rejected: number;
   errors: number;
+  /** Pages that had not rendered in time. Left in the queue for a later run. */
+  notReady: number;
   remaining: number;
   cancelled: boolean;
   failures: { title: string; reason: string }[];
@@ -576,6 +605,7 @@ export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
     images: 0,
     rejected: 0,
     errors: 0,
+    notReady: 0,
     remaining: 0,
     cancelled: false,
     failures: [],
@@ -611,11 +641,19 @@ export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
         consecutiveErrors = 0;
       } catch (error) {
         summary.errors += 1;
-        consecutiveErrors += 1;
         summary.failures.push({
           title: item.title.slice(0, 60),
           reason: error instanceof Error ? error.message : String(error),
         });
+        // A page that was not ready is not evidence about the session. It stays
+        // in the queue for a later run — nothing was stored and nothing was
+        // marked — and it does not push the run toward giving up.
+        if (error instanceof PageNotReadyError) {
+          summary.notReady += 1;
+          await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS * 2));
+          continue;
+        }
+        consecutiveErrors += 1;
         if (consecutiveErrors >= CONSECUTIVE_FAILURE_LIMIT) {
           summary.stoppedEarly =
             `Stopped after ${consecutiveErrors} consecutive errors — something systemic ` +

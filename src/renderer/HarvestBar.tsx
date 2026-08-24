@@ -39,10 +39,11 @@ interface Props {
 
 const CAPTURE_BATCH = 25;
 // Far above any plausible history, so "all" means all.
-// Bounded the same way Capture all is, and for a stronger reason: each of these
-// is a full page load against Google rather than a click inside a page already
-// open, so an unbounded run would be hours long.
-const LINK_FETCH_LIMIT = 500;
+// Not bounded any more, matching Capture all. A 500-thread slice looked like a
+// stop of its own once the run reached the end of it, and with ~1700 threads it
+// meant four separate runs. The pacing already makes this leisurely, and Stop
+// works at any point.
+const LINK_FETCH_LIMIT = 100_000;
 
 const CAPTURE_ALL_LIMIT = 100_000;
 
@@ -470,6 +471,12 @@ export default function HarvestBar({
             try {
               const result = await window.notebook.fetchFromLinks(LINK_FETCH_LIMIT);
               setLinksToFetch(result.remaining);
+              setTakeoutNote(
+                `fetched ${result.fetched} · ${result.rejected} did not match · ` +
+                  `${result.notReady} not ready yet · ${result.errors} errors · ` +
+                  `${result.remaining} left` +
+                  (result.stoppedEarly ? ` — ${result.stoppedEarly}` : ''),
+              );
               onFinished();
             } finally {
               setCapturing(false);

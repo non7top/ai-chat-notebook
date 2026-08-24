@@ -342,6 +342,12 @@ export interface LinkRunSummary {
   /** Pages whose answer did not match the export's — a re-run, not the thread. */
   rejected: number;
   errors: number;
+  /**
+   * Pages that had not rendered their turns in time. Counted apart from errors
+   * and left in the queue: each is one slow page load, and treating a run of them
+   * as a broken session stopped a 500-thread run after nine.
+   */
+  notReady: number;
   remaining: number;
   cancelled: boolean;
   failures: { title: string; reason: string }[];
