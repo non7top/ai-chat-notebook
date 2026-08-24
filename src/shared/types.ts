@@ -378,6 +378,8 @@ export interface NotebookApi {
     images: number;
     bytesFreed: number;
     failed: number;
+    /** Turns that still hold base64 afterwards — a carrier not yet recognised. */
+    stubborn: number;
   }>;
   /** Backup and restore progress. Broadcast, since the menu can start either. */
   onArchiveProgress(callback: (progress: ArchiveProgress) => void): () => void;

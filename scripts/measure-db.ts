@@ -103,4 +103,34 @@ for (const row of rows) {
       `  data: ${row.hasData ? 'yes' : 'no '}  svg ${row.svgs}  img ${row.imgs}`,
   );
 }
+// Did the repair lose anything? Asked of the data rather than assumed.
+//
+// The rewrite only ever removes an image AFTER storing it, or when storing failed
+// — so an image that reached the asset store is intact, and one that did not was
+// never in the store to begin with. What can be checked is whether the counts add
+// up: assets present, turns still holding base64, and turns pointing at asset
+// paths that do not exist on disk.
+console.log('\nwhat the repair left behind');
+console.log(`  turns still holding base64: ${withData}`);
+const localRefs = one(
+  "SELECT COUNT(*) AS n FROM messages WHERE html LIKE '%\"assets/%' OR html LIKE '%''assets/%'",
+);
+console.log(`  turns pointing at the asset store: ${localRefs}`);
+const assetRows = one('SELECT COUNT(*) AS n FROM assets');
+const assetKinds = db
+  .prepare("SELECT COALESCE(kind, 'unclassified') AS kind, COUNT(*) AS n FROM assets GROUP BY 1 ORDER BY n DESC")
+  .all() as unknown as { kind: string; n: number }[];
+console.log(`  asset rows: ${assetRows} — ${assetKinds.map((k) => `${k.n} ${k.kind}`).join(', ')}`);
+
+// A reference with no file behind it is the one shape that would mean a lost
+// picture, so it is looked for specifically.
+const paths = db
+  .prepare('SELECT local_path FROM assets')
+  .all() as unknown as { local_path: string }[];
+let missingFiles = 0;
+for (const row of paths) if (!fs.existsSync(row.local_path)) missingFiles += 1;
+console.log(
+  `  asset rows whose file is missing: ${missingFiles}` +
+    (missingFiles === 0 ? ' — every recorded image is on disk' : ' — INVESTIGATE'),
+);
 db.close();
