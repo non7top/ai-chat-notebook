@@ -691,16 +691,21 @@ export function listChats(scope: ChatScope): ChatSummary[] {
   // the panel to the day, and once dates are on screen an order that ignores
   // them reads as sorted backwards — which is what it looked like.
   //
-  // A placeholder date is excluded from the first key on purpose. It says only
-  // that the app saved the thread today, so sorting by it would float every
-  // undated thread to the top of the list and push the genuinely recent ones
-  // under it. Those fall through to sidebar position, which is still the best
-  // guess available for them.
+  // A placeholder date sorts as a date, like every other kind.
+  //
+  // It used to be excluded from the first key, on the reasoning that "the app
+  // saved this today" should not outrank a genuinely recent thread. The
+  // consequence was the opposite of what anyone wants: a thread just harvested
+  // has no date yet, so it went below all 2800 dated ones — the newest rows in
+  // the archive sorted last, at position 2820.
+  //
+  // And the reasoning was weak anyway. A thread with no date is one nothing knows
+  // the date of, so any position is a guess; "when it was first seen" is the best
+  // guess available and it matches what a person expects of a list they just added
+  // to. The faint italic "saved" on those rows is what keeps the guess honest —
+  // the uncertainty belongs in the label, not in the ordering.
   const order = `
-    ORDER BY CASE
-               WHEN c.started_at IS NOT NULL AND COALESCE(c.date_basis, '') <> 'placeholder'
-                 THEN 0 ELSE 1
-             END,
+    ORDER BY CASE WHEN c.started_at IS NULL THEN 1 ELSE 0 END,
              c.started_at DESC,
              CASE WHEN c.list_rank IS NULL THEN 1 ELSE 0 END,
              c.list_rank ASC,
