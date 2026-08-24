@@ -178,6 +178,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('links:fetch', (_event, limit: number) => fetchFromLinks(limit));
   ipcMain.handle('links:remaining', () => db.countThreadsWithLinksToFetch());
   ipcMain.handle('links:outcomes', () => db.linkOutcomes());
+  ipcMain.handle('jobs:last', () => db.lastJobs());
   // Matching after the fact rather than during an import: only then is every
   // thread and every entry on the table at once.
   ipcMain.handle('entries:rematch', () => db.rematchEntriesToThreads());

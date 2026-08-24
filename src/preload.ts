@@ -72,6 +72,7 @@ const api: NotebookApi = {
   fetchFromLinks: (limit) => ipcRenderer.invoke('links:fetch', limit),
   countLinksToFetch: () => ipcRenderer.invoke('links:remaining'),
   linkOutcomes: () => ipcRenderer.invoke('links:outcomes'),
+  lastJobs: () => ipcRenderer.invoke('jobs:last'),
   rematchEntries: () => ipcRenderer.invoke('entries:rematch'),
   suspectCopies: () => ipcRenderer.invoke('chats:suspectCopies'),
   similarChats: (chatId) => ipcRenderer.invoke('chats:similar', chatId),

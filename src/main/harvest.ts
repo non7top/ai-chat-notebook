@@ -621,6 +621,7 @@ export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
     failures: [],
   };
   captureCancelled = false;
+  const startedAt = new Date().toISOString();
   try {
     await ensureOnAiMode();
     const queue = db.threadsWithLinksToFetch(limit);
@@ -709,6 +710,15 @@ export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
 
     summary.cancelled = captureCancelled;
     summary.remaining = db.countThreadsWithLinksToFetch();
+    // Written before the broadcast, so a record exists even if the window has
+    // gone away by the time the run ends — which for an hour-long job is not a
+    // remote possibility.
+    db.recordJob(
+      'links',
+      captureCancelled ? 'stopped' : summary.stoppedEarly ? 'failed' : 'finished',
+      startedAt,
+      { ...summary, failures: summary.failures.slice(0, 20) },
+    );
     broadcastCapture({
       phase: captureCancelled ? 'cancelled' : 'done',
       done: summary.fetched,
@@ -721,6 +731,10 @@ export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
     });
     return summary;
   } catch (error) {
+    db.recordJob('links', 'failed', startedAt, {
+      ...summary,
+      error: error instanceof Error ? error.message : String(error),
+    });
     broadcastCapture({
       phase: 'error',
       done: summary.fetched,
@@ -853,6 +867,7 @@ export interface CaptureSummary {
  * run beats one that has to be left alone for an hour.
  */
 export async function captureTurns(limit: number): Promise<CaptureSummary> {
+  const captureStartedAt = new Date().toISOString();
   if (capturing) throw new Error('A capture is already running');
   capturing = true;
   captureCancelled = false;
@@ -956,6 +971,12 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
 
     summary.cancelled = captureCancelled;
     summary.remaining = db.countChatsWithoutTurns();
+    db.recordJob(
+      'capture',
+      captureCancelled ? 'stopped' : summary.stoppedEarly ? 'failed' : 'finished',
+      captureStartedAt,
+      { ...summary, failures: summary.failures.slice(0, 20) },
+    );
     broadcastCapture({
       phase: captureCancelled ? 'cancelled' : 'done',
       done: summary.captured,

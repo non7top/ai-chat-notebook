@@ -560,6 +560,21 @@ button:disabled {
   color: var(--muted);
 }
 
+/* How the last long job ended. Quiet when it finished, marked when it did not —
+   the distinction is the whole reason this exists. */
+.job-mark {
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.job-mark.done {
+  color: #047857;
+}
+
+.job-mark.warn {
+  color: #b45309;
+}
+
 .harvest-sep {
   width: 1px;
   align-self: stretch;

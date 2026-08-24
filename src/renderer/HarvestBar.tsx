@@ -83,6 +83,12 @@ export default function HarvestBar({
   const [remainingOverride, setRemainingOverride] = useState<number | null>(null);
   const [linksToFetch, setLinksToFetch] = useState(0);
   const [inlineImages, setInlineImages] = useState(0);
+  const [lastJob, setLastJob] = useState<{
+    job: string;
+    outcome: string;
+    endedAt: string;
+    detail: Record<string, unknown>;
+  } | null>(null);
   const [more, setMore] = useState(false);
   const remaining = remainingOverride ?? uncaptured;
 
@@ -104,6 +110,7 @@ export default function HarvestBar({
   useEffect(() => {
     window.notebook.countLinksToFetch().then(setLinksToFetch);
     window.notebook.countInlineImages().then(setInlineImages);
+    window.notebook.lastJobs().then((jobs) => setLastJob(jobs[0] ?? null));
   }, [uncaptured, activity]);
 
   useEffect(
@@ -280,6 +287,20 @@ export default function HarvestBar({
         <button type="button" onClick={() => window.notebook.cancelHarvest()}>
           Stop
         </button>
+      )}
+
+      {/* How the last long job ENDED, which is a different question from how it
+          went and was not answerable at all: a progress line that stops moving
+          looks the same whether the work finished or died, and the summary went
+          away with the run. Persisted, so it survives a restart. */}
+      {!busy && !capturing && lastJob && (
+        <span
+          className={lastJob.outcome === 'finished' ? 'job-mark done' : 'job-mark warn'}
+          title={JSON.stringify(lastJob.detail).slice(0, 400)}
+        >
+          {lastJob.job} {lastJob.outcome} {lastJob.endedAt.slice(11, 16)}
+          {typeof lastJob.detail.remaining === 'number' && ` · ${lastJob.detail.remaining} left`}
+        </span>
       )}
 
       {progress && (

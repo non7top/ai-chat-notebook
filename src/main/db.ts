@@ -2833,6 +2833,58 @@ export function setLinkState(
   );
 }
 
+export interface JobRecord {
+  job: string;
+  /** 'finished' | 'stopped' | 'failed' — how it ended, not how it went. */
+  outcome: string;
+  startedAt: string;
+  endedAt: string;
+  /** The run's own summary, whatever shape that job reports. */
+  detail: Record<string, unknown>;
+}
+
+/**
+ * Records how a long job ended, and survives a restart.
+ *
+ * Because "it stopped" and "it finished" looked identical: a progress line that
+ * has ceased to move says nothing about which, the summary vanished with the run,
+ * and a reload lost even that. A job that cannot say it completed is a job you
+ * have to watch, and these run for an hour.
+ *
+ * 'outcome' is deliberately separate from the counts. A run can finish having
+ * fetched nothing, or be stopped having fetched a thousand, and those are
+ * different facts about different things.
+ */
+export function recordJob(
+  job: string,
+  outcome: 'finished' | 'stopped' | 'failed',
+  startedAt: string,
+  detail: Record<string, unknown>,
+): void {
+  db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(
+    `job:${job}`,
+    JSON.stringify({ job, outcome, startedAt, endedAt: new Date().toISOString(), detail }),
+  );
+}
+
+/** The last recorded ending of every job that has ever run. */
+export function lastJobs(): JobRecord[] {
+  return (
+    db
+      .prepare("SELECT value FROM settings WHERE key LIKE 'job:%'")
+      .all() as unknown as { value: string }[]
+  )
+    .map((row) => {
+      try {
+        return JSON.parse(row.value) as JobRecord;
+      } catch {
+        return null;
+      }
+    })
+    .filter((r): r is JobRecord => r !== null)
+    .sort((a, b) => b.endedAt.localeCompare(a.endedAt));
+}
+
 export interface LinkOutcome {
   chatId: number;
   title: string;

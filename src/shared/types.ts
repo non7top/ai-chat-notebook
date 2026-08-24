@@ -489,6 +489,21 @@ export interface NotebookApi {
    */
   linkOutcomes(): Promise<{ chatId: number; title: string; state: string; note: string | null }[]>;
   /**
+   * How each long job last ended, surviving a restart.
+   *
+   * Because "it stopped" and "it finished" looked identical: a progress line that
+   * has ceased moving says nothing about which, and the summary died with the run.
+   */
+  lastJobs(): Promise<
+    {
+      job: string;
+      outcome: string;
+      startedAt: string;
+      endedAt: string;
+      detail: Record<string, unknown>;
+    }[]
+  >;
+  /**
    * Matches stored entries to stored threads after the fact.
    *
    * Deciding during an import decides too early — only the threads that existed
