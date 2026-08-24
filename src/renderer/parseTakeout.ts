@@ -20,6 +20,19 @@
  * the images (they live in a sibling cell, so scanning the body found none), and
  * the turns (they are cleanly labelled, not an undifferentiated blob).
  *
+ * What one real record's answer contained, read with permission and worth
+ * recording because it settles two guesses:
+ *
+ * - Structure survives: h3, ul, li and strong are all present, which is what the
+ *   turn splitter was rewritten to keep.
+ * - There are NO citation anchors in the body. The export carries one link per
+ *   record — its own URL — and none of the sources the answer cites. The panel
+ *   has those; the export does not, so a citation dropped at capture is gone.
+ * - Maths is stored as LaTeX source, e.g. "$\leftrightarrow$" where the page
+ *   renders an arrow. Anything comparing export text against page text has to
+ *   expect that, and the fingerprint's normalisation drops it as punctuation
+ *   rather than treating it as words.
+ *
  * Runs in the renderer so DOMParser can do the work: a real parser, no new
  * dependency, and unlike loading the file in a window it runs no scripts and
  * fetches nothing.

@@ -842,9 +842,12 @@ const READ_TURNS_SCRIPT = `
         // puts a source link inside a clickable chip, and removing the chip took
         // the link with it. Measured on one real answer — 37 anchors, 13 of them
         // inside controls — so a third of the sources a thread cited were being
-        // dropped at capture. The export keeps them inline, which is how the
-        // difference became visible: prose that is a hyperlink there was plain
-        // text here.
+        // dropped at capture.
+        //
+        // The panel is the ONLY source for these. Reading one export record's
+        // stored answer showed no anchors at all in the body: the export carries a
+        // single link per record, its own URL, and no citations. So a link lost
+        // here is lost outright, with nothing to recover it from.
         //
         // Google's own links are NOT citations. support.google.com and
         // policies.google.com belong to the disclaimer, and rescuing those would
