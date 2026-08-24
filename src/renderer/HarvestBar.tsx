@@ -81,6 +81,7 @@ export default function HarvestBar({
   // Only set while a run is in progress; the prop is the truth otherwise.
   const [remainingOverride, setRemainingOverride] = useState<number | null>(null);
   const [linksToFetch, setLinksToFetch] = useState(0);
+  const [inlineImages, setInlineImages] = useState(0);
   const [more, setMore] = useState(false);
   const remaining = remainingOverride ?? uncaptured;
 
@@ -101,6 +102,7 @@ export default function HarvestBar({
   // biome-ignore lint/correctness/useExhaustiveDependencies: triggers, not inputs — they mark when the count can have changed
   useEffect(() => {
     window.notebook.countLinksToFetch().then(setLinksToFetch);
+    window.notebook.countInlineImages().then(setInlineImages);
   }, [uncaptured, activity]);
 
   useEffect(
@@ -349,6 +351,33 @@ export default function HarvestBar({
           }}
         >
           Check for copies
+        </button>
+      )}
+
+      {/* Only offered while there is something to repair, so it disappears once
+          the archive is clean rather than sitting there inviting a no-op. */}
+      {more && inlineImages > 0 && (
+        <button
+          type="button"
+          disabled={busy || capturing || takeoutBusy}
+          title="Moves images stored as base64 inside the text into the image store, where they can be counted, deduplicated and shown as thumbnails"
+          onClick={async () => {
+            setTakeoutBusy(true);
+            try {
+              const r = await window.notebook.repairInlineImages();
+              setTakeoutNote(
+                `moved ${r.images} images out of ${r.turns} turns · ` +
+                  `${(r.bytesFreed / 1024 / 1024).toFixed(1)} MB reclaimed` +
+                  (r.failed ? ` · ${r.failed} could not be read` : ''),
+              );
+              setInlineImages(await window.notebook.countInlineImages());
+              onFinished();
+            } finally {
+              setTakeoutBusy(false);
+            }
+          }}
+        >
+          Move inline images ({inlineImages})
         </button>
       )}
 

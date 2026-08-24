@@ -364,6 +364,21 @@ export interface NotebookApi {
    * Copies the whole archive — database and images — to a folder of the user's
    * choosing. Returns null if the dialog was cancelled.
    */
+  /**
+   * Turns whose stored HTML still carries base64 instead of pointing at the
+   * asset store — written before capture stopped keeping it.
+   */
+  countInlineImages(): Promise<number>;
+  /**
+   * Moves that base64 into the asset store and rewrites the HTML. Moves rather
+   * than drops: the markup is the only copy of those images.
+   */
+  repairInlineImages(): Promise<{
+    turns: number;
+    images: number;
+    bytesFreed: number;
+    failed: number;
+  }>;
   /** Backup and restore progress. Broadcast, since the menu can start either. */
   onArchiveProgress(callback: (progress: ArchiveProgress) => void): () => void;
   exportArchive(): Promise<{

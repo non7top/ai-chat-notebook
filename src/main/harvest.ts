@@ -3,6 +3,7 @@ import * as db from './db';
 import { hammingDistance, openingFingerprint } from '../shared/fingerprint.ts';
 import { ensureOnAiMode, navigateAiMode } from './aiModeView';
 import { assetHref, storeImage } from './assets';
+import { rewriteImageSources } from '../shared/rewriteImages.ts';
 import {
   ensureHistorySidebarOpen,
   getListGeometry,
@@ -230,14 +231,6 @@ function broadcastCapture(progress: CaptureProgress): void {
 // replacement on the exact original src rather than by parsing: the main process
 // has no DOM, and the src values came from that same HTML moments earlier so
 // they match verbatim.
-function rewriteImageSources(html: string, replacements: Map<string, string>): string {
-  let out = html;
-  for (const [original, href] of replacements) {
-    out = out.split(original).join(href);
-  }
-  return out;
-}
-
 async function captureOneChat(chat: { id: number; externalId: string; title: string }): Promise<{
   turns: number;
   images: number;
@@ -611,6 +604,73 @@ export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
     });
     throw error;
   }
+}
+
+export interface InlineRepairSummary {
+  turns: number;
+  images: number;
+  bytesFreed: number;
+  failed: number;
+}
+
+/**
+ * Moves inline base64 images out of stored HTML and into the asset store.
+ *
+ * The repair for a measured problem: 452 turns holding 63.9 MB of base64 in a
+ * 198 MB database, one of them 1.29 MB of HTML around 2,810 characters of text.
+ * Those images were never written to the store, so the markup was the only copy
+ * of them — which is why they are MOVED rather than dropped. Dropping would
+ * reclaim the same bytes and lose the pictures.
+ *
+ * Content-addressed on the way in, so the same image appearing in several turns
+ * collapses to one file, which the inline form could never do.
+ *
+ * Capture no longer produces this: an image that fails the size filter has its
+ * element removed rather than its base64 kept. This is for archives written
+ * before that.
+ */
+export async function repairInlineImages(
+  onProgress?: (done: number, total: number) => void,
+): Promise<InlineRepairSummary> {
+  const summary: InlineRepairSummary = { turns: 0, images: 0, bytesFreed: 0, failed: 0 };
+  const total = db.countMessagesWithInlineImages();
+  // Taken in batches rather than all at once: the rows are megabytes each, and
+  // holding 452 of them in memory to save a query would be its own problem.
+  for (;;) {
+    const rows = db.messagesWithInlineImages(20);
+    if (rows.length === 0) break;
+
+    for (const row of rows) {
+      const before = row.html.length;
+      const replacements = new Map<string, string>();
+      // Only the src attributes, and only data: ones. A regex over the whole
+      // document would also match base64 that happens to sit in text.
+      for (const match of row.html.matchAll(/<img\b[^>]*\bsrc="(data:[^"]+)"/gi)) {
+        const src = match[1];
+        if (replacements.has(src)) continue;
+        const outcome = await storeImage(src);
+        if (outcome.kind === 'stored') {
+          replacements.set(src, assetHref(outcome.asset));
+          db.addAssetForMessage(row.chatId, row.id, outcome.asset, 'generated');
+          summary.images += 1;
+        } else {
+          summary.failed += 1;
+        }
+      }
+
+      const rewritten = rewriteImageSources(row.html, replacements);
+      db.replaceMessageHtml(row.id, rewritten);
+      summary.turns += 1;
+      summary.bytesFreed += before - rewritten.length;
+      onProgress?.(summary.turns, total);
+    }
+
+    // Hand the thread back: this writes megabytes per row and would otherwise
+    // freeze every window for the duration, which is the mistake three earlier
+    // operations in this file already made.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  return summary;
 }
 
 export async function openChatInPanel(chatId: number): Promise<void> {

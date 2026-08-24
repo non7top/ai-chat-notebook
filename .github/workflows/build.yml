@@ -84,6 +84,12 @@ jobs:
       - name: Check turn splitting
         run: docker compose run --rm dev npm run check:turns
 
+      # Guards a measured failure: 452 turns in a real archive held 63.9 MB of
+      # inline base64 because an image that failed the size filter had its data:
+      # URI left in the markup verbatim.
+      - name: Check image rewriting
+        run: docker compose run --rm dev npm run check:rewrite
+
       # A simhash is only useful through its distance, so what is checked is an
       # ordering: the same thread read from two sources must land closer than two
       # different threads. Equality would prove nothing about that.

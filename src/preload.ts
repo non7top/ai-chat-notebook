@@ -19,6 +19,8 @@ const api: NotebookApi = {
     ipcRenderer.on('archive:progress', listener);
     return () => ipcRenderer.removeListener('archive:progress', listener);
   },
+  countInlineImages: () => ipcRenderer.invoke('archive:inlineCount'),
+  repairInlineImages: () => ipcRenderer.invoke('archive:repairInlineImages'),
   exportArchive: () => ipcRenderer.invoke('archive:export'),
   importArchive: () => ipcRenderer.invoke('archive:import'),
   undoTakeout: () => ipcRenderer.invoke('takeout:undo'),

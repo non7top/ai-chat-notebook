@@ -2720,6 +2720,58 @@ export function rematchEntriesToThreads(): RematchResult {
   return result;
 }
 
+export interface InlineImageRow {
+  id: number;
+  chatId: number;
+  html: string;
+}
+
+/**
+ * Turns whose stored HTML still carries base64 rather than pointing at the store.
+ *
+ * Measured on a real archive: 452 of them, holding 63.9 MB of a 198 MB database.
+ * The images were never written to the asset store, so this is the only copy —
+ * which is why the repair moves them rather than simply deleting the markup.
+ */
+export function messagesWithInlineImages(limit: number): InlineImageRow[] {
+  return db
+    .prepare(
+      `SELECT id, chat_id AS chatId, html FROM messages
+        WHERE html LIKE '%data:image%'
+        ORDER BY LENGTH(html) DESC
+        LIMIT ?`,
+    )
+    .all(limit) as unknown as InlineImageRow[];
+}
+
+export function countMessagesWithInlineImages(): number {
+  return Number(
+    (
+      db
+        .prepare("SELECT COUNT(*) AS n FROM messages WHERE html LIKE '%data:image%'")
+        .get() as unknown as { n: number }
+    ).n,
+  );
+}
+
+export function replaceMessageHtml(messageId: number, html: string): void {
+  db.prepare('UPDATE messages SET html = ? WHERE id = ?').run(html, messageId);
+}
+
+/** Records an image recovered from inline base64 against its own turn. */
+export function addAssetForMessage(
+  chatId: number,
+  messageId: number,
+  asset: { sha256: string; mime: string; localPath: string; bytes: number },
+  kind: string,
+): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO assets
+       (chat_id, message_id, original_url, sha256, mime, local_path, bytes, kind)
+     VALUES (?, ?, NULL, ?, ?, ?, ?, ?)`,
+  ).run(chatId, messageId, asset.sha256, asset.mime, asset.localPath, asset.bytes, kind);
+}
+
 /** Records the verdict from opening a thread's export link. */
 export function setLinkState(chatId: number, state: 'rejected' | 'fetched'): void {
   db.prepare('UPDATE chats SET link_state = ? WHERE id = ?').run(state, chatId);

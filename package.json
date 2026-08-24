@@ -15,6 +15,7 @@
     "check:cdp-proxy": "node --experimental-strip-types --no-warnings scripts/check-cdp-proxy.ts",
     "probe:takeout": "node --experimental-strip-types --no-warnings scripts/probe-takeout.ts",
     "check:fingerprint": "node --experimental-strip-types --no-warnings scripts/check-fingerprint.ts",
+    "check:rewrite": "node --experimental-strip-types --no-warnings scripts/check-rewrite.ts",
     "check:turns": "node --experimental-strip-types --no-warnings scripts/check-turns.ts",
     "check:dates": "node --experimental-strip-types --no-warnings scripts/check-dates.ts",
     "check:find": "node --experimental-strip-types --no-warnings scripts/check-find.ts",

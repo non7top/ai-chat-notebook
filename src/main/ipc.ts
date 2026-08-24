@@ -20,6 +20,7 @@ import {
   captureFromEntryLink,
   fetchFromLinks,
   openChatInPanel,
+  repairInlineImages,
   recaptureChat,
 } from './harvest';
 import type { ChatScope } from '../shared/types';
@@ -160,6 +161,15 @@ export function registerIpcHandlers(): void {
   // Matching after the fact rather than during an import: only then is every
   // thread and every entry on the table at once.
   ipcMain.handle('entries:rematch', () => db.rematchEntriesToThreads());
+  // Maintenance on an archive written before capture stopped keeping base64.
+  // Reports through the archive channel, since it is minutes of work on
+  // megabyte-sized rows.
+  ipcMain.handle('archive:repairInlineImages', () =>
+    repairInlineImages((done, total) =>
+      announceArchiveProgress({ phase: 'copying', done, total }),
+    ),
+  );
+  ipcMain.handle('archive:inlineCount', () => db.countMessagesWithInlineImages());
 
   ipcMain.handle('harvest:threadList', () => harvestThreadList());
   ipcMain.handle('harvest:cancel', () => cancelHarvest());
@@ -183,7 +193,26 @@ export async function runArchiveExport() {
     ? await dialog.showOpenDialog(window, options)
     : await dialog.showOpenDialog(options);
   if (canceled || filePaths.length === 0) return null;
-  return { folder: filePaths[0], ...db.exportArchive(filePaths[0]) };
+  // Awaited, and the progress callback passed. Neither happened before: the
+  // spread of an un-awaited Promise type-checks and yields none of its fields, so
+  // the handler returned an empty result the moment the dialog closed while the
+  // copy carried on unobserved — which is precisely the "no progress" this was
+  // supposed to fix.
+  const result = await db.exportArchive(filePaths[0], announceArchiveProgress);
+  return { folder: filePaths[0], ...result };
+}
+
+/**
+ * Tells every window how a long archive operation is getting on.
+ *
+ * Broadcast rather than returned, because the menu starts these with no renderer
+ * involved — and because the complaint that prompted it was not the wait but the
+ * silence during it.
+ */
+function announceArchiveProgress(progress: db.ArchiveProgress): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send('archive:progress', progress);
+  }
 }
 
 // Confirmed twice on purpose. A restore is the one action here that can destroy
@@ -217,7 +246,11 @@ export async function runArchiveImport() {
     : await dialog.showMessageBox(confirmOptions);
   if (response !== 1) return null;
 
-  const result = db.importArchive(filePaths[0], app.getPath('userData'));
+  const result = await db.importArchive(
+    filePaths[0],
+    app.getPath('userData'),
+    announceArchiveProgress,
+  );
   // Quit rather than reopening in place. The database handle is closed and
   // every window is showing rows from the archive that was just replaced;
   // restarting is the only state that is certainly consistent.
