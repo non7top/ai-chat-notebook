@@ -594,6 +594,23 @@ button:disabled {
   font-style: italic;
 }
 
+/* A record's own URL. Monospace and clipped, because it is an identifier to be
+   compared and quoted rather than read — the whole value is in the tooltip and on
+   the clipboard. Deliberately not styled as a link: it is not one, and it must
+   not invite a click that would re-run the prompt. */
+.entry-url {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  color: var(--muted);
+}
+
+.entry-copy {
+  font-size: 0.68rem;
+  padding: 0 0.25rem;
+  margin-left: 0.2rem;
+  color: var(--muted);
+}
+
 /* An internal row id, shown so it can be quoted back. Monospace because it is
    an identifier to be read character by character, and faint because it is for
    the rare occasion when something is wrong rather than for reading the list. */

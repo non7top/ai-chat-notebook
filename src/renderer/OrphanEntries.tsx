@@ -73,6 +73,15 @@ export default function OrphanEntries({ onChange, onNeedPanel }: Props) {
               {entry.imageCount
                 ? `${entry.imageCount} ${entry.imageCount === 1 ? 'image' : 'images'}`
                 : 'no image'}
+              {/* Text, never a link — following one re-runs the prompt. */}
+              {entry.href && (
+                <>
+                  {' · '}
+                  <span className="entry-url" title={entry.href}>
+                    {entry.href.replace(/^https?:\/\//, '').slice(0, 40)}…
+                  </span>
+                </>
+              )}
             </span>
             {/* Only for entries that HAVE a link. Lens searches and blank
                 records carry none, and the button would be a dead end. */}

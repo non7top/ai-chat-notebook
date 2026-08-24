@@ -296,7 +296,34 @@ export default function ChatReader({ chat, onChange }: Props) {
                   {entry.imageCount
                     ? `${entry.imageCount} ${entry.imageCount === 1 ? 'image' : 'images'}`
                     : 'no image'}
-                  {entry.href ? ' · has link' : ' · no link'}
+                  {/* The URL itself, not just whether there is one. It is the
+                      thing that identifies a record to Google, so a report about
+                      a bad entry needs it — and it was nowhere in the app.
+
+                      Shown as TEXT, never as an anchor. Following one of these
+                      re-runs the prompt rather than opening the thread: it costs
+                      a real query, produces a different answer, and once created
+                      a duplicate conversation in a live history. The Fetch button
+                      is the only sanctioned way to visit it, because that path
+                      checks the page against the export before storing anything. */}
+                  {entry.href ? (
+                    <>
+                      {' · '}
+                      <span className="entry-url" title={entry.href}>
+                        {entry.href.replace(/^https?:\/\//, '').slice(0, 48)}…
+                      </span>
+                      <button
+                        type="button"
+                        className="entry-copy"
+                        title="Copy this URL"
+                        onClick={() => navigator.clipboard?.writeText(entry.href ?? '')}
+                      >
+                        copy
+                      </button>
+                    </>
+                  ) : (
+                    ' · no link'
+                  )}
                   {/* Shown because the link is many-to-many by design: one
                       entry can be evidence for two conversations. A count
                       above one is a fact, not a fault. */}
