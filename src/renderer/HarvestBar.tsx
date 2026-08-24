@@ -352,6 +352,31 @@ export default function HarvestBar({
         </button>
       )}
 
+      {/* The second half of "fetch the threads, then match". Matching during an
+          import can only see the threads that existed then, so an entry imported
+          before its thread was captured had nothing to match against. */}
+      {more && (
+        <button
+          type="button"
+          disabled={busy || capturing || takeoutBusy}
+          title="Attaches stored export entries to the threads they belong to, using the answer rather than the prompt. Leaves ambiguous ones alone."
+          onClick={async () => {
+            setTakeoutBusy(true);
+            try {
+              const r = await window.notebook.rematchEntries();
+              setTakeoutNote(
+                `matched ${r.attached} of ${r.considered} entries · ${r.declined} too close to call`,
+              );
+              onFinished();
+            } finally {
+              setTakeoutBusy(false);
+            }
+          }}
+        >
+          Match entries
+        </button>
+      )}
+
       {/* Last, so the controls it reveals appear to its left and nothing jumps
           under the pointer when it is used. */}
       <button

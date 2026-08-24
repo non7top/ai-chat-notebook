@@ -157,6 +157,9 @@ export function registerIpcHandlers(): void {
   // export's own reading before anything is stored.
   ipcMain.handle('links:fetch', (_event, limit: number) => fetchFromLinks(limit));
   ipcMain.handle('links:remaining', () => db.countThreadsWithLinksToFetch());
+  // Matching after the fact rather than during an import: only then is every
+  // thread and every entry on the table at once.
+  ipcMain.handle('entries:rematch', () => db.rematchEntriesToThreads());
 
   ipcMain.handle('harvest:threadList', () => harvestThreadList());
   ipcMain.handle('harvest:cancel', () => cancelHarvest());

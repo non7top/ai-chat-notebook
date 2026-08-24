@@ -438,6 +438,14 @@ export interface NotebookApi {
   fetchFromLinks(limit: number): Promise<LinkRunSummary>;
   countLinksToFetch(): Promise<number>;
   /**
+   * Matches stored entries to stored threads after the fact.
+   *
+   * Deciding during an import decides too early — only the threads that existed
+   * then could be considered. Run afterwards, everything is on the table, which
+   * is what makes "fetch the threads first, match second" work.
+   */
+  rematchEntries(): Promise<{ attached: number; considered: number; declined: number }>;
+  /**
    * Threads holding identical conversations. Detects the damage from a bug where
    * clicking a missing sidebar row silently stored the previously shown thread
    * under a different thread's id.

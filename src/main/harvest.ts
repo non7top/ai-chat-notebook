@@ -477,6 +477,10 @@ export async function captureFromEntryLink(entryId: number): Promise<LinkCapture
   }
 
   if (distance >= REJECT_AT_DISTANCE) {
+    // Recorded so the queue lets go of it. The verdict is about the link, not
+    // about today, and a thread that keeps its place in the queue after being
+    // rejected makes every subsequent run repeat the same work.
+    if (entry.chatId !== null) db.setLinkState(entry.chatId, 'rejected');
     return {
       distance,
       rejected:
@@ -493,6 +497,7 @@ export async function captureFromEntryLink(entryId: number): Promise<LinkCapture
   // The very turns that were checked, not a fresh read of the page.
   const stored = await storeRenderedThread(chatId, turns);
   db.noteChatSource(chatId, 'link');
+  db.setLinkState(chatId, 'fetched');
   return { distance, rejected: null, chatId, turns: stored.turns, images: stored.images };
 }
 

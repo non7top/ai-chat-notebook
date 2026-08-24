@@ -232,6 +232,14 @@ export function initDb(userDataPath: string): void {
   // uncaptured there are no real pairs to choose one against. Collecting it now
   // is what makes that choice possible later.
   ensureColumn('chats', 'text_fingerprint', 'text_fingerprint TEXT');
+  // What happened last time this thread's export link was opened.
+  //
+  // NULL means never tried, or tried and failed transiently — worth another go.
+  // 'rejected' means the page's answer did not match the export's, which is what
+  // a link that re-runs its prompt looks like, and that is a property of the link
+  // rather than of the moment: retrying gains nothing. Without this the queue
+  // never shrank on rejection, so every run walked the same links again.
+  ensureColumn('chats', 'link_state', 'link_state TEXT');
   db.exec("UPDATE chats SET date_basis = 'takeout' WHERE started_at IS NOT NULL AND date_basis IS NULL");
   db.exec('CREATE INDEX IF NOT EXISTS chats_list_rank ON chats(list_rank);');
 
@@ -1886,6 +1894,15 @@ export function importTakeoutConversations(
         insert.run(chatId, index, turn.role, turn.text, turn.html || null);
       });
       result.turnsWritten += row.turns.length;
+      // The same fingerprint a capture would record, from the turns just
+      // written. Without it an imported thread had none at all — only
+      // replaceTurns was setting it — so the fingerprint could never be used to
+      // match an imported thread against anything, which is most of what it
+      // exists for.
+      db.prepare('UPDATE chats SET text_fingerprint = ? WHERE id = ?').run(
+        openingFingerprint(row.turns),
+        chatId,
+      );
       noteSource(chatId, 'takeout');
       }
       const openingRef = takeoutEntryRef(
@@ -2501,6 +2518,92 @@ export interface ThreadToFetch {
  * Threads already read from the panel are excluded: they have the better reading
  * already, and re-fetching would spend a page load to replace it with itself.
  */
+export interface RematchResult {
+  attached: number;
+  considered: number;
+  declined: number;
+}
+
+/**
+ * Glues export-only threads into the captured threads they duplicate.
+ *
+ * The second half of "fetch the threads, then match". Matching during an import
+ * decides too early: only the threads that existed at that moment could be
+ * considered, so an entry imported before its thread was captured got a thread
+ * of its own — and the two then sit side by side in the list holding the same
+ * conversation.
+ *
+ * The first attempt at this looked for unattached entries and found none, because
+ * an import always gives its entry a thread and links it. The entry is not
+ * homeless; it is on the wrong thread. So the operation is a glue between
+ * threads, not an attachment of an entry.
+ *
+ * Uses mergeChats, so the export thread is marked as merged rather than deleted
+ * and its entries move to the keeper — reversible by hand if a match was wrong,
+ * which matters because this runs over the whole archive at once.
+ */
+export function rematchEntriesToThreads(): RematchResult {
+  const result: RematchResult = { attached: 0, considered: 0, declined: 0 };
+  const exportThreads = db
+    .prepare(
+      `SELECT id, content_key, text_fingerprint FROM chats
+        WHERE merged_into IS NULL
+          AND external_id LIKE 'takeout:%'
+          AND content_key IS NOT NULL
+          AND text_fingerprint IS NOT NULL`,
+    )
+    .all() as unknown as { id: number; content_key: string; text_fingerprint: string }[];
+
+  for (const thread of exportThreads) {
+    result.considered += 1;
+    const scored = (
+      db
+        .prepare(
+          `SELECT id, text_fingerprint FROM chats
+            WHERE content_key = ? AND merged_into IS NULL AND id <> ?
+              AND text_fingerprint IS NOT NULL
+              -- Only threads Google itself knows about. Gluing two export-only
+              -- threads together would be inventing a relationship neither has
+              -- any evidence for.
+              AND external_id NOT LIKE 'takeout:%' AND external_id NOT LIKE 'entry:%'`,
+        )
+        .all(thread.content_key, thread.id) as unknown as {
+        id: number;
+        text_fingerprint: string;
+      }[]
+    )
+      .map((c) => ({
+        id: c.id,
+        distance: hammingDistance(thread.text_fingerprint, c.text_fingerprint),
+      }))
+      .sort((a, b) => a.distance - b.distance);
+
+    if (scored.length === 0) continue;
+    const best = scored[0];
+    const next = scored[1];
+    // Same rule as an import: a lone candidate has no second opinion, so it is
+    // held to a tighter bound; several candidates must be separated by a margin.
+    const withinBound = next
+      ? best.distance <= MAX_MATCH_DISTANCE
+      : best.distance <= SOLO_MATCH_DISTANCE;
+    if (!withinBound || (next && next.distance - best.distance < REQUIRED_MARGIN)) {
+      result.declined += 1;
+      continue;
+    }
+
+    // The captured thread keeps its Google id and its reading; the export thread
+    // folds into it and hands over its entries.
+    mergeChats(best.id, [thread.id]);
+    result.attached += 1;
+  }
+  return result;
+}
+
+/** Records the verdict from opening a thread's export link. */
+export function setLinkState(chatId: number, state: 'rejected' | 'fetched'): void {
+  db.prepare('UPDATE chats SET link_state = ? WHERE id = ?').run(state, chatId);
+}
+
 export function threadsWithLinksToFetch(limit: number): ThreadToFetch[] {
   return db
     .prepare(
@@ -2511,6 +2614,11 @@ export function threadsWithLinksToFetch(limit: number): ThreadToFetch[] {
         WHERE c.merged_into IS NULL
           AND e.href IS NOT NULL
           AND ',' || COALESCE(c.sources, c.source) || ',' NOT LIKE '%,capture,%'
+          -- A link whose page did not match the export is not tried again. The
+          -- verdict is about the link, so a second attempt spends a page load to
+          -- reach the same conclusion — and with rejections dominating, every run
+          -- would otherwise re-walk the entire queue.
+          AND COALESCE(c.link_state, '') <> 'rejected'
         GROUP BY c.id
         -- Newest first: an older thread is likelier to have been dropped by
         -- Google altogether, so the ones most likely to still be there go first.
@@ -2529,7 +2637,8 @@ export function countThreadsWithLinksToFetch(): number {
          JOIN source_entries e ON e.id = cs.source_entry_id
         WHERE c.merged_into IS NULL
           AND e.href IS NOT NULL
-          AND ',' || COALESCE(c.sources, c.source) || ',' NOT LIKE '%,capture,%'`,
+          AND ',' || COALESCE(c.sources, c.source) || ',' NOT LIKE '%,capture,%'
+          AND COALESCE(c.link_state, '') <> 'rejected'`,
     )
     .get() as unknown as { n: number };
   return row.n;

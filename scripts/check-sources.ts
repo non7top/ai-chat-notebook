@@ -868,5 +868,68 @@ repairScenario(true);
   fs.rmSync(scratch, { recursive: true, force: true });
 }
 
+// ---------------------------------------------------------------------------
+// Matching after the fact — "fetch the threads, then match".
+//
+// The case that motivates it: an entry imported BEFORE its thread was captured
+// had nothing to match against, so it became a thread of its own. Deciding
+// during an import decides too early; run afterwards, every thread and every
+// entry is on the table.
+{
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'notebook-rematch-'));
+  db.initDb(scratch);
+
+  const ask = 'why does the queue keep the same links';
+  const answer =
+    'Because a rejected link kept its place in the queue, so every run walked it ' +
+    'again and reached the same conclusion at the cost of a page load.';
+
+  // Imported with nothing to match against: no thread exists yet.
+  db.importTakeoutConversations([
+    {
+      query: ask,
+      timestamp: '2026-08-15T09:00:00+07:00',
+      timestampText: null,
+      href: 'https://www.google.com/?udm=50&q=x',
+      entryId: null,
+      fingerprints: { long: 'L1', short: 'S1', empty: 'E1' },
+      turns: [turn('user', ask), turn('ai', answer)],
+      imageFiles: [],
+    },
+  ] as never);
+  const beforeThreads = db.listChats({ kind: 'all' }).length;
+
+  // The thread is captured afterwards, which is the ordinary order of events.
+  db.upsertThreadFromList('thread-late', ask, null, 0);
+  const late = db.listChats({ kind: 'all' }).find((c) => c.sources.includes('harvest'))?.id ?? 0;
+  db.replaceTurns(late, [
+    { seq: 0, role: 'user', text: ask, html: null },
+    { seq: 1, role: 'ai', text: answer, html: null },
+  ], []);
+
+  // Two threads now hold the same conversation: the one the import made and the
+  // one that was captured. That is the duplicate the list shows.
+  const listedBefore = db.listChats({ kind: 'all' }).length;
+  const r = db.rematchEntriesToThreads();
+  const listedAfter = db.listChats({ kind: 'all' });
+  const linkedAfter = db.sourceEntriesForChat(late).filter((e) => e.linked).length;
+  console.log(
+    `\nrematch: considered ${r.considered} glued ${r.attached} declined ${r.declined}`,
+    `| listed ${listedBefore} -> ${listedAfter.length} | captured thread's entries ${linkedAfter}`,
+  );
+  if (r.attached !== 1) throw new Error(`nothing was glued (attached=${r.attached})`);
+  if (listedAfter.length !== listedBefore - 1) {
+    throw new Error(`the duplicate did not fold away: ${listedBefore} -> ${listedAfter.length}`);
+  }
+  // The entry moves to the thread Google knows about, which is the point: that
+  // thread keeps its id and can be re-captured later.
+  if (linkedAfter !== 1) throw new Error('the entry did not move to the captured thread');
+  // Nothing is deleted — a wrong glue has to be undoable.
+  const again = db.rematchEntriesToThreads();
+  if (again.attached !== 0) throw new Error('rematch glued the same pair twice');
+  db.unmergeChat(beforeThreads > 0 ? db.listChats({ kind: 'all' })[0].id : 0);
+  fs.rmSync(scratch, { recursive: true, force: true });
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('OK');
