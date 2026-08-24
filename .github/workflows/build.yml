@@ -109,7 +109,9 @@ jobs:
     # rather than a matrix entry.
     runs-on: windows-latest
     permissions:
-      contents: read
+      # write, so an installer can be attached to a prerelease when the artifact
+      # store will not take it — see "Publish to the rolling prerelease".
+      contents: write
       pull-requests: write
       # Needed for the cosign dry run below to mint a Fulcio cert via OIDC.
       id-token: write
@@ -206,8 +208,38 @@ jobs:
           echo "version_tag=$VERSION_TAG" >> "$GITHUB_OUTPUT"
           echo "exe_path=$NEW_EXE" >> "$GITHUB_OUTPUT"
 
+      # Artifact storage has a hard account quota, and a day of iteration fills
+      # it: twenty 99MB installers. The failure then lands on the upload step of
+      # an otherwise green build and no binary comes out for the six to twelve
+      # hours GitHub takes to recalculate usage — which is exactly the moment a
+      # fix is wanted.
+      #
+      # Release assets are not charged against that quota. So the installer also
+      # goes to one rolling prerelease, replacing the asset each time: always
+      # downloadable, never accumulating, and unaffected by however full the
+      # artifact store is. Marked prerelease so it cannot be mistaken for a
+      # published version, and pointed at the branch rather than a tag of its own.
+      - name: Publish to the rolling prerelease
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXE=$(find dist -maxdepth 1 -name '*.exe' | head -1)
+          TAG="pr-${{ github.event.pull_request.number }}-latest"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
+            --prerelease \
+            --target "${{ github.event.pull_request.head.sha }}" \
+            --title "PR #${{ github.event.pull_request.number }} — latest build" \
+            --notes "Rolling build of this pull request. Replaced on every push; not a release."
+          gh release upload "$TAG" "$EXE" --clobber
+
       - name: Upload installer
         id: upload-installer
+        # Best effort. The prerelease above is the reliable route; this keeps the
+        # familiar per-run artifact while there is quota for it, and must not fail
+        # a build that has otherwise passed.
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           # `name` is ignored by the action whenever archive: false — the
