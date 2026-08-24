@@ -447,6 +447,11 @@ export default function ChatReader({ chat, onChange }: Props) {
           >
             {chat.sources.split(',').includes('capture') ? 'panel capture' : 'as imported'} ·{' '}
             {chat.messageCount} turns
+            {/* Beside each reading, because neither contains the other's links —
+                one export record kept three inline while the page carried
+                thirty-seven, and at least one the export kept is no longer on the
+                page at all. */}
+            {chat.linkCount > 0 && ` · ${chat.linkCount} links`}
           </button>
           {entries.map((entry) => (
             <button
@@ -461,6 +466,7 @@ export default function ChatReader({ chat, onChange }: Props) {
               }
             >
               e#{entry.id} · {entry.turnCount} turns
+              {entry.linkCount > 0 && ` · ${entry.linkCount} links`}
               {entry.linked ? '' : ' (unattached)'}
             </button>
           ))}

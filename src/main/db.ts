@@ -572,6 +572,7 @@ interface ChatSummaryRow {
   message_count: number;
   image_count: number;
   preview_count: number;
+  link_count: number;
   title_image: string | null;
   capture_attempts: number;
   source: string;
@@ -607,6 +608,13 @@ const CHAT_SUMMARY_SQL = `
          -- discarded, but counted apart so 17 previews never read as 17 images.
          (SELECT COUNT(DISTINCT a.sha256) FROM assets a
            WHERE a.chat_id = c.id AND a.kind = 'other') AS preview_count,
+         -- Citations in the thread's own stored reading, to sit beside the count
+         -- for each entry. The two readings cite differently and neither
+         -- contains the other's links.
+         (SELECT COALESCE(SUM(
+                   (LENGTH(m.html) - LENGTH(REPLACE(LOWER(m.html), '<a ', ''))) / 3
+                 ), 0)
+            FROM messages m WHERE m.chat_id = c.id) AS link_count,
          -- The image the conversation STARTED with, for the list thumbnail.
          -- Two restrictions, and an earlier version had neither, which is why
          -- conversations that begin with text were showing an unrelated picture:
@@ -649,6 +657,7 @@ function toSummary(row: ChatSummaryRow): ChatSummary {
     messageCount: row.message_count,
     imageCount: row.image_count,
     previewCount: row.preview_count,
+    linkCount: row.link_count,
     // Relative, matching what is stored in turn HTML, so the renderer resolves
     // both the same way against the real assets directory.
     titleImage: assetHrefFor(row.title_image),
@@ -2218,6 +2227,7 @@ export function sourceEntriesForChat(chatId: number): SourceEntryView[] {
     let imageCount = 0;
     let dateText: string | null = null;
     let imagePaths: string[] = [];
+    let linkCount = 0;
     try {
       const payload = JSON.parse(row.payload_json) as {
         turns?: unknown[];
@@ -2229,6 +2239,13 @@ export function sourceEntriesForChat(chatId: number): SourceEntryView[] {
       imageCount = payload.images?.length ?? 0;
       dateText = payload.timestampText ?? null;
       imagePaths = payload.storedImages ?? [];
+      // Counted, not sampled. Asserting "this has no anchors" from the first and
+      // last few hundred characters of a 2,503-character string got the answer
+      // wrong twice: all three of that record's links sat in the middle.
+      linkCount = ((payload.turns ?? []) as { html?: string }[]).reduce<number>(
+        (n, turn) => n + (turn.html?.match(/<a\b[^>]*href=/gi)?.length ?? 0),
+        0,
+      );
     } catch {
       // A payload that will not parse is still worth listing: its existence is
       // the point, and hiding it would make the record look complete.
@@ -2245,6 +2262,7 @@ export function sourceEntriesForChat(chatId: number): SourceEntryView[] {
       chatCount: row.chat_count,
       dateText,
       imagePaths,
+      linkCount,
     };
   });
 }
@@ -2922,6 +2940,7 @@ export function orphanSourceEntries(): SourceEntryView[] {
     let imageCount = 0;
     let dateText: string | null = null;
     let imagePaths: string[] = [];
+    let linkCount = 0;
     try {
       const payload = JSON.parse(row.payload_json) as {
         turns?: unknown[];
@@ -2933,6 +2952,13 @@ export function orphanSourceEntries(): SourceEntryView[] {
       imageCount = payload.images?.length ?? 0;
       dateText = payload.timestampText ?? null;
       imagePaths = payload.storedImages ?? [];
+      // Counted, not sampled. Asserting "this has no anchors" from the first and
+      // last few hundred characters of a 2,503-character string got the answer
+      // wrong twice: all three of that record's links sat in the middle.
+      linkCount = ((payload.turns ?? []) as { html?: string }[]).reduce<number>(
+        (n, turn) => n + (turn.html?.match(/<a\b[^>]*href=/gi)?.length ?? 0),
+        0,
+      );
     } catch {
       // Listed regardless — see sourceEntriesForChat.
     }
@@ -2948,6 +2974,7 @@ export function orphanSourceEntries(): SourceEntryView[] {
       chatCount: 0,
       dateText,
       imagePaths,
+      linkCount,
     };
   });
 }

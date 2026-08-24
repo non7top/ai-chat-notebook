@@ -36,6 +36,12 @@ export interface ChatSummary {
    */
   previewCount: number;
   /**
+   * Citations in this thread's own stored reading. Shown beside each entry's
+   * count, because the two readings cite differently and at least one link an
+   * export kept is no longer on the live page at all.
+   */
+  linkCount: number;
+  /**
    * The conversation's first image, as a relative "assets/..." path, or null.
    * Most of this archive is image generation, so the picture a conversation
    * opened with identifies it far faster than 300 characters of prompt.
@@ -272,6 +278,8 @@ export interface SourceEntryView {
   linked: boolean;
   /** Conversations this entry is attached to — the link is many-to-many. */
   chatCount: number;
+  /** Citations in this entry's stored answer. */
+  linkCount: number;
   /**
    * The date as the export wrote it, present only when it could not be parsed —
    * so an entry with no date says which kind of no-date it is.
