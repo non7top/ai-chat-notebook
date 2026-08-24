@@ -368,7 +368,11 @@ export default function HarvestBar({
               setTakeoutNote(
                 `moved ${r.images} images out of ${r.turns} turns · ` +
                   `${(r.bytesFreed / 1024 / 1024).toFixed(1)} MB reclaimed` +
-                  (r.failed ? ` · ${r.failed} could not be read` : ''),
+                  (r.failed ? ` · ${r.failed} could not be read` : '') +
+                  // Surfaced rather than swallowed: a stubborn row means base64
+                  // arrived in a form the patterns do not recognise, and the
+                  // number is the only way that becomes known.
+                  (r.stubborn ? ` · ${r.stubborn} still hold base64` : ''),
               );
               setInlineImages(await window.notebook.countInlineImages());
               onFinished();

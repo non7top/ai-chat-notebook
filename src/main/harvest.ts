@@ -611,6 +611,8 @@ export interface InlineRepairSummary {
   images: number;
   bytesFreed: number;
   failed: number;
+  /** Turns that still hold base64 afterwards — a carrier not yet recognised. */
+  stubborn: number;
 }
 
 /**
@@ -632,13 +634,25 @@ export interface InlineRepairSummary {
 export async function repairInlineImages(
   onProgress?: (done: number, total: number) => void,
 ): Promise<InlineRepairSummary> {
-  const summary: InlineRepairSummary = { turns: 0, images: 0, bytesFreed: 0, failed: 0 };
+  const summary: InlineRepairSummary = {
+    turns: 0,
+    images: 0,
+    bytesFreed: 0,
+    failed: 0,
+    stubborn: 0,
+  };
   const total = db.countMessagesWithInlineImages();
   // Taken in batches rather than all at once: the rows are megabytes each, and
   // holding 452 of them in memory to save a query would be its own problem.
+  //
+  // Paged by id, so a row that cannot be fully cleaned is passed over rather than
+  // selected again next round. Re-querying the LIKE each time made this loop
+  // endless on a real archive — the counter read "3200 of 480".
+  let afterId = 0;
   for (;;) {
-    const rows = db.messagesWithInlineImages(20);
+    const rows = db.messagesWithInlineImages(20, afterId);
     if (rows.length === 0) break;
+    afterId = rows[rows.length - 1].id;
 
     for (const row of rows) {
       const before = row.html.length;
@@ -662,6 +676,10 @@ export async function repairInlineImages(
       db.replaceMessageHtml(row.id, rewritten);
       summary.turns += 1;
       summary.bytesFreed += before - rewritten.length;
+      // Counted rather than retried. A row still holding base64 after the rewrite
+      // is a carrier the patterns do not know about, and the useful response is a
+      // number to investigate — not another pass that will fail the same way.
+      if (rewritten.includes('data:image')) summary.stubborn += 1;
       onProgress?.(summary.turns, total);
     }
 

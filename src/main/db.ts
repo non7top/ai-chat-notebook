@@ -2733,15 +2733,21 @@ export interface InlineImageRow {
  * The images were never written to the asset store, so this is the only copy —
  * which is why the repair moves them rather than simply deleting the markup.
  */
-export function messagesWithInlineImages(limit: number): InlineImageRow[] {
+export function messagesWithInlineImages(limit: number, afterId = 0): InlineImageRow[] {
+  // Paged by id, and that is the whole point rather than a detail. Re-querying
+  // "html LIKE '%data:image%'" each round meant any row the rewrite could not
+  // fully clean was selected again on the next pass, forever — the progress
+  // counter read "3200 of 480" on a real archive, which is what an endless loop
+  // looks like from the outside. Walking ids visits every row exactly once
+  // whether or not cleaning it succeeded.
   return db
     .prepare(
       `SELECT id, chat_id AS chatId, html FROM messages
-        WHERE html LIKE '%data:image%'
-        ORDER BY LENGTH(html) DESC
+        WHERE html LIKE '%data:image%' AND id > ?
+        ORDER BY id
         LIMIT ?`,
     )
-    .all(limit) as unknown as InlineImageRow[];
+    .all(afterId, limit) as unknown as InlineImageRow[];
 }
 
 export function countMessagesWithInlineImages(): number {

@@ -24,5 +24,19 @@ export function rewriteImageSources(html: string, replacements: Map<string, stri
   }
   // The whole element, not just its src: an <img> with no usable source renders
   // as a broken-image icon, which is worse than nothing being there.
-  return out.replace(/<img\b[^>]*\bsrc="data:[^"]*"[^>]*>/gi, '');
+  //
+  // Every carrier, not only src. A single pattern for src alone left rows that
+  // still contained base64 — in srcset, in a <source> inside a <picture>, or in
+  // an inline background-image — and those rows then failed to clean at all.
+  return (
+    out
+      .replace(/<img\b[^>]*\bsrc\s*=\s*"data:[^"]*"[^>]*>/gi, '')
+      .replace(/<img\b[^>]*\bsrcset\s*=\s*"[^"]*data:[^"]*"[^>]*>/gi, '')
+      .replace(/<source\b[^>]*data:[^>]*>/gi, '')
+      // Whatever is left: an attribute value holding a data: URI on some other
+      // element. The attribute goes, the element stays — dropping an arbitrary
+      // element because of one attribute would remove text with it.
+      .replace(/\s[a-zA-Z-]+\s*=\s*"data:image[^"]*"/g, '')
+      .replace(/url\(\s*['"]?data:image[^)]*\)/gi, 'none')
+  );
 }

@@ -46,5 +46,25 @@ check('the stored one is kept', mixed.includes('assets/kept.png'));
 check('the unstored one is dropped', !mixed.includes('base64'));
 check('an already-local one is untouched', mixed.includes('assets/x/y.png'));
 
+// Every carrier of base64, because a row that keeps ANY of it was selected again
+// on the next pass — the repair loop ran forever and its counter read
+// "3200 of 480" on a real archive. Leaving one carrier unhandled is what turned a
+// missed image into an endless loop.
+const carriers: [string, string][] = [
+  ['srcset', `<img srcset="${tiny} 2x" alt="a">`],
+  ['a <source> in a <picture>', `<picture><source srcset="${tiny}"><img src="x.png"></picture>`],
+  ['an inline background-image', `<div style="background-image:url('${tiny}')">text</div>`],
+  ['some other attribute', `<div data-thumb="${tiny}">text</div>`],
+  ['single-spaced src', `<img src = "${tiny}">`],
+];
+for (const [name, html] of carriers) {
+  const cleaned = rewrite(html, new Map());
+  check(`base64 in ${name} is removed`, !cleaned.includes('data:image'), cleaned.slice(0, 60));
+}
+check(
+  'text beside a stripped attribute survives',
+  rewrite(`<div data-thumb="${tiny}">text</div>`, new Map()).includes('text'),
+);
+
 if (failures > 0) throw new Error(`${failures} check(s) failed`);
 console.log('OK');
