@@ -247,6 +247,14 @@ button:disabled {
    one does not shift its text sideways relative to its neighbours. */
 .chat-row {
   border-left: 3px solid transparent;
+  /* Rows off screen are not laid out or painted. The list runs to 2848 rows, each
+     with a thumbnail and several spans, and switching folders re-rendered every
+     one of them — five seconds of locked window for a pane showing about
+     fifteen. contain-intrinsic-size gives the browser a height to reserve so the
+     scrollbar stays honest while the content is skipped; without it the bar
+     jumps as rows are realised. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 3.4rem;
 }
 
 /* An export entry is the baseline and deliberately carries no colour at all:

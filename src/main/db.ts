@@ -576,7 +576,6 @@ interface ChatSummaryRow {
   message_count: number;
   image_count: number;
   preview_count: number;
-  link_count: number;
   title_image: string | null;
   capture_attempts: number;
   source: string;
@@ -612,13 +611,11 @@ const CHAT_SUMMARY_SQL = `
          -- discarded, but counted apart so 17 previews never read as 17 images.
          (SELECT COUNT(DISTINCT a.sha256) FROM assets a
            WHERE a.chat_id = c.id AND a.kind = 'other') AS preview_count,
-         -- Citations in the thread's own stored reading, to sit beside the count
-         -- for each entry. The two readings cite differently and neither
-         -- contains the other's links.
-         (SELECT COALESCE(SUM(
-                   (LENGTH(m.html) - LENGTH(REPLACE(LOWER(m.html), '<a ', ''))) / 3
-                 ), 0)
-            FROM messages m WHERE m.chat_id = c.id) AS link_count,
+         -- link_count is NOT here. It counts anchors by REPLACE over
+         -- messages.html, and that column holds 105MB — so computing it per row
+         -- meant every list query scanned the whole of it, and switching folders
+         -- locked the window for five seconds. Only the reader shows the number,
+         -- and the reader looks at one thread; getChat computes it there.
          -- The image the conversation STARTED with, for the list thumbnail.
          -- Two restrictions, and an earlier version had neither, which is why
          -- conversations that begin with text were showing an unrelated picture:
@@ -661,7 +658,9 @@ function toSummary(row: ChatSummaryRow): ChatSummary {
     messageCount: row.message_count,
     imageCount: row.image_count,
     previewCount: row.preview_count,
-    linkCount: row.link_count,
+    // Zero in a summary. The list does not show it, and finding out costs a scan
+    // of every stored answer — see the note in CHAT_SUMMARY_SQL.
+    linkCount: 0,
     // Relative, matching what is stored in turn HTML, so the renderer resolves
     // both the same way against the real assets directory.
     titleImage: assetHrefFor(row.title_image),
@@ -806,8 +805,23 @@ export function getChat(id: number): ChatDetail | null {
     .map((a) => assetHrefFor(a.local_path))
     .filter((href): href is string => href !== null);
 
+  // Counted here, for this one thread, rather than for every row of every list.
+  const linkCount = Number(
+    (
+      db
+        .prepare(
+          `SELECT COALESCE(SUM(
+                    (LENGTH(html) - LENGTH(REPLACE(LOWER(html), '<a ', ''))) / 3
+                  ), 0) AS n
+             FROM messages WHERE chat_id = ?`,
+        )
+        .get(id) as unknown as { n: number }
+    ).n,
+  );
+
   return {
     ...toSummary(row),
+    linkCount,
     externalId: extra?.external_id ?? '',
     url: extra?.url ?? null,
     messages,
