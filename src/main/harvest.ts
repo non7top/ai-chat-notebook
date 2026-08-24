@@ -781,7 +781,18 @@ export async function repairInlineImages(
     failed: 0,
     stubborn: 0,
   };
-  const total = db.countMessagesWithInlineImages();
+  // The flag backfill is drained first. It is one pass over every stored turn —
+  // the same pass that used to run on startup and froze the window for ten
+  // seconds — so it is done here, inside an operation that already takes minutes
+  // and shows progress, rather than on the way to painting a window.
+  for (;;) {
+    const { remaining } = db.examineInlineImages(400);
+    if (remaining === 0) break;
+    onProgress?.(0, remaining);
+    // Yields to the event loop between slices, so the window keeps painting.
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const total = db.countMessagesWithInlineImages().inline;
   // Taken in batches rather than all at once: the rows are megabytes each, and
   // holding 452 of them in memory to save a query would be its own problem.
   //

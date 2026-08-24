@@ -4,6 +4,7 @@ import type {
   SuspectCopyGroup,
   CaptureProgress,
   HarvestProgress,
+  InlineImageCount,
   TakeoutImportRow,
   TakeoutPick,
 } from '../shared/types';
@@ -82,7 +83,7 @@ export default function HarvestBar({
   // Only set while a run is in progress; the prop is the truth otherwise.
   const [remainingOverride, setRemainingOverride] = useState<number | null>(null);
   const [linksToFetch, setLinksToFetch] = useState(0);
-  const [inlineImages, setInlineImages] = useState(0);
+  const [inline, setInline] = useState<InlineImageCount>({ inline: 0, unexamined: 0 });
   const [lastJob, setLastJob] = useState<{
     job: string;
     outcome: string;
@@ -109,7 +110,7 @@ export default function HarvestBar({
   // biome-ignore lint/correctness/useExhaustiveDependencies: triggers, not inputs — they mark when the count can have changed
   useEffect(() => {
     window.notebook.countLinksToFetch().then(setLinksToFetch);
-    window.notebook.countInlineImages().then(setInlineImages);
+    window.notebook.countInlineImages().then(setInline);
     window.notebook.lastJobs().then((jobs) => setLastJob(jobs[0] ?? null));
   }, [uncaptured, activity]);
 
@@ -400,7 +401,7 @@ export default function HarvestBar({
 
       {/* Only offered while there is something to repair, so it disappears once
           the archive is clean rather than sitting there inviting a no-op. */}
-      {more && inlineImages > 0 && (
+      {more && (inline.inline > 0 || inline.unexamined > 0) && (
         <button
           type="button"
           disabled={busy || capturing || takeoutBusy}
@@ -418,14 +419,15 @@ export default function HarvestBar({
                   // number is the only way that becomes known.
                   (r.stubborn ? ` · ${r.stubborn} still hold base64` : ''),
               );
-              setInlineImages(await window.notebook.countInlineImages());
+              setInline(await window.notebook.countInlineImages());
               onFinished();
             } finally {
               setTakeoutBusy(false);
             }
           }}
         >
-          Move inline images ({inlineImages})
+          Move inline images ({inline.inline}
+          {inline.unexamined > 0 && '+'})
         </button>
       )}
 

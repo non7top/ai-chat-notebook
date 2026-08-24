@@ -322,6 +322,15 @@ export interface TakeoutPreview {
   chatsTouched: number;
 }
 
+/**
+ * Turns still holding base64 images, and how much of the archive that answer
+ * has actually looked at.
+ */
+export interface InlineImageCount {
+  inline: number;
+  unexamined: number;
+}
+
 export interface ArchiveProgress {
   phase: 'database' | 'counting' | 'copying' | 'done';
   done: number;
@@ -381,8 +390,14 @@ export interface NotebookApi {
   /**
    * Turns whose stored HTML still carries base64 instead of pointing at the
    * asset store — written before capture stopped keeping it.
+   *
+   * `unexamined` is turns stored before the flag that answers this cheaply
+   * existed, so `inline` is a lower bound until the repair pass has drained
+   * them. Reported rather than folded in: the previous version of this answered
+   * exactly by reading 780 MB of markup on the main thread, which is what made
+   * the window dead for ten seconds on launch.
    */
-  countInlineImages(): Promise<number>;
+  countInlineImages(): Promise<InlineImageCount>;
   /**
    * Moves that base64 into the asset store and rewrites the HTML. Moves rather
    * than drops: the markup is the only copy of those images.

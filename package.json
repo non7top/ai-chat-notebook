@@ -20,6 +20,8 @@
     "check:dates": "node --experimental-strip-types --no-warnings scripts/check-dates.ts",
     "check:find": "node --experimental-strip-types --no-warnings scripts/check-find.ts",
     "check:sources": "node --experimental-strip-types --no-warnings scripts/check-sources.ts",
+    "check:inline": "node --experimental-strip-types --no-warnings scripts/check-inline.ts",
+    "check:sanitize": "node --experimental-strip-types --no-warnings scripts/check-sanitize.ts",
     "check:not-debug": "node scripts/check-not-debug.mjs",
     "check:bundle": "node scripts/check-bundle-externals.mjs"
   },

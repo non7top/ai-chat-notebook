@@ -777,15 +777,65 @@ const READ_TURNS_SCRIPT = `
       const alt = img.getAttribute('alt') || '';
       if (cls.indexOf('HkNHyd') !== -1 || alt === 'AI generated image') return 'generated';
       if (cls.indexOf('taqkMe') !== -1 || alt === 'Visually searched image') return 'upload';
-      // img.fRm5F is the second copy of a real image, rendered outside the
-      // controls. Same picture, so it is content — the store is
-      // content-addressed and will collapse the duplicate.
+      // img.fRm5F is the expand-wrapper copy of a real image. Still classified
+      // as content, because when it is the ONLY copy it is the picture — but
+      // redundantImages() drops it when a primary copy stands beside it, which
+      // is what the store collapsing the bytes never did for the markup.
       if (cls.indexOf('fRm5F') !== -1) return 'generated';
       return 'other';
     };
 
-    const imagesIn = (el) =>
-      Array.from(el.querySelectorAll('img'))
+    // Which <img> elements are REDUNDANT copies of a picture the turn already
+    // holds. AI Mode renders every image twice: once in the answer, and once
+    // inside the click-to-expand wrapper as img.fRm5F[data-deferred]. Google's
+    // own stylesheet hides the second; the archive has no stylesheet, so both
+    // showed, and every generated image appeared twice in the reader.
+    //
+    // The duplicate was already known here — the note below kept img.fRm5F on
+    // the grounds that the content-addressed store collapses it. It does, for
+    // the BYTES. The second <img> tag survived, and so did a second asset row
+    // whenever Google served the expand copy re-encoded: measured on thread
+    // #2842, an upload stored twice under two different hashes.
+    //
+    // Two rules, because the two cases differ:
+    //  - identical src twice in one turn: the generated-image case, exact.
+    //  - img.fRm5F alongside a primary copy: the upload case, where the expand
+    //    copy is the same picture at a different encoding and the hashes differ.
+    // An fRm5F with no primary beside it is KEPT — if Google ever renders only
+    // the deferred copy, dropping it would lose the picture.
+    const redundantImages = (root) => {
+      const imgs = Array.from(root.querySelectorAll('img'));
+      const isExpandCopy = (img) => (img.className || '').indexOf('fRm5F') !== -1;
+      const hasPrimary = imgs.some((img) => {
+        if (isExpandCopy(img)) return false;
+        const cls = img.className || '';
+        const alt = img.getAttribute('alt') || '';
+        return (
+          cls.indexOf('HkNHyd') !== -1 ||
+          cls.indexOf('taqkMe') !== -1 ||
+          alt === 'AI generated image' ||
+          alt === 'Visually searched image'
+        );
+      });
+      const skip = new Set();
+      const seen = new Set();
+      for (const img of imgs) {
+        const src = img.currentSrc || img.getAttribute('src') || '';
+        if (!src) continue;
+        if (seen.has(src)) {
+          skip.add(img);
+          continue;
+        }
+        seen.add(src);
+        if (hasPrimary && isExpandCopy(img)) skip.add(img);
+      }
+      return skip;
+    };
+
+    const imagesIn = (el) => {
+      const redundant = redundantImages(el);
+      return Array.from(el.querySelectorAll('img'))
+        .filter((img) => !redundant.has(img))
         .map((img) => ({
           src: img.currentSrc || img.getAttribute('src') || '',
           alt: img.getAttribute('alt') || null,
@@ -801,6 +851,7 @@ const READ_TURNS_SCRIPT = `
         // which none were the pictures it was about. Size cannot answer this
         // question; kindOf can, which is why it exists.
         .filter((i) => i.src && (i.width >= 32 || i.height >= 32));
+    };
 
     // Strip chrome from a COPY, so the live page is never modified — this runs
     // against the user's real session.
@@ -873,6 +924,13 @@ const READ_TURNS_SCRIPT = `
       }
       for (const code of Array.from(copy.querySelectorAll('script,style,noscript,template'))) {
         code.remove();
+      }
+      // After the chrome pass, so an image rescued out of a control is still
+      // considered — and recomputed on the copy rather than mapped across the
+      // clone, which is safe here because the rule reads class, alt and src and
+      // all three survive cloneNode.
+      for (const dup of Array.from(redundantImages(copy))) {
+        dup.remove();
       }
       return copy;
     };

@@ -247,6 +247,38 @@ export function initDb(userDataPath: string): void {
   db.exec("UPDATE chats SET date_basis = 'takeout' WHERE started_at IS NOT NULL AND date_basis IS NULL");
   db.exec('CREATE INDEX IF NOT EXISTS chats_list_rank ON chats(list_rank);');
 
+  // Whether a turn's markup still carries a base64 image. NULL means not yet
+  // examined.
+  //
+  // This exists because the question "how many turns still hold inline images"
+  // was answered by LIKE '%data:image%' over messages.html — and that column is
+  // most of a 959MB file. node:sqlite is synchronous, so the scan ran on the
+  // main process's only thread: measured at 79 seconds cold, and it sat on the
+  // startup path, which is what the dead window on launch was. Answered from an
+  // index instead, it is immediate.
+  ensureColumn('messages', 'has_inline', 'has_inline INTEGER');
+  db.exec('CREATE INDEX IF NOT EXISTS messages_has_inline ON messages(has_inline);');
+  // Maintained by trigger rather than at each write site, because there are four
+  // of them — three inserts and the repair pass's rewrite — and a count that
+  // silently stops matching reality is worse than no count at all. A trigger
+  // cannot be forgotten by a fifth.
+  //
+  // The inner UPDATE sets has_inline, not html, so the AFTER UPDATE OF html
+  // trigger cannot re-fire on its own write; recursive_triggers is off by
+  // default regardless.
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS messages_inline_flag_ins
+    AFTER INSERT ON messages BEGIN
+      UPDATE messages SET has_inline = COALESCE(NEW.html LIKE '%data:image%', 0)
+       WHERE id = NEW.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS messages_inline_flag_upd
+    AFTER UPDATE OF html ON messages BEGIN
+      UPDATE messages SET has_inline = COALESCE(NEW.html LIKE '%data:image%', 0)
+       WHERE id = NEW.id;
+    END;
+  `);
+
   fts5Available = probeFts5(db);
   // Logged rather than assumed: which SQLite build Electron ships changes
   // with the Electron version, so this can flip under us on an upgrade and
@@ -2790,24 +2822,76 @@ export function messagesWithInlineImages(limit: number, afterId = 0): InlineImag
   // counter read "3200 of 480" on a real archive, which is what an endless loop
   // looks like from the outside. Walking ids visits every row exactly once
   // whether or not cleaning it succeeded.
+  //
+  // Selected by the has_inline flag rather than by LIKE, so this reads the 2245
+  // rows that actually hold base64 instead of all 23285 to find them. The caller
+  // drains the flag backfill before the first page, so an unexamined row cannot
+  // be silently passed over.
   return db
     .prepare(
       `SELECT id, chat_id AS chatId, html FROM messages
-        WHERE html LIKE '%data:image%' AND id > ?
+        WHERE has_inline = 1 AND id > ?
         ORDER BY id
         LIMIT ?`,
     )
     .all(afterId, limit) as unknown as InlineImageRow[];
 }
 
-export function countMessagesWithInlineImages(): number {
-  return Number(
-    (
-      db
-        .prepare("SELECT COUNT(*) AS n FROM messages WHERE html LIKE '%data:image%'")
-        .get() as unknown as { n: number }
-    ).n,
-  );
+export interface InlineImageCount {
+  /** Turns known to hold base64. */
+  inline: number;
+  /**
+   * Turns not yet examined, so `inline` is a lower bound. Reported rather than
+   * hidden: a number presented as final while a third of the archive has not
+   * been looked at is the kind of confident wrong answer this code keeps
+   * producing.
+   */
+  unexamined: number;
+}
+
+/**
+ * How many turns still hold base64 images — from the index, not from the text.
+ *
+ * The scan this replaces read every byte of messages.html on the main thread.
+ * Both counts here are index lookups and return in microseconds.
+ */
+export function countMessagesWithInlineImages(): InlineImageCount {
+  const one = (sql: string) =>
+    Number((db.prepare(sql).get() as unknown as { n: number }).n ?? 0);
+  return {
+    inline: one('SELECT COUNT(*) AS n FROM messages WHERE has_inline = 1'),
+    unexamined: one('SELECT COUNT(*) AS n FROM messages WHERE has_inline IS NULL'),
+  };
+}
+
+/**
+ * Fills in has_inline for rows written before the column existed.
+ *
+ * The whole backfill is one scan of every stored turn, which is the very thing
+ * that froze the window — so it is handed out in slices and the caller yields
+ * between them. Returns what is left, so the caller knows when to stop.
+ */
+export function examineInlineImages(limit: number): { examined: number; remaining: number } {
+  const rows = db
+    .prepare('SELECT id, html FROM messages WHERE has_inline IS NULL LIMIT ?')
+    .all(limit) as unknown as { id: number; html: string | null }[];
+  // A plain UPDATE, not a rewrite of html: the AFTER UPDATE OF html trigger
+  // would not fire for this column, and firing it would mean writing the markup
+  // back out for no reason.
+  const set = db.prepare('UPDATE messages SET has_inline = ? WHERE id = ?');
+  for (const row of rows) {
+    set.run((row.html ?? '').includes('data:image') ? 1 : 0, row.id);
+  }
+  return {
+    examined: rows.length,
+    remaining: Number(
+      (
+        db
+          .prepare('SELECT COUNT(*) AS n FROM messages WHERE has_inline IS NULL')
+          .get() as unknown as { n: number }
+      ).n ?? 0,
+    ),
+  };
 }
 
 export function replaceMessageHtml(messageId: number, html: string): void {

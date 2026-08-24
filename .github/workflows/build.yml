@@ -71,6 +71,16 @@ jobs:
       - name: Check the source-entry model
         run: docker compose run --rm dev npm run check:sources
 
+      - name: Check the inline-image flag
+        run: docker compose run --rm dev npm run check:inline
+
+      # The reader's image de-duplication has a branch that DELETES an <img>, so
+      # a wrong rule loses pictures silently — the one failure this archive
+      # exists to prevent. Both real shapes are covered, including the copy that
+      # must be kept.
+      - name: Check reader sanitising
+        run: docker compose run --rm dev npm run check:sanitize
+
       - name: Check title matching
         run: docker compose run --rm dev npm run check:find
 
