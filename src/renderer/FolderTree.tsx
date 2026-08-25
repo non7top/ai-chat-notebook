@@ -263,17 +263,32 @@ export default function FolderTree({
               <span className={`tree-name${folder.color ? ` c-${folder.color}` : ''}`}>
                 {folder.name}
               </span>
+              {/* ONE number, not two. Two of them plus a mark plus four action
+                  buttons left 49px for the folder's name in a 220px pane —
+                  measured — so "pepperdoll" rendered as "pepp…". A collapsed
+                  parent shows its subtree total, because that is the number
+                  that matters when its children are hidden; expanded, it shows
+                  its own, because the children are showing theirs. */}
               <Count
-                n={counts?.byFolder[folder.id] ?? (counts ? 0 : undefined)}
-                title="Threads in this folder"
+                n={
+                  counts
+                    ? isCollapsed && subtree[folder.id] > (counts.byFolder[folder.id] ?? 0)
+                      ? subtree[folder.id]
+                      : (counts.byFolder[folder.id] ?? 0)
+                    : undefined
+                }
+                title={
+                  isCollapsed && counts && subtree[folder.id] > (counts.byFolder[folder.id] ?? 0)
+                    ? `${subtree[folder.id]} including subfolders — ${counts.byFolder[folder.id] ?? 0} directly in this one`
+                    : 'Threads in this folder'
+                }
               />
-              {/* Only when the subtree holds more than this folder does, so a
-                  leaf shows one number and a parent shows the two that differ. */}
-              {counts && subtree[folder.id] > (counts.byFolder[folder.id] ?? 0) && (
-                <span className="tree-count subtree" title="Including subfolders">
-                  {subtree[folder.id]}
-                </span>
-              )}
+              {/* Out of the flow entirely. visibility: hidden still RESERVES the
+                  space, so four buttons cost ~72px of every row whether or not
+                  anyone was hovering — in a 220px pane that is a third of it
+                  spent on controls that were not visible. They now sit over the
+                  right end of the row when it is hovered. */}
+              <span className="row-actions">
               <button
                 type="button"
                 className="row-action"
@@ -323,6 +338,7 @@ export default function FolderTree({
               >
                 ✕
               </button>
+              </span>
             </>
           )}
         </div>

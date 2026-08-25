@@ -404,6 +404,9 @@ button:disabled {
   padding: 0.15rem 0.3rem 0.15rem 0.4rem;
   cursor: default;
   border-radius: 4px;
+  /* The anchor for .row-actions, which is taken out of the flow so the folder's
+     name gets the width instead of four invisible buttons. */
+  position: relative;
 }
 
 .tree-row:hover {
@@ -445,13 +448,6 @@ button:disabled {
 
 /* The subtree total, beside the folder's own count. Bracketed so two adjacent
    numbers cannot be read as one. */
-.tree-count.subtree::before {
-  content: '(';
-}
-.tree-count.subtree::after {
-  content: ')';
-}
-
 .twisty,
 .row-action {
   border: none;
@@ -472,13 +468,38 @@ button:disabled {
 }
 
 /* Row actions stay out of the way until the row is under the pointer —
-   otherwise three glyphs per row turn the tree into visual noise. */
-.row-action {
-  visibility: hidden;
+   otherwise four glyphs per row turn the tree into visual noise.
+
+   Absolutely positioned, and that is the fix rather than a refinement.
+   visibility: hidden hides an element but still RESERVES its box, so four
+   buttons cost about 72px of every row whether or not anyone was hovering.
+   Measured in a 220px pane: the folder name was left 49px and needed 67, so
+   "pepperdoll" rendered as "pepp…", and a nested folder got 69px for a name
+   needing 174.
+
+   Out of the flow they cost nothing, and on hover they sit over the right end of
+   the row — over the count, which is the least important thing there while you
+   are reaching for a button. The background is opaque so they do not read as
+   overlapping the number underneath. */
+.row-actions {
+  display: none;
+  position: absolute;
+  right: 0.2rem;
+  align-items: center;
+  gap: 0.1rem;
+  padding-left: 0.4rem;
+  /* Fades from transparent so the name does not end abruptly underneath. */
+  background: linear-gradient(to right, transparent, #f2f2f2 0.4rem);
 }
 
-.tree-row:hover .row-action {
-  visibility: visible;
+.tree-row:hover .row-actions {
+  display: flex;
+}
+
+/* The selected row has its own background, so the fade has to match it or the
+   buttons sit on a grey patch inside a blue row. */
+.tree-row.selected:hover .row-actions {
+  background: linear-gradient(to right, transparent, var(--selected) 0.4rem);
 }
 
 .row-action:hover {
