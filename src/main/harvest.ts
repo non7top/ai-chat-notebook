@@ -1124,6 +1124,10 @@ export async function captureTurns(
         // stopped a run with 123 threads left, most of which were capturable.
         if (error instanceof ThreadNotListedError) {
           summary.unlisted += 1;
+          // Taken out of the queue now rather than after three more walks of the
+          // sidebar. The search reached the end of the list and the row was not
+          // in it, which is a fact about the thread, not a miss.
+          db.recordThreadNotListed(chat.id);
           await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS));
           continue;
         }

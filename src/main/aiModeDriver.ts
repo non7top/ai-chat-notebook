@@ -618,6 +618,16 @@ const SCROLL_TO_THREAD_SCRIPT = (externalId: string) => `
     // below the last one — rewinding to the top every time re-walks the whole
     // list and gets slower the deeper it goes. The wrap-around second pass is
     // what keeps it correct regardless of starting position.
+    //
+    // A wall-clock budget as well as a step budget, and the budget is why: two
+    // passes of 220 steps at 350ms is 154 seconds, and run() gave up at 120. So
+    // on a thread Google has rotated out of the sidebar the search never
+    // reached its own conclusion — it was killed mid-search and reported
+    // "Injected script timed out after 120000ms". Twenty of those in one run,
+    // every one of them a thread that simply is not there any more.
+    //
+    // With this, the search always finishes and always says what it found.
+    const deadline = Date.now() + 60000;
     let steps = 0;
     for (let pass = 0; pass < 2; pass += 1) {
       if (pass === 1) {
@@ -625,12 +635,15 @@ const SCROLL_TO_THREAD_SCRIPT = (externalId: string) => `
         await wait(400);
       }
       for (let step = 0; step < 220; step += 1) {
+        if (Date.now() > deadline) {
+          return { ok: true, found: false, steps: steps, reason: 'search budget spent' };
+        }
         steps += 1;
         const el = find();
         if (el && el.offsetParent !== null) {
           el.scrollIntoView({ block: 'center' });
           await wait(150);
-          return { ok: true, steps: steps, pass: pass };
+          return { ok: true, found: true, steps: steps, pass: pass };
         }
         // Bottom detected from geometry, not from "the scroll didn't move".
         // Those are different things, and conflating them is what broke this.
@@ -643,7 +656,7 @@ const SCROLL_TO_THREAD_SCRIPT = (externalId: string) => `
           if (last && last.offsetParent !== null) {
             last.scrollIntoView({ block: 'center' });
             await wait(150);
-            return { ok: true, steps: steps, pass: pass };
+            return { ok: true, found: true, steps: steps, pass: pass };
           }
           break;
         }
@@ -654,7 +667,11 @@ const SCROLL_TO_THREAD_SCRIPT = (externalId: string) => `
         await wait(350);
       }
     }
-    return { ok: false, error: 'Thread row never rendered: ' + wanted };
+    // ok: TRUE. The search ran to completion and the row is not in the list —
+    // which is an answer, not a malfunction. Returning ok:false made run() throw
+    // a generic Error, indistinguishable from a broken injection, so a thread
+    // Google had rotated out was recorded as a failure and retried.
+    return { ok: true, found: false, steps: steps, reason: 'walked the list to the end' };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
   }
@@ -702,11 +719,21 @@ export class ThreadNotListedError extends Error {
 }
 
 export async function openThreadById(externalId: string): Promise<void> {
-  // Generous timeout: finding a row can mean scrolling most of a 300-row
-  // virtualised list, at ~350ms a step.
-  await run(SCROLL_TO_THREAD_SCRIPT(externalId), 120_000);
-  // Checked before clicking, and this is not defensive tidying: without it the
-  // caller stores whatever thread the panel happens to be showing.
+  // 90s against the script's own 60s budget, so the SCRIPT is what concludes,
+  // not the timeout. The other way round — a 120s runner against a search that
+  // could take 154s — is what turned "this thread is no longer in the sidebar"
+  // into "Injected script timed out", twenty times in one run.
+  const scan = await run<{ found: boolean; steps: number; reason?: string }>(
+    SCROLL_TO_THREAD_SCRIPT(externalId),
+    90_000,
+  );
+  // A completed search that found nothing is the answer, and it has a name.
+  // Classifying it matters: captureTurns treats an unlisted thread as a fact
+  // about that thread rather than a failure — no retry, and it does not count
+  // toward the systemic-failure abort that stops the whole run.
+  if (!scan.found) throw new ThreadNotListedError(externalId);
+  // Checked again before clicking, and this is not defensive tidying: without it
+  // the caller stores whatever thread the panel happens to be showing.
   const { found } = await run<{ found: boolean }>(FIND_THREAD_ROW_SCRIPT(externalId), 15_000);
   if (!found) throw new ThreadNotListedError(externalId);
   await fireAndForget(CLICK_THREAD_SCRIPT(externalId));

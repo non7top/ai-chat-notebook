@@ -1364,6 +1364,24 @@ export function chatsWithoutTurns(limit: number, includeExhausted = false): Chat
  * from 18 to 0 with nothing captured is indistinguishable from finishing the
  * work, and this archive's whole premise is that nothing disappears from view.
  */
+/**
+ * Records that Google no longer lists a thread, so nothing tries it again.
+ *
+ * Counting it as one more ordinary failure meant three further attempts before
+ * the cap took it out of the queue — and each attempt is a walk of the whole
+ * sidebar. This is positive evidence rather than a miss: the search ran to the
+ * end of the list and the row is not in it. Retrying that gains nothing.
+ *
+ * The thread is not lost, and this does not say it is. It keeps its turns, its
+ * export entries and its link; it is only the PANEL that can no longer reach it.
+ */
+export function recordThreadNotListed(chatId: number): void {
+  db.prepare('UPDATE chats SET capture_attempts = ? WHERE id = ?').run(
+    MAX_CAPTURE_ATTEMPTS,
+    chatId,
+  );
+}
+
 export function countExhaustedCaptures(): number {
   const row = db
     .prepare(
