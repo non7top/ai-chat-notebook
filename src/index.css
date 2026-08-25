@@ -165,6 +165,45 @@ button:disabled {
   padding: 0.8rem;
 }
 
+/* Rows picked for filing. Deliberately NOT the same treatment as .selected —
+   that one means "this is what the reader is showing" and there is exactly one
+   of it, while this can be a hundred rows and has to read as a held set rather
+   than as a hundred things being read at once. A left rule and a wash, so a
+   picked row that is also the one being read still shows both. */
+.chat-row.picked {
+  background: #eff6ff;
+  box-shadow: inset 3px 0 0 #2563eb;
+}
+
+.chat-row.picked.selected {
+  background: var(--selected);
+}
+
+/* Says how many are held and what to do with them. It appears only while
+   something is picked: the risk of a multi-select is filing rows you had
+   forgotten were held, so the count is never off screen while it matters. */
+.picked-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.5rem;
+  margin-bottom: 0.2rem;
+  background: #dbeafe;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  position: sticky;
+  /* Sticky, because the pick is made by scrolling: shift-clicking a row four
+     hundred down would otherwise leave the count somewhere above the window. */
+  top: 0;
+  z-index: 1;
+}
+
+.picked-bar button {
+  margin-left: auto;
+  font-size: 0.72rem;
+}
+
 /* ------------------------------------------------------------------- tree */
 
 .tree-row {

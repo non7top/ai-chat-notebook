@@ -12,10 +12,17 @@ interface Props {
   scope: ChatScope;
   onScopeChange: (scope: ChatScope) => void;
   onChange: () => void;
+  /** Called after threads land in a folder, so the pick can be let go of. */
+  onChatsFiled: () => void;
   onError: (message: string) => void;
 }
 
-type DragPayload = { kind: 'folder'; id: number } | { kind: 'chat'; id: number };
+type DragPayload =
+  | { kind: 'folder'; id: number }
+  // A LIST, even for one thread. A single-id shape alongside a multi-id one is
+  // two code paths for the same drop, and the one used less often is the one
+  // that rots.
+  | { kind: 'chats'; ids: number[] };
 
 // Naming is done with an inline input rather than window.prompt, which Electron
 // does not implement at all: calling it throws "prompt() is not supported."
@@ -99,6 +106,7 @@ export default function FolderTree({
   scope,
   onScopeChange,
   onChange,
+  onChatsFiled,
   onError,
 }: Props) {
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
@@ -166,7 +174,14 @@ export default function FolderTree({
       // rejection has to surface, or the drop just appears to do nothing.
       run(window.notebook.moveFolder(payload.id, targetId));
     } else {
-      run(window.notebook.setChatFolder(payload.id, targetId));
+      run(
+        window.notebook.setChatsFolder(payload.ids, targetId).then(() => {
+          // Cleared once they have landed, not before: a pick that survives its
+          // own drop invites dropping it again somewhere else, and the rows have
+          // already moved out from under it.
+          onChatsFiled();
+        }),
+      );
     }
   };
 

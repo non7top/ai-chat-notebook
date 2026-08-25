@@ -5,8 +5,17 @@ import { highlight, matchesTitle, termsOf } from './findTitles';
 
 interface Props {
   chats: ChatSummary[];
+  /** The thread the reader is showing. One, always — reading is singular. */
   selectedId: number | null;
   onSelect: (id: number) => void;
+  /**
+   * The threads picked for filing, which is a different thing from the one being
+   * read: you gather a dozen rows about one topic while reading none of them.
+   * Owned by the parent so it survives a re-render of this list and so a folder
+   * drop can clear it.
+   */
+  picked: ReadonlySet<number>;
+  onPickedChange: (picked: ReadonlySet<number>) => void;
   query: string;
   onQueryChange: (query: string) => void;
 }
@@ -18,8 +27,20 @@ interface Props {
 // date at all (see the notes in aiModeDriver.ts), so a date appears only once
 // Takeout has supplied one.
 
-export default function ChatList({ chats, selectedId, onSelect, query, onQueryChange }: Props) {
+export default function ChatList({
+  chats,
+  selectedId,
+  onSelect,
+  picked,
+  onPickedChange,
+  query,
+  onQueryChange,
+}: Props) {
   const box = useRef<HTMLInputElement>(null);
+  // Where a shift-click measures from. Not the reader's selection: shift-click
+  // must extend from the last row DELIBERATELY picked, and the reader's row
+  // changes for reasons of its own.
+  const anchor = useRef<number | null>(null);
   const [assetsBase, setAssetsBase] = useState('');
 
   // Thumbnails are stored as relative "assets/..." paths so the archive can be
@@ -47,6 +68,70 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
     () => (terms.length === 0 ? chats : chats.filter((c) => matchesTitle(c.title, terms))),
     [chats, terms],
   );
+
+  /**
+   * A click on a row, with the modifiers that turn one pick into many.
+   *
+   * Plain click both opens the thread and resets the pick to it, which is what
+   * makes the feature discoverable: a normal click behaves exactly as it always
+   * did, and nothing has to be learned to keep using the app the old way.
+   *
+   * Ctrl/Cmd adds or removes one row and does NOT change what the reader shows —
+   * gathering rows for a folder is not reading them, and having the reader jump
+   * on every ctrl-click would make picking a dozen unusable.
+   *
+   * Shift takes the range over the rows CURRENTLY SHOWN, not over the whole
+   * archive. With a filter applied, the rows between two visible ones are the
+   * visible ones; extending over the hidden rows would file threads the person
+   * never saw.
+   */
+  const clickRow = (chat: ChatSummary, event: React.MouseEvent) => {
+    const additive = event.ctrlKey || event.metaKey;
+    if (event.shiftKey && anchor.current !== null) {
+      const from = shown.findIndex((c) => c.id === anchor.current);
+      const to = shown.findIndex((c) => c.id === chat.id);
+      if (from !== -1 && to !== -1) {
+        const [lo, hi] = from < to ? [from, to] : [to, from];
+        const next = new Set(additive ? picked : []);
+        for (let i = lo; i <= hi; i += 1) next.add(shown[i].id);
+        onPickedChange(next);
+        return;
+      }
+    }
+    if (additive) {
+      const next = new Set(picked);
+      if (next.has(chat.id)) next.delete(chat.id);
+      else next.add(chat.id);
+      anchor.current = chat.id;
+      onPickedChange(next);
+      return;
+    }
+    anchor.current = chat.id;
+    onPickedChange(new Set([chat.id]));
+    onSelect(chat.id);
+  };
+
+  // Ctrl+A picks everything currently listed, which is the operation that
+  // actually empties a pile of 2846: filter to a topic, take the lot, drag it
+  // once. Escape lets go.
+  //
+  // Scoped to `shown` rather than to the archive for the same reason the shift
+  // range is: with a filter applied, "all" can only honestly mean what is on
+  // screen.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const typing =
+        event.target instanceof HTMLElement &&
+        (event.target.tagName === 'INPUT' || event.target.isContentEditable);
+      if ((event.ctrlKey || event.metaKey) && event.key === 'a' && !typing) {
+        event.preventDefault();
+        onPickedChange(new Set(shown.map((c) => c.id)));
+      }
+      if (event.key === 'Escape' && !typing) onPickedChange(new Set());
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [shown, onPickedChange]);
 
   // "Search threads" is Google's own wording for this, and the app follows it —
   // but "titles" stays in the placeholder, because a search that silently
@@ -82,6 +167,20 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
   return (
     <div className="chat-list">
       {find}
+      {/* Only present while something is picked, and it says what to do with
+          them. A multi-select nobody can see the extent of is worse than none:
+          the whole risk of this feature is filing rows you did not know were
+          held. */}
+      {picked.size > 0 && (
+        <div className="picked-bar">
+          <span>
+            {picked.size} picked — drag onto a folder
+          </span>
+          <button type="button" onClick={() => onPickedChange(new Set())}>
+            Clear
+          </button>
+        </div>
+      )}
       {/* Said explicitly. An empty list under a filled search box reads as "this
           folder is empty", which is a different and more alarming claim. */}
       {shown.length === 0 && (
@@ -100,20 +199,23 @@ export default function ChatList({ chats, selectedId, onSelect, query, onQueryCh
           key={chat.id}
           className={`chat-row${enriched ? ' enriched' : ''}${
             chat.id === selectedId ? ' selected' : ''
-          }`}
+          }${picked.has(chat.id) ? ' picked' : ''}`}
           title={enriched ? 'Enriched from the panel — has the full text and real images' : undefined}
           draggable
           onDragStart={(event) => {
-            event.dataTransfer.setData(
-              'application/json',
-              JSON.stringify({ kind: 'chat', id: chat.id }),
-            );
+            // Dragging a row that is part of the pick takes the whole pick;
+            // dragging one that is not takes only itself, and replaces the pick
+            // so the two can never disagree about what is being moved. Getting
+            // this backwards is how a drag silently files eleven other threads.
+            const ids = picked.has(chat.id) ? [...picked] : [chat.id];
+            if (!picked.has(chat.id)) onPickedChange(new Set([chat.id]));
+            event.dataTransfer.setData('application/json', JSON.stringify({ kind: 'chats', ids }));
           }}
         >
           <button
             type="button"
             className="chat-open"
-            onClick={() => onSelect(chat.id)}
+            onClick={(event) => clickRow(chat, event)}
             // Titles are long and the pane is narrow, so the full text has to
             // be reachable without opening the conversation.
             title={chat.title}

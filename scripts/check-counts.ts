@@ -44,9 +44,8 @@ db.replaceTurns(threads[1].id, [turn(0, 'user', 'c'), turn(1, 'ai', 'd')], []);
 // reason that number exists.
 const work = db.createFolder(null, 'work');
 const deep = db.createFolder(work.id, 'deep');
-db.setChatFolder(threads[0].id, work.id);
-db.setChatFolder(threads[1].id, deep.id);
-db.setChatFolder(threads[2].id, deep.id);
+db.setChatsFolder([threads[0].id], work.id);
+db.setChatsFolder([threads[1].id, threads[2].id], deep.id);
 
 // A real orphan, not a zero. The import always links what it creates, so the
 // entry is stranded the way it is stranded in practice: its conversation is
@@ -108,6 +107,39 @@ const after = db.scopeCounts();
 console.log(`  after a merge: all ${before} -> ${after.all}`);
 if (after.all !== before - 1) throw new Error('a merged-away thread is still counted');
 agree('all after merge', after.all, db.listChats({ kind: 'all' }).length);
+
+// Bulk filing, which is the operation the counts exist to report on. It builds
+// its own IN (...) list, so the id guard is checked here rather than trusted:
+// this is the one query in the app that interpolates a variable-length list into
+// SQL.
+const rest = db.listChats({ kind: 'unfiled' }).map((c) => c.id);
+const moved = db.setChatsFolder(rest, work.id);
+console.log(`  bulk file: ${moved} moved into work`);
+if (moved !== rest.length) throw new Error(`moved ${moved} of ${rest.length}`);
+const afterBulk = db.scopeCounts();
+agree('unfiled after bulk', afterBulk.unfiled, db.listChats({ kind: 'unfiled' }).length);
+agree('filed after bulk', afterBulk.filed, db.listChats({ kind: 'filed' }).length);
+if (afterBulk.unfiled !== 0) throw new Error('bulk filing left threads unfiled');
+
+// Out of every folder again — null is how a drop on Unfiled is expressed, and a
+// bulk unfile that quietly did nothing would look identical to one that worked.
+const back = db.setChatsFolder(rest, null);
+if (back !== rest.length) throw new Error(`unfiled ${back} of ${rest.length}`);
+if (db.scopeCounts().unfiled !== rest.length) throw new Error('bulk unfile did not take');
+
+// An empty pick is a no-op, not a statement with an empty IN () — which is a
+// syntax error in SQLite, and would turn "drag nothing" into a crash.
+if (db.setChatsFolder([], work.id) !== 0) throw new Error('an empty list moved something');
+
+// And anything that is not an id is refused rather than pasted into the query.
+let refused = false;
+try {
+  db.setChatsFolder([1.5 as number], work.id);
+} catch {
+  refused = true;
+}
+if (!refused) throw new Error('setChatsFolder accepted something that is not a thread id');
+console.log('  empty list and non-id both refused');
 
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('OK');

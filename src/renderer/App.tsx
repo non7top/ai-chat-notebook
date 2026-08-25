@@ -25,6 +25,10 @@ export default function App() {
   const [scope, setScope] = useState<ChatScope>({ kind: 'all' });
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  // Threads picked for filing. Separate from selectedId, which is the one being
+  // READ: gathering a dozen rows about one topic and reading one of them are
+  // different acts, and a single piece of state cannot be both.
+  const [picked, setPicked] = useState<ReadonlySet<number>>(new Set());
   const [query, setQuery] = useState('');
   const [report, setReport] = useState<TakeoutReportData | null>(null);
   const [copies, setCopies] = useState<SuspectCopyGroup[] | null>(null);
@@ -183,11 +187,16 @@ export default function App() {
             onScopeChange={(next) => {
               setScope(next);
               setSelectedId(null);
+              // Dropped with the scope. A pick made in one folder means nothing
+              // in the next, and rows held invisibly across a change of view are
+              // exactly what would file the wrong threads.
+              setPicked(new Set());
               // Cleared with the scope: a filter left over from the last folder
               // makes the new one look emptier than it is.
               setQuery('');
             }}
             onChange={reloadAll}
+            onChatsFiled={() => setPicked(new Set())}
             onError={setError}
           />
         </div>
@@ -235,6 +244,8 @@ export default function App() {
                 chats={chats}
                 selectedId={selectedId}
                 onSelect={setSelectedId}
+                picked={picked}
+                onPickedChange={setPicked}
                 query={query}
                 onQueryChange={setQuery}
               />

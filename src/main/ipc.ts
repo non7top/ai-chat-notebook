@@ -58,8 +58,8 @@ export function registerIpcHandlers(): void {
   // renderer asks rather than rebuilds.
   ipcMain.handle('menu:refresh', () => rebuildMenu?.());
   ipcMain.handle('chats:get', (_event, id: number) => db.getChat(id));
-  ipcMain.handle('chats:setFolder', (_event, chatId: number, folderId: number | null) =>
-    db.setChatFolder(chatId, folderId),
+  ipcMain.handle('chats:setFolder', (_event, chatIds: number[], folderId: number | null) =>
+    db.setChatsFolder(chatIds, folderId),
   );
   ipcMain.handle('chats:setTitle', (_event, chatId: number, userTitle: string) =>
     db.setChatTitle(chatId, userTitle),

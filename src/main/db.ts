@@ -921,8 +921,35 @@ export function getChat(id: number): ChatDetail | null {
   };
 }
 
-export function setChatFolder(chatId: number, folderId: number | null): void {
-  db.prepare('UPDATE chats SET folder_id = ? WHERE id = ?').run(folderId, chatId);
+/**
+ * Files threads into a folder, or out of every folder when folderId is null.
+ *
+ * Takes a list rather than one id because filing is the point of this app and
+ * one-at-a-time was the whole of it: 2846 of 2848 threads sat unfiled, which is
+ * what a workflow of one drag per thread produces. Selecting a hundred rows and
+ * moving them has to be one statement and one transaction, not a hundred IPC
+ * round trips each with its own commit.
+ */
+export function setChatsFolder(chatIds: number[], folderId: number | null): number {
+  if (chatIds.length === 0) return 0;
+  // Ids are numbers from this app's own list, but they are interpolated into
+  // SQL, so they are checked rather than trusted — a non-integer here would be
+  // an injection point in the one query that takes a variable-length list.
+  const ids = chatIds.filter((id) => Number.isSafeInteger(id));
+  if (ids.length !== chatIds.length) {
+    throw new Error('setChatsFolder was given something that is not a thread id');
+  }
+  db.exec('BEGIN');
+  try {
+    const { changes } = db
+      .prepare(`UPDATE chats SET folder_id = ? WHERE id IN (${ids.join(',')})`)
+      .run(folderId);
+    db.exec('COMMIT');
+    return Number(changes);
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 export function setChatTitle(chatId: number, userTitle: string): void {

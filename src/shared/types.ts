@@ -487,7 +487,12 @@ export interface NotebookApi {
   /** Row counts for the tree, in one call. */
   scopeCounts(): Promise<ScopeCounts>;
   getChat(id: number): Promise<ChatDetail | null>;
-  setChatFolder(chatId: number, folderId: number | null): Promise<void>;
+  /**
+   * Files threads into a folder, or out of every folder when folderId is null.
+   * A list, not one id — see setChatsFolder in db.ts for why that is the shape.
+   * Resolves to how many rows actually moved.
+   */
+  setChatsFolder(chatIds: number[], folderId: number | null): Promise<number>;
   setChatTitle(chatId: number, userTitle: string): Promise<void>;
   deleteChat(id: number): Promise<void>;
   /**
