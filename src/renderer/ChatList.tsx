@@ -254,6 +254,22 @@ export default function ChatList({
                   same prompt — this is the number that finds exactly one row in
                   the database. */}
               <span className="chat-id">#{chat.id}</span>{' · '}
+              {/* Where this thread belongs, on the thread. Answering "which
+                  group is this in" used to mean clicking through the tree one
+                  folder at a time, and the list is where the question is
+                  actually asked. Nothing at all when unfiled — an explicit
+                  "Unfiled" on 2846 rows is noise, and their being unmarked is
+                  already the answer. */}
+              {chat.folderName && (
+                <span
+                  className={`chat-folder${chat.folderColor ? ` c-${chat.folderColor}` : ''}`}
+                  title={`In ${chat.folderName}`}
+                >
+                  {chat.folderIcon ? `${chat.folderIcon} ` : ''}
+                  {chat.folderName}
+                  {' · '}
+                </span>
+              )}
               {/* Prefixed and titled because every date here is INFERRED: it
                   comes from matching a Takeout prompt against this
                   conversation's title or a captured turn, and that match is

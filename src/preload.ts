@@ -5,6 +5,7 @@ import type {
   CaptureProgress,
   HarvestProgress,
   NotebookApi,
+  SyncProgress,
 } from './shared/types';
 
 const api: NotebookApi = {
@@ -45,6 +46,14 @@ const api: NotebookApi = {
   },
   refreshMenu: () => ipcRenderer.invoke('menu:refresh'),
 
+  syncArchive: (mode) => ipcRenderer.invoke('sync:run', mode),
+  cancelSync: () => ipcRenderer.invoke('sync:cancel'),
+  onSyncProgress: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, progress: SyncProgress) =>
+      callback(progress);
+    ipcRenderer.on('sync:progress', listener);
+    return () => ipcRenderer.removeListener('sync:progress', listener);
+  },
   harvestThreadList: () => ipcRenderer.invoke('harvest:threadList'),
   cancelHarvest: () => ipcRenderer.invoke('harvest:cancel'),
   onHarvestProgress: (callback) => {
@@ -64,6 +73,7 @@ const api: NotebookApi = {
   scopeCounts: () => ipcRenderer.invoke('chats:counts'),
   getChat: (id) => ipcRenderer.invoke('chats:get', id),
   setChatsFolder: (chatIds, folderId) => ipcRenderer.invoke('chats:setFolder', chatIds, folderId),
+  setFolderStyle: (id, color, icon) => ipcRenderer.invoke('folders:style', id, color, icon),
   setChatTitle: (chatId, userTitle) => ipcRenderer.invoke('chats:setTitle', chatId, userTitle),
   deleteChat: (id) => ipcRenderer.invoke('chats:delete', id),
   openChatInPanel: (chatId) => ipcRenderer.invoke('chats:openInPanel', chatId),

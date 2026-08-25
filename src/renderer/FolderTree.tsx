@@ -32,7 +32,14 @@ type Editing =
   | { kind: 'root-new' }
   | { kind: 'child-new'; parentId: number }
   | { kind: 'rename'; id: number; current: string }
+  | { kind: 'style'; id: number }
   | null;
+
+// Mirrors FOLDER_COLORS in db.ts, which validates against the same list before
+// storing. Duplicated rather than imported because db.ts is main-process code
+// that pulls in node:sqlite — and the ORDER here is the swatch order, which is a
+// presentation decision that does not belong in the schema.
+const COLORS = ['slate', 'red', 'amber', 'green', 'teal', 'blue', 'violet', 'pink'] as const;
 
 function childrenOf(folders: Folder[], parentId: number | null): Folder[] {
   return folders.filter((folder) => folder.parentId === parentId);
@@ -247,6 +254,12 @@ export default function FolderTree({
             />
           ) : (
             <>
+              {/* The folder's own mark, shown where the folder is. A colour
+                  set here and visible only on the threads would be a setting
+                  with no visible subject. */}
+              <span className={`folder-mark${folder.color ? ` c-${folder.color}` : ''}`}>
+                {folder.icon ?? ''}
+              </span>
               <span className="tree-name">{folder.name}</span>
               <Count
                 n={counts?.byFolder[folder.id] ?? (counts ? 0 : undefined)}
@@ -289,6 +302,17 @@ export default function FolderTree({
               <button
                 type="button"
                 className="row-action"
+                title="Colour and icon"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setEditing({ kind: 'style', id: folder.id });
+                }}
+              >
+                ◐
+              </button>
+              <button
+                type="button"
+                className="row-action"
                 title="Delete folder (threads inside become Unfiled)"
                 onClick={(event) => {
                   event.stopPropagation();
@@ -300,6 +324,62 @@ export default function FolderTree({
             </>
           )}
         </div>
+
+        {/* Under the row rather than over it: a popover floating above a tree
+            that scrolls is a popover that ends up somewhere else, and this one
+            has to stay next to the folder it is changing. */}
+        {editing?.kind === 'style' && editing.id === folder.id && (
+          <div className="style-picker" style={{ marginLeft: `${(depth + 1) * 14 + 4}px` }}>
+            {COLORS.map((color) => (
+              <button
+                key={color}
+                type="button"
+                className={`swatch c-${color}${folder.color === color ? ' chosen' : ''}`}
+                title={color}
+                onClick={() => run(window.notebook.setFolderStyle(folder.id, color, folder.icon))}
+              />
+            ))}
+            <button
+              type="button"
+              className="swatch none"
+              title="No colour"
+              onClick={() => run(window.notebook.setFolderStyle(folder.id, null, folder.icon))}
+            >
+              ✕
+            </button>
+            {/* An emoji, typed or pasted. Not a fixed icon set: this archive is
+                one person's topics and any set chosen here would be the wrong
+                one. Windows opens its picker with Win+period. */}
+            <input
+              className="icon-input"
+              defaultValue={folder.icon ?? ''}
+              placeholder="🙂"
+              maxLength={4}
+              title="An emoji for this folder — Win+. opens the picker"
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  run(
+                    window.notebook.setFolderStyle(
+                      folder.id,
+                      folder.color,
+                      event.currentTarget.value || null,
+                    ),
+                  );
+                }
+                if (event.key === 'Escape') setEditing(null);
+              }}
+              onBlur={(event) =>
+                run(
+                  window.notebook.setFolderStyle(
+                    folder.id,
+                    folder.color,
+                    event.currentTarget.value || null,
+                  ),
+                )
+              }
+            />
+          </div>
+        )}
 
         {editing?.kind === 'child-new' && editing.parentId === folder.id && (
           <div className="tree-row" style={{ paddingLeft: `${(depth + 1) * 14 + 4}px` }}>

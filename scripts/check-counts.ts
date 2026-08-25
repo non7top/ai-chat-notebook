@@ -141,5 +141,33 @@ try {
 if (!refused) throw new Error('setChatsFolder accepted something that is not a thread id');
 console.log('  empty list and non-id both refused');
 
+// A folder's colour and icon, and the fact that a thread carries them. The
+// colour ends up in a CSS class on a row, so what may be stored is checked here
+// rather than left to the picker that happens to be the only caller today.
+db.setFolderStyle(work.id, 'teal', '🛠');
+const styled = db.listFolders().find((f) => f.id === work.id);
+console.log(`  folder style: ${styled?.color} ${styled?.icon}`);
+if (styled?.color !== 'teal' || styled?.icon !== '🛠') {
+  throw new Error(`the style did not stick: ${JSON.stringify(styled)}`);
+}
+const inWork = db.listChats({ kind: 'folder', id: work.id })[0];
+if (inWork?.folderName !== 'work' || inWork?.folderColor !== 'teal') {
+  throw new Error('a thread does not carry its folder');
+}
+// An emoji is a surrogate pair, so a naive length cap would cut one in half and
+// store half a character.
+db.setFolderStyle(work.id, 'teal', '👨‍👩‍👧');
+if ([...(db.listFolders().find((f) => f.id === work.id)?.icon ?? '')].length > 2) {
+  throw new Error('the icon was not capped by code point');
+}
+let rejected = false;
+try {
+  db.setFolderStyle(work.id, 'octarine', null);
+} catch {
+  rejected = true;
+}
+if (!rejected) throw new Error('a colour outside the palette was stored');
+console.log('  a colour outside the palette is refused');
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('OK');

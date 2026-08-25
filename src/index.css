@@ -204,6 +204,119 @@ button:disabled {
   font-size: 0.72rem;
 }
 
+/* Folder colours.
+
+   A fixed palette rather than a free colour, and defined once here so the
+   swatch, the folder's own mark and the chip on a thread are the same colour by
+   construction. db.ts validates against the same list of keys before storing —
+   an arbitrary string reaching a custom property would be both a styling escape
+   and a way to make a folder invisible against its own row. */
+.c-slate {
+  --folder: #64748b;
+}
+.c-red {
+  --folder: #dc2626;
+}
+.c-amber {
+  --folder: #d97706;
+}
+.c-green {
+  --folder: #16a34a;
+}
+.c-teal {
+  --folder: #0d9488;
+}
+.c-blue {
+  --folder: #2563eb;
+}
+.c-violet {
+  --folder: #7c3aed;
+}
+.c-pink {
+  --folder: #db2777;
+}
+
+/* The folder's mark on its own row. A dot when only a colour is set, the glyph
+   when there is one — so an unmarked folder is not a hole where a column should
+   be. */
+.folder-mark {
+  width: 0.85rem;
+  flex: none;
+  font-size: 0.8rem;
+  line-height: 1;
+  text-align: center;
+}
+
+.folder-mark.c-slate::before,
+.folder-mark.c-red::before,
+.folder-mark.c-amber::before,
+.folder-mark.c-green::before,
+.folder-mark.c-teal::before,
+.folder-mark.c-blue::before,
+.folder-mark.c-violet::before,
+.folder-mark.c-pink::before {
+  content: '';
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--folder);
+}
+
+/* The glyph replaces the dot rather than sitting beside it: two marks for one
+   folder in a 14px row is one too many. */
+.folder-mark:not(:empty)::before {
+  display: none;
+}
+
+/* Where a thread belongs, shown on the thread. Coloured by its folder, and
+   falling back to the row's own muted grey for a folder with no colour set —
+   the name is still the answer. */
+.chat-folder {
+  color: var(--folder, var(--muted));
+  font-weight: 500;
+}
+
+.style-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.2rem 0.3rem;
+}
+
+.swatch {
+  width: 1rem;
+  height: 1rem;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: var(--folder, transparent);
+  cursor: pointer;
+  font-size: 0.6rem;
+  line-height: 1;
+  color: var(--muted);
+}
+
+/* The chosen one is ringed rather than merely bigger: at 16px a size change is
+   not a state anyone can read. */
+.swatch.chosen {
+  outline: 2px solid var(--fg);
+  outline-offset: 1px;
+}
+
+.swatch.none {
+  border-color: var(--border);
+}
+
+.icon-input {
+  width: 2.4rem;
+  text-align: center;
+  font-size: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1rem;
+}
+
 /* ------------------------------------------------------------------- tree */
 
 .tree-row {

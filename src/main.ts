@@ -269,15 +269,27 @@ const createWindow = () => {
         {
           label: 'Threads',
           submenu: [
+            // The steps the two toolbar flows run, each reachable on its own.
+            // The flows exist because the ORDER matters and nothing on screen
+            // said what it was; that is no reason to take away the ability to
+            // run one step when one step is what is wanted.
             {
               label: 'Refresh the list from Google',
               click: command('harvest'),
             },
-            { type: 'separator' },
+            {
+              label: 'Read threads from the panel',
+              click: command('capture'),
+            },
+            {
+              label: "Open the export's links",
+              click: command('fetchLinks'),
+            },
             {
               label: 'Match entries to threads',
               click: command('matchEntries'),
             },
+            { type: 'separator' },
             {
               label:
                 pending > 0

@@ -17,7 +17,7 @@ import {
   type CapturedTurn,
   type ThreadListEntry,
 } from './aiModeDriver';
-import type { CaptureProgress, HarvestProgress } from '../shared/types';
+import type { CaptureProgress, HarvestProgress, SyncProgress } from '../shared/types';
 
 // Driven from the main process, one scroll step per round trip, rather than as
 // a single long injected script. That is what makes progress reporting and
@@ -771,6 +771,153 @@ export interface InlineRepairSummary {
  * element removed rather than its base64 kept. This is for archives written
  * before that.
  */
+/* ------------------------------------------------------------------ sync */
+
+/**
+ * The two flows, in place of the six buttons that used to be the whole of it.
+ *
+ * There were three ways to pull conversations in — refresh the sidebar list,
+ * capture turns from the panel, open the export's links — plus a 25-at-a-time
+ * variant, plus matching afterwards, and every one of them was a separate button
+ * that had to be pressed in the right order to be any use. Nothing on screen said
+ * what that order was. In practice there are only two things anyone wants:
+ *
+ *   'new' — what arrived since last time. Refresh the list, read what has no
+ *           turns. Minutes, run often.
+ *   'all' — everything still outstanding, including the thousands of threads
+ *           Google has rotated out of the sidebar and only the export still
+ *           links to. Hours, run once and leave it.
+ *
+ * They are the same steps in the same order; 'all' simply does not stop early.
+ * That is the point — a repeated path and a catch-up path that differ in how far
+ * they go, not in what they do, so doing one does not undo the other.
+ */
+export type SyncMode = 'new' | 'all';
+
+export interface SyncSummary {
+  listed: number;
+  captured: number;
+  fetched: number;
+  matched: number;
+  errors: number;
+  cancelled: boolean;
+  stoppedEarly?: string;
+}
+
+/**
+ * Cancellation at the level of the WHOLE run, which the per-step flags cannot
+ * express: each step resets its own flag when it starts, so a Stop pressed
+ * between two steps would be forgotten by the next one and the run would carry
+ * on after being told not to.
+ */
+let syncCancelled = false;
+let syncRunning = false;
+
+export function cancelSync(): void {
+  syncCancelled = true;
+  cancelHarvest();
+  cancelCapture();
+}
+
+export function isSyncRunning(): boolean {
+  return syncRunning;
+}
+
+function broadcastSync(progress: SyncProgress): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send('sync:progress', progress);
+  }
+}
+
+// Far above any plausible history, so "all" means all. The steps below are
+// bounded by what is actually outstanding, not by this.
+const NO_LIMIT = 100_000;
+
+export async function syncArchive(mode: SyncMode): Promise<SyncSummary> {
+  if (syncRunning) throw new Error('A run is already going');
+  syncRunning = true;
+  syncCancelled = false;
+  const startedAt = new Date().toISOString();
+  const summary: SyncSummary = {
+    listed: 0,
+    captured: 0,
+    fetched: 0,
+    matched: 0,
+    errors: 0,
+    cancelled: false,
+  };
+
+  // Named here rather than inside each step so the count is right in the first
+  // progress message, before any step has run. "Step 1 of 4" that turns out to
+  // be step 1 of 2 is worse than no step count.
+  const steps =
+    mode === 'new'
+      ? ['Refreshing the thread list', 'Reading new threads']
+      : [
+          'Refreshing the thread list',
+          'Reading threads from the panel',
+          'Opening export links',
+          'Matching entries to threads',
+        ];
+  let index = 0;
+  const step = (name: string) => {
+    index += 1;
+    broadcastSync({ running: true, step: name, index, steps: steps.length });
+  };
+
+  try {
+    step(steps[0]);
+    // A step that fails does not take the run down with it. The list refresh
+    // needs the sidebar and the panel on screen; the link fetch needs neither,
+    // and a run that gave up on step one would leave the long work undone for a
+    // reason that has nothing to do with it.
+    try {
+      const listed = await harvestThreadList();
+      summary.listed = listed.created;
+    } catch (error) {
+      summary.errors += 1;
+      summary.stoppedEarly = error instanceof Error ? error.message : String(error);
+    }
+
+    if (!syncCancelled) {
+      step(steps[1]);
+      const captured = await captureTurns(NO_LIMIT);
+      summary.captured = captured.captured;
+      summary.errors += captured.errors;
+    }
+
+    if (mode === 'all' && !syncCancelled) {
+      step(steps[2]);
+      const links = await fetchFromLinks(NO_LIMIT);
+      summary.fetched = links.fetched;
+      summary.errors += links.errors;
+    }
+
+    // Last on purpose: matching can only see the threads that exist when it
+    // runs, so an entry whose thread was captured earlier in THIS run has
+    // nothing to match against until now. That ordering was the reason "Match
+    // entries" existed as a button at all.
+    if (mode === 'all' && !syncCancelled) {
+      step(steps[3]);
+      const matched = db.rematchEntriesToThreads();
+      summary.matched = matched.attached + matched.relinked;
+    }
+
+    summary.cancelled = syncCancelled;
+    db.recordJob(
+      `sync-${mode}`,
+      syncCancelled ? 'stopped' : summary.stoppedEarly ? 'failed' : 'finished',
+      startedAt,
+      { ...summary },
+    );
+    return summary;
+  } finally {
+    syncRunning = false;
+    syncCancelled = false;
+    broadcastSync({ running: false, step: '', index: 0, steps: steps.length });
+  }
+}
+
 export async function repairInlineImages(
   onProgress?: (done: number, total: number, phase?: 'counting' | 'copying') => void,
 ): Promise<InlineRepairSummary> {

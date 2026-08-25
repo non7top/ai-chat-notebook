@@ -22,6 +22,8 @@ import {
   openChatInPanel,
   repairInlineImages,
   recaptureChat,
+  syncArchive,
+  cancelSync,
 } from './harvest';
 import type { ChatScope } from '../shared/types';
 
@@ -50,6 +52,11 @@ export function registerIpcHandlers(): void {
     db.moveFolder(id, newParentId),
   );
   ipcMain.handle('folders:delete', (_event, id: number) => db.deleteFolder(id));
+  ipcMain.handle(
+    'folders:style',
+    (_event, id: number, color: string | null, icon: string | null) =>
+      db.setFolderStyle(id, color, icon),
+  );
 
   ipcMain.handle('chats:list', (_event, scope: ChatScope) => db.listChats(scope));
   ipcMain.handle('chats:counts', () => db.scopeCounts());
@@ -207,6 +214,10 @@ export function registerIpcHandlers(): void {
     ),
   );
 
+  // The two flows. Everything they call is still reachable on its own from the
+  // Threads menu — this is the order those steps have to go in, made pressable.
+  ipcMain.handle('sync:run', (_event, mode: 'new' | 'all') => syncArchive(mode));
+  ipcMain.handle('sync:cancel', () => cancelSync());
   ipcMain.handle('harvest:threadList', () => harvestThreadList());
   ipcMain.handle('harvest:cancel', () => cancelHarvest());
 

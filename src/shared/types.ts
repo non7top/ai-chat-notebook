@@ -11,6 +11,14 @@ export interface Folder {
   parentId: number | null;
   name: string;
   position: number;
+  /**
+   * A palette key, not a hex value — the app owns the palette so the swatches
+   * stay a set that works together and no folder can end up unreadable against
+   * the row it marks. Null means unmarked.
+   */
+  color: string | null;
+  /** One glyph, an emoji in practice. Null means none. */
+  icon: string | null;
 }
 
 export interface ChatSummary {
@@ -73,6 +81,14 @@ export interface ChatSummary {
    * grouping gets noticed.
    */
   takeoutEntryCount: number;
+  /**
+   * The folder this thread is in, denormalised onto the row so the list can show
+   * where a thread belongs without the reader having to open it. Null when
+   * unfiled — which, before any of this, was 2846 of 2848 of them.
+   */
+  folderName: string | null;
+  folderColor: string | null;
+  folderIcon: string | null;
 }
 
 export interface Message {
@@ -170,6 +186,18 @@ export interface HarvestSummary {
   cancelled: boolean;
 }
 
+/**
+ * Which step of a run is going, so a long sequence says where it is rather than
+ * only how the current step is doing. The step's OWN detail still arrives on
+ * harvest:progress and capture:progress — this is the outline over the top.
+ */
+export interface SyncProgress {
+  running: boolean;
+  step: string;
+  index: number;
+  steps: number;
+}
+
 export interface CaptureProgress {
   phase: 'capturing' | 'done' | 'cancelled' | 'error';
   done: number;
@@ -183,6 +211,16 @@ export interface CaptureProgress {
   images?: number;
   remaining?: number;
   error?: string;
+}
+
+export interface SyncSummary {
+  listed: number;
+  captured: number;
+  fetched: number;
+  matched: number;
+  errors: number;
+  cancelled: boolean;
+  stoppedEarly?: string;
 }
 
 export interface CaptureSummary {
@@ -472,6 +510,14 @@ export interface NotebookApi {
   onMenuCommand(callback: (name: string) => void): () => void;
   /** Rebuilds the menu so the counts in its labels match the archive. */
   refreshMenu(): Promise<void>;
+  /**
+   * The two flows that pull conversations in. 'new' refreshes the thread list
+   * and reads what has no turns; 'all' goes on to the export's links and the
+   * match afterwards. Same steps, same order — 'all' just does not stop early.
+   */
+  syncArchive(mode: 'new' | 'all'): Promise<SyncSummary>;
+  cancelSync(): Promise<void>;
+  onSyncProgress(callback: (progress: SyncProgress) => void): () => void;
   harvestThreadList(): Promise<HarvestSummary>;
   cancelHarvest(): Promise<void>;
   onHarvestProgress(callback: (progress: HarvestProgress) => void): () => void;
@@ -493,6 +539,8 @@ export interface NotebookApi {
    * Resolves to how many rows actually moved.
    */
   setChatsFolder(chatIds: number[], folderId: number | null): Promise<number>;
+  /** A folder's colour (a palette key) and icon (one glyph). Either may be null. */
+  setFolderStyle(id: number, color: string | null, icon: string | null): Promise<void>;
   setChatTitle(chatId: number, userTitle: string): Promise<void>;
   deleteChat(id: number): Promise<void>;
   /**

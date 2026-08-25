@@ -245,6 +245,18 @@ export function initDb(userDataPath: string): void {
   // itself, so there was no way to tell a timeout from a page that was not the
   // thread.
   ensureColumn('chats', 'link_note', 'link_note TEXT');
+  // A folder's colour and icon, so a thread can carry a visible mark of where it
+  // belongs. Without one, "which group is this in" is only answerable by
+  // clicking through the tree one folder at a time — and the list is where the
+  // question is actually asked.
+  //
+  // The colour is a palette KEY, not a hex value: the app owns the palette, so
+  // the swatches stay a set that works together and a stored folder cannot end
+  // up an unreadable colour against the row it sits on.
+  ensureColumn('folders', 'color', 'color TEXT');
+  // One character, an emoji in practice. Not a fixed icon set — this archive is
+  // one person's topics, and any set chosen here would be the wrong set.
+  ensureColumn('folders', 'icon', 'icon TEXT');
   db.exec("UPDATE chats SET date_basis = 'takeout' WHERE started_at IS NOT NULL AND date_basis IS NULL");
   db.exec('CREATE INDEX IF NOT EXISTS chats_list_rank ON chats(list_rank);');
 
@@ -541,17 +553,23 @@ interface FolderRow {
   parent_id: number | null;
   name: string;
   position: number;
+  color: string | null;
+  icon: string | null;
 }
 
 export function listFolders(): Folder[] {
   const rows = db
-    .prepare('SELECT id, parent_id, name, position FROM folders ORDER BY position, name')
+    .prepare(
+      'SELECT id, parent_id, name, position, color, icon FROM folders ORDER BY position, name',
+    )
     .all() as unknown as FolderRow[];
   return rows.map((row) => ({
     id: row.id,
     parentId: row.parent_id,
     name: row.name,
     position: row.position,
+    color: row.color ?? null,
+    icon: row.icon ?? null,
   }));
 }
 
@@ -559,7 +577,42 @@ export function createFolder(parentId: number | null, name: string): Folder {
   const { lastInsertRowid } = db
     .prepare('INSERT INTO folders (parent_id, name, created_at) VALUES (?, ?, ?)')
     .run(parentId, name, new Date().toISOString());
-  return { id: Number(lastInsertRowid), parentId, name, position: 0 };
+  return { id: Number(lastInsertRowid), parentId, name, position: 0, color: null, icon: null };
+}
+
+/**
+ * A folder's colour and icon, both optional and both clearable.
+ *
+ * The colour is checked against the palette rather than stored as given. It ends
+ * up in a CSS custom property on a row, and an arbitrary string reaching that is
+ * both a styling escape and a way to make a folder invisible against its own
+ * background.
+ */
+export const FOLDER_COLORS = [
+  'slate',
+  'red',
+  'amber',
+  'green',
+  'teal',
+  'blue',
+  'violet',
+  'pink',
+] as const;
+
+export function setFolderStyle(
+  id: number,
+  color: string | null,
+  icon: string | null,
+): void {
+  if (color !== null && !FOLDER_COLORS.includes(color as (typeof FOLDER_COLORS)[number])) {
+    throw new Error(`${color} is not one of the folder colours`);
+  }
+  // One character as the user sees it, which is not one JavaScript char: an
+  // emoji is a surrogate pair, and several are a pair plus a modifier. Counted
+  // by code point, and capped rather than rejected so a paste of something long
+  // becomes its first glyph instead of an error.
+  const trimmed = icon === null ? null : [...icon.trim()].slice(0, 2).join('') || null;
+  db.prepare('UPDATE folders SET color = ?, icon = ? WHERE id = ?').run(color, trimmed, id);
 }
 
 export function renameFolder(id: number, name: string): void {
@@ -615,6 +668,9 @@ interface ChatSummaryRow {
   sources: string;
   alt_turns: number | null;
   takeout_entries: number;
+  folder_name: string | null;
+  folder_color: string | null;
+  folder_icon: string | null;
 }
 
 // COALESCE order is the display rule in one place: a title typed by hand wins
@@ -676,8 +732,15 @@ const CHAT_SUMMARY_SQL = `
              AND COALESCE(a.kind, 'unknown') <> 'other'
              AND (a.message_id IS NULL OR m.seq <= 1)
            ORDER BY COALESCE(m.seq, -1) ASC, a.id ASC
-           LIMIT 1) AS title_image
+           LIMIT 1) AS title_image,
+         -- The folder this thread is in, so the list can show where it belongs.
+         -- A LEFT JOIN on a primary key over a handful of folder rows, NOT a
+         -- correlated subquery — the last per-row lookup added here scanned
+         -- 105MB of stored answers and locked the window for five seconds on
+         -- every folder switch.
+         f.name AS folder_name, f.color AS folder_color, f.icon AS folder_icon
   FROM chats c
+  LEFT JOIN folders f ON f.id = c.folder_id
 `;
 
 function toSummary(row: ChatSummaryRow): ChatSummary {
@@ -702,6 +765,9 @@ function toSummary(row: ChatSummaryRow): ChatSummary {
     sources: row.sources,
     altTurnCount: row.alt_turns ?? 0,
     takeoutEntryCount: row.takeout_entries ?? 0,
+    folderName: row.folder_name ?? null,
+    folderColor: row.folder_color ?? null,
+    folderIcon: row.folder_icon ?? null,
   };
 }
 

@@ -4,6 +4,7 @@ import type {
   SuspectCopyGroup,
   CaptureProgress,
   HarvestProgress,
+  SyncProgress,
   TakeoutImportRow,
   TakeoutPick,
 } from '../shared/types';
@@ -37,7 +38,10 @@ interface Props {
   activity: ActivityStats | null;
 }
 
-const CAPTURE_BATCH = 25;
+// The 25-at-a-time capture is gone. It existed because a full run had no
+// progress and no Stop and had to be taken in bites; both of those have been
+// true for a while, and a second button doing a smaller version of the same
+// thing was one of the ten this bar had grown to.
 // Far above any plausible history, so "all" means all.
 // Not bounded any more, matching Capture all. A 500-thread slice looked like a
 // stop of its own once the run reached the end of it, and with ~1700 threads it
@@ -82,6 +86,12 @@ export default function HarvestBar({
   // Only set while a run is in progress; the prop is the truth otherwise.
   const [remainingOverride, setRemainingOverride] = useState<number | null>(null);
   const [linksToFetch, setLinksToFetch] = useState(0);
+  const [sync, setSync] = useState<SyncProgress | null>(null);
+  // Which flow is going, or null. Kept apart from `sync` because the button has
+  // to say "Getting new…" the instant it is pressed, before the first progress
+  // message has come back — a button that looks unpressed for two seconds gets
+  // pressed twice.
+  const [syncing, setSyncing] = useState<'new' | 'all' | null>(null);
   const [lastJob, setLastJob] = useState<{
     job: string;
     outcome: string;
@@ -109,6 +119,8 @@ export default function HarvestBar({
     window.notebook.countLinksToFetch().then(setLinksToFetch);
     window.notebook.lastJobs().then((jobs) => setLastJob(jobs[0] ?? null));
   }, [uncaptured, activity]);
+
+  useEffect(() => window.notebook.onSyncProgress(setSync), []);
 
   useEffect(
     () =>
@@ -305,6 +317,75 @@ export default function HarvestBar({
     }
   };
 
+  /**
+   * The export's links, on their own.
+   *
+   * The only route to the threads Google no longer lists, and for this archive
+   * that is most of them: the sidebar holds a few hundred while the export holds
+   * thousands with a link. Every page is checked against the export's own
+   * reading before anything is stored, so a link that re-runs its prompt is
+   * refused rather than written.
+   */
+  const fetchLinks = async () => {
+    onNeedPanel();
+    setCapturing(true);
+    try {
+      const result = await window.notebook.fetchFromLinks(LINK_FETCH_LIMIT);
+      setLinksToFetch(result.remaining);
+      setTakeoutNote(
+        `fetched ${result.fetched} · ${result.rejected} did not match · ` +
+          `${result.notReady} not ready yet · ${result.errors} errors · ` +
+          `${result.remaining} left` +
+          (result.stoppedEarly ? ` — ${result.stoppedEarly}` : ''),
+      );
+      onFinished();
+    } finally {
+      setCapturing(false);
+    }
+  };
+
+  /**
+   * How much is left for "Catch up" to do. Uncaptured threads plus threads whose
+   * export link has not been opened — the two backlogs the flow works through.
+   *
+   * A label, not a bound: the main process takes whatever is actually
+   * outstanding. A stale number used as a limit is how "Capture all (296)"
+   * would have left seven behind.
+   */
+  const outstanding = remaining + linksToFetch;
+
+  // Anything at all going on. The flows drive the same panel every other
+  // operation does, so starting one on top of another means two runs clicking
+  // the same sidebar.
+  const running = busy || capturing || takeoutBusy || syncing !== null;
+
+  const runSync = async (mode: 'new' | 'all') => {
+    setSyncing(mode);
+    setSync(null);
+    // Both flows drive the real sidebar, so the panel has to be on screen for
+    // the same reason a bare harvest does — with it hidden the thread rows are
+    // in the DOM but laid out at zero size, and the run would "succeed" against
+    // a stale copy.
+    onNeedPanel();
+    try {
+      const result = await window.notebook.syncArchive(mode);
+      setTakeoutNote(
+        `${result.listed} new in the list · ${result.captured} read · ` +
+          (mode === 'all' ? `${result.fetched} from links · ${result.matched} matched · ` : '') +
+          `${result.errors} error${result.errors === 1 ? '' : 's'}` +
+          (result.cancelled ? ' — stopped' : '') +
+          (result.stoppedEarly ? ` — ${result.stoppedEarly}` : ''),
+      );
+      setLinksToFetch(await window.notebook.countLinksToFetch());
+      onFinished();
+    } catch (err) {
+      setTakeoutNote(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSyncing(null);
+      setSync(null);
+    }
+  };
+
   const startCapture = async (limit: number) => {
     setCapturing(true);
     setCapture(null);
@@ -362,6 +443,8 @@ export default function HarvestBar({
   useEffect(() => {
     commands.current = {
       harvest: start,
+      capture: () => startCapture(CAPTURE_ALL_LIMIT),
+      fetchLinks,
       scanTakeout,
       applyTakeout,
       undoImport,
@@ -472,58 +555,58 @@ export default function HarvestBar({
 
       <span className="harvest-sep" />
 
-      <button type="button" onClick={() => startCapture(CAPTURE_BATCH)} disabled={busy || capturing}>
-        {capturing ? 'Capturing…' : `Capture ${CAPTURE_BATCH}`}
+      {/* Two buttons, in place of the six that used to stand here.
+
+          There were three separate ways to pull conversations in — refresh the
+          sidebar list, capture turns from the panel, open the export's links —
+          plus a 25-at-a-time variant of one of them, plus a match afterwards,
+          and every one was its own button that had to be pressed in the right
+          order to be any use. Nothing on screen said what that order was.
+
+          In practice there are two things anyone wants: what arrived since last
+          time, and everything still outstanding. Same steps in the same order;
+          the second simply does not stop early. Each step is still reachable on
+          its own from the Threads menu, for when one specific thing is wanted.
+
+          Deliberately NOT bounded by the counts beside them. Those numbers are
+          labels and a stale one would silently stop a run short — the reason
+          "Capture all (296)" was never allowed to pass 296 to the main
+          process. */}
+      <button
+        type="button"
+        onClick={() => runSync('new')}
+        disabled={running}
+        title="Refreshes the thread list from Google and reads anything new. Minutes."
+      >
+        {syncing === 'new' ? 'Getting new…' : 'Get new'}
       </button>
-      {/* The backlog is hours long at ~30-60s per conversation, almost all of it
-          Google's own load time. Clicking a 25-batch a dozen times is not a
-          workflow, so this exists to be started and left. */}
-      {remaining > 0 && (
+      {outstanding > 0 && (
         <button
           type="button"
-          // NOT bounded by the displayed count. That number is a label, and a
-          // stale one would silently stop the run short — "Capture all (296)"
-          // leaving 7 conversations behind. The main process takes whatever is
-          // actually uncaptured, up to this ceiling.
-          onClick={() => startCapture(CAPTURE_ALL_LIMIT)}
-          disabled={busy || capturing}
-          title="Works through everything not yet captured. Safe to leave running; Stop works at any point."
+          onClick={() => runSync('all')}
+          disabled={running}
+          title="Everything still outstanding, including the threads Google no longer lists and only the export links to. Hours — safe to leave running, and Stop works at any point."
         >
-          Capture all ({remaining})
+          {syncing === 'all' ? 'Catching up…' : `Catch up (${outstanding})`}
         </button>
       )}
-      {/* The only route to the threads Google no longer lists, and for this
-          archive that is most of them: the sidebar holds a few hundred while the
-          export holds thousands with a link. Each is verified against the
-          export's own reading before anything is stored, so a link that re-runs
-          its prompt is refused rather than written. */}
-      {linksToFetch > 0 && (
-        <button
-          type="button"
-          disabled={busy || capturing}
-          title="Opens each thread by the link in the export and captures what the page shows. Refuses to store anything where the page's answer does not match the export's."
-          onClick={async () => {
-            onNeedPanel();
-            setCapturing(true);
-            try {
-              const result = await window.notebook.fetchFromLinks(LINK_FETCH_LIMIT);
-              setLinksToFetch(result.remaining);
-              setTakeoutNote(
-                `fetched ${result.fetched} · ${result.rejected} did not match · ` +
-                  `${result.notReady} not ready yet · ${result.errors} errors · ` +
-                  `${result.remaining} left` +
-                  (result.stoppedEarly ? ` — ${result.stoppedEarly}` : ''),
-              );
-              onFinished();
-            } finally {
-              setCapturing(false);
-            }
-          }}
-        >
-          Fetch from links ({linksToFetch})
+      {syncing && (
+        <button type="button" onClick={() => window.notebook.cancelSync()}>
+          Stop
         </button>
       )}
-      {capturing && (
+      {/* The outline over the top of whatever the current step is reporting. A
+          four-step run that only ever showed the step it was on gave no way to
+          tell "nearly done" from "just started". */}
+      {sync?.running && (
+        <span className="harvest-status">
+          {sync.step} — step {sync.index} of {sync.steps}
+        </span>
+      )}
+      {/* A capture started on its own from the menu has its own Stop. Hidden
+          while a sync is running, which has one of its own that stops the whole
+          sequence rather than only the step it is on. */}
+      {capturing && !syncing && (
         <button type="button" onClick={() => window.notebook.cancelCapture()}>
           Stop
         </button>
