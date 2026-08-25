@@ -22,6 +22,16 @@ const external = [
 // holds a live Google session.
 const debugBuild = process.env.NOTEBOOK_DEBUG_BUILD === '1';
 
+// Which build this is, baked in for the same reason: the app has to be able to
+// say what it is without being told at launch.
+//
+// It cannot come from package.json. Pull-request installers are renamed AFTER
+// packaging to the predicted next version — the file in D:\tmp says
+// 0.4.0-rc13 while package.json still says 0.3.0 — so app.getVersion() would
+// confidently name a version that matches nothing anyone has on disk. CI passes
+// the real label; a local build says so plainly rather than guessing.
+const buildId = process.env.NOTEBOOK_BUILD_ID || 'local build';
+
 export default defineConfig({
   main: {
     // electron-vite auto-adds its own externalize-deps plugin unless told not
@@ -36,6 +46,7 @@ export default defineConfig({
     // to the first right-click).
     define: {
       __DEBUG_BUILD__: JSON.stringify(debugBuild),
+      __BUILD_ID__: JSON.stringify(buildId),
     },
     build: {
       externalizeDeps: false,
@@ -66,6 +77,7 @@ export default defineConfig({
     root: '.',
     define: {
       __DEBUG_BUILD__: JSON.stringify(debugBuild),
+      __BUILD_ID__: JSON.stringify(buildId),
     },
     build: {
       rollupOptions: {

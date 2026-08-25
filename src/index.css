@@ -61,10 +61,28 @@ body {
   flex: none;
 }
 
-.toolbar h1 {
-  font-size: 0.95rem;
-  margin: 0;
-  flex: 1;
+/* The build label, where the app's name used to be. It had flex: 1, so a
+   heading nobody needed took the whole first row and pushed the one button on
+   it to the far edge — which is what made two rows of chrome look half empty
+   each. */
+.build-id {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex: none;
+}
+
+/* A debug build has remote debugging on and the panel holds a live Google
+   session. That is not a detail to render in the same grey as everything else. */
+.build-id.debug {
+  color: #b45309;
+  font-weight: 600;
+}
+
+/* Pushed to the right edge by the harvest bar's own flex: 1 between them. */
+.panel-toggle {
+  flex: none;
 }
 
 button {
@@ -652,13 +670,16 @@ button:disabled {
 
 /* --------------------------------------------------------------- harvesting */
 
+/* Now a group INSIDE the toolbar rather than a second bar under it. It takes
+   the slack between the build label and the panel toggle, and min-width: 0 is
+   what lets a long status line ellipsis instead of shoving the toggle off the
+   edge. */
 .harvest-bar {
   display: flex;
   align-items: center;
   gap: 0.4rem;
-  padding: 0.35rem 0.6rem;
-  border-bottom: 1px solid var(--border);
-  flex: none;
+  flex: 1;
+  min-width: 0;
   font-size: 0.78rem;
 }
 

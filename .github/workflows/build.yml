@@ -179,10 +179,20 @@ jobs:
       # release.yml — so there it stays an explicit opt-in, which is the consent
       # for an unauthenticated endpoint in front of a signed-in Google session.
       # The window title says DEBUG BUILD so one is never mistaken for the other.
+      #
+      # NOTEBOOK_BUILD_ID is the same label the artifact is renamed to further
+      # down, computed here because it has to be baked in BEFORE packaging.
+      # Without it the app could only report package.json's version, which for a
+      # PR build names a version nobody has on disk — the installer says
+      # 0.4.0-rc13 while package.json still says 0.3.0.
       - name: Package Windows installer
         run: npm run make
         env:
           NOTEBOOK_DEBUG_BUILD: '1'
+          NOTEBOOK_BUILD_ID: >-
+            ${{ github.event_name == 'pull_request' && steps.predict.outputs.version != ''
+            && format('{0}-rc{1}', steps.predict.outputs.version, github.event.pull_request.number)
+            || steps.vars.outputs.sha_short }}
 
       # Same guard as the release workflow, and the reason it exists: a bare
       # require() left in the bundle crashes the installed app at startup,

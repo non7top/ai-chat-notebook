@@ -13,4 +13,6 @@ declare global {
    * in a release, where it stays an explicit opt-in.
    */
   const __DEBUG_BUILD__: boolean;
+  /** The build's own label, baked in at package time. See electron.vite.config.ts. */
+  const __BUILD_ID__: string;
 }
