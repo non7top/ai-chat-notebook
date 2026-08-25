@@ -17,6 +17,7 @@ import {
   setLastAiModeStatus,
 } from './main/aiModeView';
 import type { AiModeStatus } from './shared/types';
+import { inlineImageLabel, inlineImagesWorthMoving } from './shared/inlineLabel';
 
 // Electron shows no right-click menu anywhere by default (unlike a normal
 // browser) — this adds the standard cut/copy/paste/inspect-element menu,
@@ -229,8 +230,18 @@ const createWindow = () => {
     // stored markup until the has_inline flag replaced it, and putting THAT on
     // a menu rebuild would have re-created the ten-second freeze somewhere new.
     const inline = db.countMessagesWithInlineImages();
-    const pending = inline.inline + (inline.unexamined > 0 ? inline.unexamined : 0);
     const stuck = db.countExhaustedCaptures();
+    // Two different quantities, and adding them was exactly the mistake this
+    // codebase keeps making: `inline` is turns known to hold base64, `unexamined`
+    // is turns nobody has looked at yet. Summed, the label read "(23263)" on a
+    // real archive that holds 2245 — it was reporting the size of the CHECK as
+    // if it were the size of the work, in the wrong unit.
+    //
+    // So the number is shown only when it is known. While rows remain
+    // unexamined it carries a "+", or no number at all when nothing has been
+    // counted yet, and the tooltip says how many are still to be looked at. An
+    // honest absence beats a confident wrong figure.
+    const inlineLabel = inlineImageLabel(inline);
 
     Menu.setApplicationMenu(
       Menu.buildFromTemplate([
@@ -304,13 +315,16 @@ const createWindow = () => {
             },
             { type: 'separator' },
             {
-              label:
-                pending > 0
-                  ? `Move inline images out of the text (${pending})`
-                  : 'Move inline images out of the text',
-              // Disabled rather than hidden when there is nothing to move: an
+              label: inlineLabel,
+              toolTip:
+                inline.unexamined > 0
+                  ? `${inline.unexamined} turns have not been checked yet — ` +
+                    'the first run checks them, then moves what it finds'
+                  : 'Moves base64 images out of the stored text into the image store',
+              // Enabled while anything is unexamined, because the answer is not
+              // yet known — and disabled only when it IS known to be zero. An
               // item that comes and goes is one you cannot learn the place of.
-              enabled: pending > 0,
+              enabled: inlineImagesWorthMoving(inline),
               click: command('moveInlineImages'),
             },
             { type: 'separator' },
@@ -348,6 +362,46 @@ const createWindow = () => {
   };
   buildMenu();
   setMenuRebuilder(buildMenu);
+
+  /**
+   * Fills in has_inline for turns stored before the column existed, in the
+   * background, once.
+   *
+   * The flag exists so "how many turns hold base64" is an index lookup instead
+   * of a scan of 780MB on the main thread — that scan was the ten seconds of
+   * dead window on launch. But a flag nobody has computed answers 0, so until
+   * this ran the menu could not name the number at all, and the only thing that
+   * would compute it was the repair the number was meant to help you decide
+   * about.
+   *
+   * Deliberately NOT on the startup path. It begins five seconds after the
+   * window is up, takes fifty rows at a time, and yields for 50ms between
+   * slices — node:sqlite is synchronous, so a slice IS a block, and the size of
+   * the slice is the size of the stall. Around two minutes of low-priority work
+   * on a real archive, after which the flag is permanent and this never runs
+   * again.
+   */
+  const fillInlineFlags = () => {
+    const slice = () => {
+      let remaining: number;
+      try {
+        remaining = db.examineInlineImages(50).remaining;
+      } catch {
+        // A locked database or a failed read is not worth retrying forever; the
+        // repair drains whatever is left when it runs.
+        return;
+      }
+      if (remaining > 0) {
+        setTimeout(slice, 50);
+        return;
+      }
+      // Now the count is real, so the label can carry it.
+      buildMenu();
+      console.log('[Notebook] inline-image flags filled in');
+    };
+    setTimeout(slice, 5000);
+  };
+  fillInlineFlags();
 
   const aiModeView = createAiModeView(mainWindow);
   const sendStatus = (status: AiModeStatus) => {

@@ -24,6 +24,7 @@ import { DatabaseSync } from 'node:sqlite';
 import os from 'node:os';
 import path from 'node:path';
 import * as db from '../src/main/db.ts';
+import type { InlineImageCount } from '../src/shared/types.ts';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'notebook-inline-'));
 db.initDb(dir);
@@ -87,6 +88,37 @@ count = db.countMessagesWithInlineImages();
 console.log(`after ${slices} slices: ${count.inline} inline, ${count.unexamined} unexamined`);
 if (count.inline !== 1 || count.unexamined !== 0) {
   throw new Error(`the backfill got it wrong: ${JSON.stringify(count)}`);
+}
+
+// The label. Checked because the version that used to be inlined in the menu
+// ADDED the two counts together — different quantities in different units — and
+// read "(23263)" on an archive holding 2245. Nothing could catch that: both
+// numbers were real, the arithmetic was valid, and the result was nonsense.
+const { inlineImageLabel, inlineImagesWorthMoving } = await import(
+  '../src/shared/inlineLabel.ts'
+);
+const cases: [InlineImageCount, string, boolean][] = [
+  // Nothing looked at yet: no number, because none is known. This is the state a
+  // fresh upgrade is in, and the one that produced the wrong figure.
+  [{ inline: 0, unexamined: 23263 }, 'Move inline images out of the text…', true],
+  // Some found, more to check: a lower bound, marked as one.
+  [{ inline: 2245, unexamined: 21018 }, 'Move inline images out of the text (2245+)', true],
+  // Everything checked: the number, exactly.
+  [{ inline: 2245, unexamined: 0 }, 'Move inline images out of the text (2245)', true],
+  // Checked and clean: the only state where there is nothing to offer.
+  [{ inline: 0, unexamined: 0 }, 'Move inline images out of the text (0)', false],
+];
+for (const [count, expected, offered] of cases) {
+  const label = inlineImageLabel(count);
+  console.log(`  ${JSON.stringify(count)} -> "${label}" offered=${inlineImagesWorthMoving(count)}`);
+  if (label !== expected) throw new Error(`expected "${expected}", got "${label}"`);
+  if (inlineImagesWorthMoving(count) !== offered) {
+    throw new Error(`${JSON.stringify(count)} should ${offered ? '' : 'not '}be offered`);
+  }
+  // The specific mistake, guarded directly: the label must never name the sum.
+  if (count.unexamined > 0 && label.includes(String(count.inline + count.unexamined))) {
+    throw new Error('the label is naming inline + unexamined again');
+  }
 }
 
 raw.close();
