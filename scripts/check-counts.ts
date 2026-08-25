@@ -193,5 +193,58 @@ if (!db.chatsWithoutTurns(100, true).some((c) => c.id === stuck.id)) {
 }
 console.log('  it comes back when asked for deliberately');
 
+// A thread that has just appeared in Google's sidebar is the newest thing in the
+// archive, and it must be at the TOP of the list — not below every dated one.
+//
+// It was at the bottom: upsertThreadFromList inserted started_at NULL, the sort
+// files undated rows last, and the thread only climbed once a capture happened
+// to stamp a date on it. Asserted on POSITION rather than on the column, because
+// the column being set is not the claim — where the row lands is.
+const dated = db.upsertThreadFromList('t:old', 'an older thread', null, 50);
+const oldest = db.listChats({ kind: 'all' }).find((c) => c.title === 'an older thread');
+if (!oldest || !dated.created) throw new Error('could not make a thread to compare against');
+db.setPanelDate(oldest.id, '2025-01-01T00:00:00Z');
+db.upsertThreadFromList('t:fresh', 'just appeared', null, 0);
+const order = db.listChats({ kind: 'all' });
+const at = (title: string) => order.findIndex((c) => c.title === title);
+console.log(`  just-listed at ${at('just appeared')}, an old one at ${at('an older thread')}`);
+if (at('just appeared') !== 0) {
+  throw new Error(`a newly listed thread is at position ${at('just appeared')}, not the top`);
+}
+if (at('just appeared') > at('an older thread')) {
+  throw new Error('a newly listed thread sorts below an older dated one');
+}
+// And the real date still wins when it arrives, or the placeholder would freeze
+// every harvested thread at the top forever.
+db.setPanelDate(order[0].id, '2024-06-01T00:00:00Z');
+const reordered = db.listChats({ kind: 'all' });
+if (reordered.findIndex((c) => c.title === 'just appeared') === 0) {
+  throw new Error('a real date did not displace the placeholder');
+}
+console.log('  and a real date still overrides it');
+
+// A whole refresh, in Google's order, must come out of the list in Google's
+// order. This is the failure that prompted the rank offset: the dates are
+// written milliseconds apart in rank order, so started_at DESC decided first and
+// decided BACKWARDS — rank 0, the newest thread, got the earliest stamp and sank
+// to the bottom of its own group. Nine threads came out 8..0 on the real archive.
+//
+// Asserted over the POSITIONS, not the timestamps. That the stamps differ is not
+// the claim; that the list matches the sidebar is.
+for (let rank = 0; rank < 6; rank += 1) {
+  db.upsertThreadFromList(`t:rank${rank}`, `rank ${rank}`, null, rank);
+}
+const listed = db.listChats({ kind: 'all' }).map((c) => c.title);
+const ranks = listed.filter((t) => t.startsWith('rank ')).map((t) => Number(t.slice(5)));
+console.log(`  a refresh of 6 comes out as ${ranks.join(',')}`);
+if (ranks.join(',') !== '0,1,2,3,4,5') {
+  throw new Error(`Google's order was not preserved: ${ranks.join(',')}`);
+}
+// And they sit above everything older, not merely in the right order among
+// themselves.
+if (listed.indexOf('rank 0') !== 0) {
+  throw new Error(`the newest of the refresh is at ${listed.indexOf('rank 0')}, not the top`);
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('OK');

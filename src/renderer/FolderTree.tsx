@@ -260,7 +260,9 @@ export default function FolderTree({
               <span className={`folder-mark${folder.color ? ` c-${folder.color}` : ''}`}>
                 {folder.icon ?? ''}
               </span>
-              <span className="tree-name">{folder.name}</span>
+              <span className={`tree-name${folder.color ? ` c-${folder.color}` : ''}`}>
+                {folder.name}
+              </span>
               <Count
                 n={counts?.byFolder[folder.id] ?? (counts ? 0 : undefined)}
                 title="Threads in this folder"
@@ -327,9 +329,16 @@ export default function FolderTree({
 
         {/* Under the row rather than over it: a popover floating above a tree
             that scrolls is a popover that ends up somewhere else, and this one
-            has to stay next to the folder it is changing. */}
+            has to stay next to the folder it is changing.
+
+            Everything here commits on the spot and the row above updates as it
+            does, so there is no OK button — because there is nothing to confirm.
+            The first version had an icon field that saved on blur, which is the
+            same thing without the feedback: it looked like a form nobody had
+            told you how to submit. */}
         {editing?.kind === 'style' && editing.id === folder.id && (
           <div className="style-picker" style={{ marginLeft: `${(depth + 1) * 14 + 4}px` }}>
+            <span className="picker-label">Colour</span>
             {COLORS.map((color) => (
               <button
                 key={color}
@@ -347,28 +356,32 @@ export default function FolderTree({
             >
               ✕
             </button>
-            {/* An emoji, typed or pasted. Not a fixed icon set: this archive is
-                one person's topics and any set chosen here would be the wrong
-                one. Windows opens its picker with Win+period. */}
+
+            <span className="picker-label">Icon</span>
+            {/* A handful to click, because the useful case is one of these and
+                nobody should have to know that Win+period opens an emoji
+                picker. The field beside them takes anything else. */}
+            {['📌', '⭐', '💡', '🔧', '📷', '🎨', '💬', '📁'].map((icon) => (
+              <button
+                key={icon}
+                type="button"
+                className={`icon-choice${folder.icon === icon ? ' chosen' : ''}`}
+                onClick={() => run(window.notebook.setFolderStyle(folder.id, folder.color, icon))}
+              >
+                {icon}
+              </button>
+            ))}
             <input
               className="icon-input"
               defaultValue={folder.icon ?? ''}
-              placeholder="🙂"
+              placeholder="or…"
               maxLength={4}
-              title="An emoji for this folder — Win+. opens the picker"
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  run(
-                    window.notebook.setFolderStyle(
-                      folder.id,
-                      folder.color,
-                      event.currentTarget.value || null,
-                    ),
-                  );
-                }
-                if (event.key === 'Escape') setEditing(null);
-              }}
-              onBlur={(event) =>
+              title="Any emoji — saves as you type. Win+. opens the picker."
+              // Saves on every keystroke, which is what makes it obvious that it
+              // saves at all: the folder above changes under the cursor. An
+              // emoji arrives as one paste or one pick, so there is no
+              // half-typed state to protect against.
+              onChange={(event) =>
                 run(
                   window.notebook.setFolderStyle(
                     folder.id,
@@ -377,7 +390,21 @@ export default function FolderTree({
                   ),
                 )
               }
+              onKeyDown={(event) => {
+                if (event.key === 'Escape' || event.key === 'Enter') setEditing(null);
+              }}
             />
+            <button
+              type="button"
+              className="icon-choice"
+              title="No icon"
+              onClick={() => run(window.notebook.setFolderStyle(folder.id, folder.color, null))}
+            >
+              ✕
+            </button>
+            <button type="button" className="picker-done" onClick={() => setEditing(null)}>
+              Done
+            </button>
           </div>
         )}
 

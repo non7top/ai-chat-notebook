@@ -258,6 +258,18 @@ export function initDb(userDataPath: string): void {
   // one person's topics, and any set chosen here would be the wrong set.
   ensureColumn('folders', 'icon', 'icon TEXT');
   db.exec("UPDATE chats SET date_basis = 'takeout' WHERE started_at IS NOT NULL AND date_basis IS NULL");
+  // Threads listed before harvest stamped a placeholder. They have no date at
+  // all, so the sort files them below everything — the bottom of a 2863-row
+  // list, which is indistinguishable from not being there.
+  //
+  // last_seen_at rather than now: it is when the app actually saw the thread,
+  // and stamping a row created weeks ago with today's date would be a worse
+  // guess than the one already available. Marked 'placeholder', so it reads as
+  // a stand-in and any real date still overwrites it.
+  db.exec(
+    `UPDATE chats SET started_at = last_seen_at, date_basis = 'placeholder'
+      WHERE started_at IS NULL AND last_seen_at IS NOT NULL`,
+  );
   db.exec('CREATE INDEX IF NOT EXISTS chats_list_rank ON chats(list_rank);');
 
   // Whether a turn's markup still carries a base64 image. NULL means not yet
@@ -1047,6 +1059,30 @@ function contentKeyFor(title: string): string {
  * Records a thread seen in the history list. Turns are not captured here — a
  * list harvest only learns that a conversation exists and what it is called.
  */
+/**
+ * A placeholder date that preserves Google's own ordering.
+ *
+ * One timestamp for a whole run would make every thread in it tie, and the
+ * sort's next key is list_rank — so that would work too. It does not survive
+ * contact with reality: the dates get stamped a few milliseconds apart, ties
+ * never form, and started_at DESC decides first. Worse, it decides BACKWARDS.
+ * Rank 0 is the newest thread and gets written first, so it ends up with the
+ * EARLIEST timestamp and sorts last within the group. Measured on nine threads
+ * from one refresh: Google's ranks 0..8 came out at list positions 8..0,
+ * exactly inverted.
+ *
+ * So the rank is subtracted from the stamp: rank 0 keeps the moment of the run,
+ * rank 1 is a second older, and plain started_at DESC reproduces the sidebar.
+ *
+ * A second per rank is arbitrary but not meaningless — the spacing IS the
+ * ordering, and these dates are stand-ins whose only job is to put a thread in
+ * the right place until a real date arrives. Even a 300-thread sidebar spreads
+ * over five minutes, so they all still read as the same moment.
+ */
+function placeholderForRank(now: string, listRank: number): string {
+  return new Date(Date.parse(now) - listRank * 1000).toISOString();
+}
+
 export function upsertThreadFromList(
   externalId: string,
   title: string,
@@ -1070,12 +1106,33 @@ export function upsertThreadFromList(
     return { created: false, titleChanged: (existing.title ?? '') !== title };
   }
 
+  // Dated on the spot, as a placeholder, for the same reason replaceTurns does
+  // it — and it was missing here, which put every newly listed thread at the
+  // BOTTOM of the list until something captured it.
+  //
+  // The sort puts undated rows last. A thread that has just appeared in Google's
+  // sidebar is the newest thing in the archive, and it landed below 2854 dated
+  // ones, where nobody would look for it. It climbed to the top later, when
+  // capture finally stamped a date — so the fix already existed one function
+  // away and this was the only path that skipped it.
+  //
+  // Safe against the real date arriving later: every path that writes a Takeout
+  // or panel date overwrites date_basis = 'placeholder' explicitly.
   db.prepare(
     `INSERT INTO chats
-       (folder_id, external_id, content_key, url, title, started_at, last_seen_at, source,
-        raw_json, list_rank)
-     VALUES (NULL, ?, ?, ?, ?, NULL, ?, 'harvest', ?, ?)`,
-  ).run(externalId, contentKeyFor(title), url, title, now, JSON.stringify({ title }), listRank);
+       (folder_id, external_id, content_key, url, title, started_at, date_basis,
+        last_seen_at, source, raw_json, list_rank)
+     VALUES (NULL, ?, ?, ?, ?, ?, 'placeholder', ?, 'harvest', ?, ?)`,
+  ).run(
+    externalId,
+    contentKeyFor(title),
+    url,
+    title,
+    placeholderForRank(now, listRank),
+    now,
+    JSON.stringify({ title }),
+    listRank,
+  );
   return { created: true, titleChanged: false };
 }
 
@@ -3593,7 +3650,10 @@ export function undoTakeoutImport(): { deleted: number; reverted: number } {
     const reverted = db
       .prepare(
         `UPDATE chats
-           SET started_at = NULL, source = 'harvest'
+           -- A placeholder, not NULL. Reverting to no date at all would drop
+           -- the thread to the bottom of the list, which is where undoing an
+           -- import should not put anything.
+           SET started_at = last_seen_at, date_basis = 'placeholder', source = 'harvest'
          WHERE source = 'takeout' AND external_id NOT LIKE 'takeout:%'`,
       )
       .run().changes;

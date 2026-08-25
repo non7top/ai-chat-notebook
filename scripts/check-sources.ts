@@ -295,7 +295,17 @@ repairScenario(true);
   db.upsertThreadFromList('thread-dates', dated.query, null, 0);
   const [chat] = db.listChats({ kind: 'all' });
   console.log('\nbefore capture:', `date=${chat.startedAt} basis=${chat.dateBasis}`);
-  if (chat.startedAt !== null) throw new Error('a listed conversation should have no date yet');
+  // A listed conversation now gets a placeholder AT ONCE, and this assertion
+  // used to say the opposite — that it should have no date until something
+  // captured it. That was the behaviour, and it was the bug: the sort files
+  // undated rows last, so every newly listed thread landed at the bottom of a
+  // 2863-row list and only climbed when a capture happened to date it. The
+  // placeholder is what puts it where it belongs; the assertions below are what
+  // keep it from outstaying its welcome.
+  if (chat.dateBasis !== 'placeholder') {
+    throw new Error(`a listed conversation should be dated 'placeholder', got ${chat.dateBasis}`);
+  }
+  if (chat.startedAt === null) throw new Error('a listed conversation was left undated');
 
   db.replaceTurns(
     chat.id,

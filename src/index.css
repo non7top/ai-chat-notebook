@@ -287,6 +287,21 @@ button:disabled {
   display: none;
 }
 
+/* The folder's own name, in its colour. The dot alone was too small to answer
+   "did that do anything" — a colour set on a folder has to be visible ON the
+   folder, immediately, or the picker is a control with no feedback. */
+.tree-name.c-slate,
+.tree-name.c-red,
+.tree-name.c-amber,
+.tree-name.c-green,
+.tree-name.c-teal,
+.tree-name.c-blue,
+.tree-name.c-violet,
+.tree-name.c-pink {
+  color: var(--folder);
+  font-weight: 600;
+}
+
 /* Where a thread belongs, shown on the thread. Coloured by its folder, and
    falling back to the row's own muted grey for a folder with no colour set —
    the name is still the answer. */
@@ -298,8 +313,53 @@ button:disabled {
 .style-picker {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.2rem;
-  padding: 0.2rem 0.3rem;
+  padding: 0.3rem;
+  margin: 0.1rem 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+/* Says what each group of controls is. Without them it was eight circles, a
+   smiley and a text box, and no indication that the box was the icon or that
+   anything in the row had been saved. */
+.picker-label {
+  font-size: 0.68rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-left: 0.2rem;
+}
+
+.picker-label:not(:first-child) {
+  margin-left: 0.5rem;
+}
+
+.icon-choice {
+  padding: 0.05rem 0.2rem;
+  font-size: 0.85rem;
+  line-height: 1.1;
+  border-color: transparent;
+  background: none;
+}
+
+.icon-choice:hover {
+  border-color: var(--border);
+  background: #ffffff;
+}
+
+.icon-choice.chosen {
+  border-color: var(--fg);
+  background: #ffffff;
+}
+
+/* Closes the picker; it does not save, because everything in here has saved
+   already. Named Done rather than OK for exactly that reason. */
+.picker-done {
+  margin-left: auto;
+  font-size: 0.72rem;
 }
 
 .swatch {
