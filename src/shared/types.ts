@@ -411,17 +411,6 @@ export interface NotebookApi {
    * choosing. Returns null if the dialog was cancelled.
    */
   /**
-   * Turns whose stored HTML still carries base64 instead of pointing at the
-   * asset store — written before capture stopped keeping it.
-   *
-   * `unexamined` is turns stored before the flag that answers this cheaply
-   * existed, so `inline` is a lower bound until the repair pass has drained
-   * them. Reported rather than folded in: the previous version of this answered
-   * exactly by reading 780 MB of markup on the main thread, which is what made
-   * the window dead for ten seconds on launch.
-   */
-  countInlineImages(): Promise<InlineImageCount>;
-  /**
    * Moves that base64 into the asset store and rewrites the HTML. Moves rather
    * than drops: the markup is the only copy of those images.
    */
@@ -473,6 +462,16 @@ export interface NotebookApi {
    */
   confirm(message: string, detail?: string): Promise<boolean>;
 
+  /**
+   * The one-off actions live in the application menu, not the toolbar, and this
+   * is how a menu click reaches the handler that runs it. Deliberately a command
+   * NAME rather than a channel per action: the alternative is one IPC channel,
+   * one preload entry and one type per menu item, for eight items that all do
+   * the same thing — reach a handler that already exists.
+   */
+  onMenuCommand(callback: (name: string) => void): () => void;
+  /** Rebuilds the menu so the counts in its labels match the archive. */
+  refreshMenu(): Promise<void>;
   harvestThreadList(): Promise<HarvestSummary>;
   cancelHarvest(): Promise<void>;
   onHarvestProgress(callback: (progress: HarvestProgress) => void): () => void;

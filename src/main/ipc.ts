@@ -25,6 +25,17 @@ import {
 } from './harvest';
 import type { ChatScope } from '../shared/types';
 
+/**
+ * Set by main once the window and its menu exist. A function rather than an
+ * import because the template closes over the window it sends commands to, and
+ * that window is created after this module is loaded.
+ */
+let rebuildMenu: (() => void) | null = null;
+
+export function setMenuRebuilder(rebuild: () => void): void {
+  rebuildMenu = rebuild;
+}
+
 export function registerIpcHandlers(): void {
   ipcMain.handle('folders:list', () => db.listFolders());
   ipcMain.handle('folders:create', (_event, parentId: number | null, name: string) =>
@@ -42,6 +53,10 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('chats:list', (_event, scope: ChatScope) => db.listChats(scope));
   ipcMain.handle('chats:counts', () => db.scopeCounts());
+  // The menu's labels carry counts, and a count is only worth having if it is
+  // current. Rebuilding is main's job — the template lives there — so the
+  // renderer asks rather than rebuilds.
+  ipcMain.handle('menu:refresh', () => rebuildMenu?.());
   ipcMain.handle('chats:get', (_event, id: number) => db.getChat(id));
   ipcMain.handle('chats:setFolder', (_event, chatId: number, folderId: number | null) =>
     db.setChatFolder(chatId, folderId),
@@ -187,11 +202,10 @@ export function registerIpcHandlers(): void {
   // Reports through the archive channel, since it is minutes of work on
   // megabyte-sized rows.
   ipcMain.handle('archive:repairInlineImages', () =>
-    repairInlineImages((done, total) =>
-      announceArchiveProgress({ phase: 'copying', done, total }),
+    repairInlineImages((done, total, phase) =>
+      announceArchiveProgress({ phase: phase ?? 'copying', done, total }),
     ),
   );
-  ipcMain.handle('archive:inlineCount', () => db.countMessagesWithInlineImages());
 
   ipcMain.handle('harvest:threadList', () => harvestThreadList());
   ipcMain.handle('harvest:cancel', () => cancelHarvest());

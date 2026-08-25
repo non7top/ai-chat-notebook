@@ -772,7 +772,7 @@ export interface InlineRepairSummary {
  * before that.
  */
 export async function repairInlineImages(
-  onProgress?: (done: number, total: number) => void,
+  onProgress?: (done: number, total: number, phase?: 'counting' | 'copying') => void,
 ): Promise<InlineRepairSummary> {
   const summary: InlineRepairSummary = {
     turns: 0,
@@ -785,10 +785,20 @@ export async function repairInlineImages(
   // the same pass that used to run on startup and froze the window for ten
   // seconds — so it is done here, inside an operation that already takes minutes
   // and shows progress, rather than on the way to painting a window.
-  for (;;) {
-    const { remaining } = db.examineInlineImages(400);
-    if (remaining === 0) break;
-    onProgress?.(0, remaining);
+  //
+  // Reported as 'counting', not as the repair's own progress. Sharing the
+  // repair's counter would have put "Copying images — 0 of 23285" on screen for
+  // a minute while nothing was being copied and the number never moved.
+  const unexamined = db.countMessagesWithInlineImages().unexamined;
+  let examinedSoFar = 0;
+  while (examinedSoFar < unexamined) {
+    const { examined, remaining } = db.examineInlineImages(400);
+    examinedSoFar = unexamined - remaining;
+    onProgress?.(examinedSoFar, unexamined, 'counting');
+    // examined === 0 with rows still unexamined would be a loop that cannot
+    // finish. Break rather than spin — the same failure that once read
+    // "3200 of 480".
+    if (remaining === 0 || examined === 0) break;
     // Yields to the event loop between slices, so the window keeps painting.
     await new Promise((resolve) => setImmediate(resolve));
   }

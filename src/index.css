@@ -588,12 +588,6 @@ button:disabled {
   outline: none;
 }
 
-/* The disclosure itself is quiet: it is a way in to rare actions, not one of
-   them. */
-.harvest-more {
-  color: var(--muted);
-}
-
 /* How the last long job ended. Quiet when it finished, marked when it did not —
    the distinction is the whole reason this exists. */
 .job-mark {

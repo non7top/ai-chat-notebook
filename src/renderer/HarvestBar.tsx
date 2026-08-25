@@ -1,10 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type {
   ActivityStats,
   SuspectCopyGroup,
   CaptureProgress,
   HarvestProgress,
-  InlineImageCount,
   TakeoutImportRow,
   TakeoutPick,
 } from '../shared/types';
@@ -83,14 +82,12 @@ export default function HarvestBar({
   // Only set while a run is in progress; the prop is the truth otherwise.
   const [remainingOverride, setRemainingOverride] = useState<number | null>(null);
   const [linksToFetch, setLinksToFetch] = useState(0);
-  const [inline, setInline] = useState<InlineImageCount>({ inline: 0, unexamined: 0 });
   const [lastJob, setLastJob] = useState<{
     job: string;
     outcome: string;
     endedAt: string;
     detail: Record<string, unknown>;
   } | null>(null);
-  const [more, setMore] = useState(false);
   const remaining = remainingOverride ?? uncaptured;
 
   useEffect(
@@ -110,7 +107,6 @@ export default function HarvestBar({
   // biome-ignore lint/correctness/useExhaustiveDependencies: triggers, not inputs — they mark when the count can have changed
   useEffect(() => {
     window.notebook.countLinksToFetch().then(setLinksToFetch);
-    window.notebook.countInlineImages().then(setInline);
     window.notebook.lastJobs().then((jobs) => setLastJob(jobs[0] ?? null));
   }, [uncaptured, activity]);
 
@@ -222,6 +218,93 @@ export default function HarvestBar({
     }
   };
 
+  const undoImport = async () => {
+    if (
+      !(await window.notebook.confirm(
+        'Undo the Takeout import?',
+        'Conversations harvested from the panel are kept.',
+      ))
+    ) {
+      return;
+    }
+    setTakeoutBusy(true);
+    try {
+      const r = await window.notebook.undoTakeout();
+      setTakeoutNote(`undone: ${r.deleted} removed, ${r.reverted} reverted`);
+      onFinished();
+    } finally {
+      setTakeoutBusy(false);
+    }
+  };
+
+  /**
+   * Threads holding identical conversations — the trace left by a capture that
+   * stored the wrong thread. Results go to a panel rather than the status line:
+   * a list of thread ids has no business in a toolbar, as the export report
+   * demonstrated.
+   */
+  const checkCopies = async () => {
+    onCopies(await window.notebook.suspectCopies());
+  };
+
+  /**
+   * What went wrong, on demand. A run's own summary vanishes with the run; this
+   * reads the record the fetch leaves behind.
+   */
+  const linkFailures = async () => {
+    const outcomes = await window.notebook.linkOutcomes();
+    const byState = new Map<string, number>();
+    for (const o of outcomes) byState.set(o.state, (byState.get(o.state) ?? 0) + 1);
+    setTakeoutNote(
+      outcomes.length === 0
+        ? 'every link tried so far succeeded'
+        : `${[...byState].map(([s, n]) => `${n} ${s}`).join(' · ')} — first: ` +
+          `#${outcomes[0].chatId} ${outcomes[0].note ?? ''}`.slice(0, 200),
+    );
+  };
+
+  const moveInlineImages = async () => {
+    setTakeoutBusy(true);
+    try {
+      const r = await window.notebook.repairInlineImages();
+      setTakeoutNote(
+        `moved ${r.images} images out of ${r.turns} turns · ` +
+          `${(r.bytesFreed / 1024 / 1024).toFixed(1)} MB reclaimed` +
+          (r.failed ? ` · ${r.failed} could not be read` : '') +
+          // Surfaced rather than swallowed: a stubborn row means base64 arrived
+          // in a form the patterns do not recognise, and the number is the only
+          // way that becomes known.
+          (r.stubborn ? ` · ${r.stubborn} still hold base64` : ''),
+      );
+      // No count kept here any more. The menu label is the only place that
+      // shows one, main computes it when it rebuilds the template, and
+      // onFinished triggers exactly that — a second copy in this component is
+      // how a number starts disagreeing with itself.
+      onFinished();
+    } finally {
+      setTakeoutBusy(false);
+    }
+  };
+
+  /**
+   * The second half of "fetch the threads, then match". Matching during an
+   * import can only see the threads that existed then, so an entry imported
+   * before its thread was captured had nothing to match against.
+   */
+  const matchEntries = async () => {
+    setTakeoutBusy(true);
+    try {
+      const r = await window.notebook.rematchEntries();
+      setTakeoutNote(
+        `${r.relinked} links repaired · ${r.attached} threads glued of ${r.considered} ` +
+          `considered · ${r.declined} too close to call`,
+      );
+      onFinished();
+    } finally {
+      setTakeoutBusy(false);
+    }
+  };
+
   const startCapture = async (limit: number) => {
     setCapturing(true);
     setCapture(null);
@@ -264,6 +347,42 @@ export default function HarvestBar({
     }
   };
 
+  /**
+   * The menu is the other way in, and it runs the SAME handlers the toolbar
+   * buttons ran — not a second copy of the work. Every one of these reports into
+   * this component's status line, which a menu click has no way to reach from
+   * the main process.
+   *
+   * Held in a ref refreshed after every render, because the listener is
+   * registered once: a handler captured at mount would close over the first
+   * render's state, and "Import it" would forever see whatever export was loaded
+   * when the window opened.
+   */
+  const commands = useRef<Record<string, () => void>>({});
+  useEffect(() => {
+    commands.current = {
+      harvest: start,
+      scanTakeout,
+      applyTakeout,
+      undoImport,
+      checkCopies,
+      linkFailures,
+      moveInlineImages,
+      matchEntries,
+    };
+  });
+  useEffect(
+    () =>
+      window.notebook.onMenuCommand((name) => {
+        const run = commands.current[name];
+        // A menu item naming a command that does not exist is a wiring mistake,
+        // and a silent no-op is exactly how it would go unnoticed.
+        if (!run) setTakeoutNote(`no such command: ${name}`);
+        else run();
+      }),
+    [],
+  );
+
   const pct =
     progress && progress.expected > 0
       ? Math.min(100, Math.round((progress.found / progress.expected) * 100))
@@ -271,23 +390,25 @@ export default function HarvestBar({
 
   return (
     <div className="harvest-bar">
-      {/* Two groups, because the bar had grown to eight controls and the two that
-          get used were no easier to find than the six that do not.
+      {/* What is left here are the RUNS: the operations that take minutes, get
+          started repeatedly, and need somewhere to report progress to.
 
-          Out front: the runs that take minutes and get started repeatedly.
-          Behind "More": refreshing the sidebar list, reading an export, undoing
-          an import — each a deliberate one-off, and each still one click away.
-          Anything mid-run stays visible regardless, since hiding a Stop button
-          behind a disclosure would be indefensible. */}
-      {(more || busy) && (
-        <button type="button" onClick={start} disabled={busy}>
-          {busy ? 'Harvesting…' : 'Harvest history'}
-        </button>
-      )}
+          Everything else moved to the menu — refreshing the sidebar list,
+          reading an export, undoing one, and the four repair and diagnostic
+          actions. Each is a deliberate one-off done once and not thought about
+          again, and eight of them sharing a row with the buttons actually used
+          every day made neither easy to find. They run the same handlers from
+          there, and still report into the status line at the end of this bar.
+
+          Anything mid-run stays visible regardless: hiding a Stop button in a
+          menu would be indefensible. */}
       {busy && (
-        <button type="button" onClick={() => window.notebook.cancelHarvest()}>
-          Stop
-        </button>
+        <>
+          <span className="harvest-status">Harvesting…</span>
+          <button type="button" onClick={() => window.notebook.cancelHarvest()}>
+            Stop
+          </button>
+        </>
       )}
 
       {/* How the last long job ENDED, which is a different question from how it
@@ -326,147 +447,18 @@ export default function HarvestBar({
         </span>
       )}
 
-      {(more || takeoutBusy || takeout) && <span className="harvest-sep" />}
+      {(takeoutBusy || takeout) && <span className="harvest-sep" />}
 
-      {(more || takeoutBusy) && (
-        <button type="button" onClick={scanTakeout} disabled={takeoutBusy || busy || capturing}>
-          {takeoutBusy ? 'Reading…' : 'Scan Takeout…'}
-        </button>
-      )}
-      {/* Kept as a way back to the decision after the report was closed; the
-          report itself carries the primary Import. */}
+      {/* Not moved to the menu, because it is not a one-off: it is the
+          follow-through of a flow already under way, and it only exists while an
+          export is loaded and waiting for a decision. The report itself carries
+          the primary Import; this is the way back to that decision once the
+          report has been closed. */}
       {takeout && (
         <button type="button" onClick={applyTakeout} disabled={takeoutBusy}>
           Import it
         </button>
       )}
-      {more && (
-      <button
-        type="button"
-        title="Remove everything a Takeout import added. Harvested threads are kept."
-        disabled={takeoutBusy || busy || capturing}
-        onClick={async () => {
-          if (!(await window.notebook.confirm('Undo the Takeout import?', 'Conversations harvested from the panel are kept.'))) return;
-          setTakeoutBusy(true);
-          try {
-            const r = await window.notebook.undoTakeout();
-            setTakeoutNote(`undone: ${r.deleted} removed, ${r.reverted} reverted`);
-            onFinished();
-          } finally {
-            setTakeoutBusy(false);
-          }
-        }}
-      >
-        Undo import
-      </button>
-      )}
-
-      {/* Behind More because it is a diagnostic: run once after a capture that
-          went oddly, not part of the day's work. Its results go to a panel
-          rather than the status line — a list of thread ids has no business in a
-          toolbar, as the export report demonstrated. */}
-      {more && (
-        <button
-          type="button"
-          title="Finds threads holding identical conversations — the trace left by a capture that stored the wrong thread"
-          onClick={async () => {
-            onCopies(await window.notebook.suspectCopies());
-          }}
-        >
-          Check for copies
-        </button>
-      )}
-
-      {/* What went wrong, on demand. A run's own summary vanishes with the run;
-          this reads the record the fetch leaves behind. */}
-      {more && (
-        <button
-          type="button"
-          title="Threads whose link was tried and did not simply succeed, with the reason"
-          onClick={async () => {
-            const outcomes = await window.notebook.linkOutcomes();
-            const byState = new Map<string, number>();
-            for (const o of outcomes) byState.set(o.state, (byState.get(o.state) ?? 0) + 1);
-            setTakeoutNote(
-              outcomes.length === 0
-                ? 'every link tried so far succeeded'
-                : `${[...byState].map(([s, n]) => `${n} ${s}`).join(' · ')} — first: ` +
-                  `#${outcomes[0].chatId} ${outcomes[0].note ?? ''}`.slice(0, 200),
-            );
-          }}
-        >
-          Link failures
-        </button>
-      )}
-
-      {/* Only offered while there is something to repair, so it disappears once
-          the archive is clean rather than sitting there inviting a no-op. */}
-      {more && (inline.inline > 0 || inline.unexamined > 0) && (
-        <button
-          type="button"
-          disabled={busy || capturing || takeoutBusy}
-          title="Moves images stored as base64 inside the text into the image store, where they can be counted, deduplicated and shown as thumbnails"
-          onClick={async () => {
-            setTakeoutBusy(true);
-            try {
-              const r = await window.notebook.repairInlineImages();
-              setTakeoutNote(
-                `moved ${r.images} images out of ${r.turns} turns · ` +
-                  `${(r.bytesFreed / 1024 / 1024).toFixed(1)} MB reclaimed` +
-                  (r.failed ? ` · ${r.failed} could not be read` : '') +
-                  // Surfaced rather than swallowed: a stubborn row means base64
-                  // arrived in a form the patterns do not recognise, and the
-                  // number is the only way that becomes known.
-                  (r.stubborn ? ` · ${r.stubborn} still hold base64` : ''),
-              );
-              setInline(await window.notebook.countInlineImages());
-              onFinished();
-            } finally {
-              setTakeoutBusy(false);
-            }
-          }}
-        >
-          Move inline images ({inline.inline}
-          {inline.unexamined > 0 && '+'})
-        </button>
-      )}
-
-      {/* The second half of "fetch the threads, then match". Matching during an
-          import can only see the threads that existed then, so an entry imported
-          before its thread was captured had nothing to match against. */}
-      {more && (
-        <button
-          type="button"
-          disabled={busy || capturing || takeoutBusy}
-          title="Attaches stored export entries to the threads they belong to, using the answer rather than the prompt. Leaves ambiguous ones alone."
-          onClick={async () => {
-            setTakeoutBusy(true);
-            try {
-              const r = await window.notebook.rematchEntries();
-              setTakeoutNote(
-                `${r.relinked} links repaired · ${r.attached} threads glued of ${r.considered} ` +
-                  `considered · ${r.declined} too close to call`,
-              );
-              onFinished();
-            } finally {
-              setTakeoutBusy(false);
-            }
-          }}
-        >
-          Match entries
-        </button>
-      )}
-
-      {/* Last, so the controls it reveals appear to its left and nothing jumps
-          under the pointer when it is used. */}
-      <button
-        type="button"
-        className="harvest-more"
-        onClick={() => setMore((v) => !v)}
-        title={more ? 'Hide the one-off actions' : 'Harvest the sidebar list, read an export, undo an import'}
-      >
-        {more ? 'Less' : 'More…'}
-      </button>
       {/* Orphans are the point of keeping activity at all: prompts whose
           conversation Google no longer lists. Shown permanently rather than
           only after an import, since the number falls as capture progresses. */}

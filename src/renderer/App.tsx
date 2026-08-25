@@ -67,6 +67,10 @@ export default function App() {
   const reloadUncaptured = useCallback(async () => {
     setUncaptured(await window.notebook.countChatsWithoutTurns());
     setActivity(await window.notebook.activityStats());
+    // The menu carries counts in its labels now, and this runs after everything
+    // that can change one. Cheap: the template is rebuilt from two index
+    // lookups, and this fires on a finished run rather than on every keystroke.
+    window.notebook.refreshMenu();
   }, []);
 
   const reloadAll = useCallback(() => {
@@ -145,7 +149,13 @@ export default function App() {
           {archive.phase === 'database'
             ? 'Backing up the database…'
             : archive.phase === 'counting'
-              ? 'Counting images…'
+              ? // Two operations report this phase and they count different
+                // things — a backup counting image files, and the inline-image
+                // repair examining stored turns. The totals say which, so the
+                // banner names the work rather than guessing at it.
+                archive.total > 0
+                ? `Examining stored turns — ${archive.done} of ${archive.total}`
+                : 'Counting images…'
               : `Copying images — ${archive.done} of ${archive.total}`}
         </div>
       )}

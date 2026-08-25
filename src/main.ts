@@ -1,8 +1,14 @@
 import { app, BrowserWindow, dialog, Menu } from 'electron';
 import path from 'node:path';
 import contextMenu from 'electron-context-menu';
+import * as db from './main/db';
 import { initDb, seedDevData } from './main/db';
-import { registerIpcHandlers, runArchiveExport, runArchiveImport } from './main/ipc';
+import {
+  registerIpcHandlers,
+  runArchiveExport,
+  runArchiveImport,
+  setMenuRebuilder,
+} from './main/ipc';
 import { startCdpProxy } from './main/cdpProxy';
 import {
   createAiModeView,
@@ -201,59 +207,122 @@ const createWindow = () => {
   // window's own webContents (this app's UI), not a child view — so replace
   // the default menu with one that also exposes DevTools for the AI Mode
   // panel directly. The recon spike depends on this.
-  Menu.setApplicationMenu(
-    Menu.buildFromTemplate([
-      {
-        label: 'Archive',
-        submenu: [
-          {
-            // In the menu rather than the toolbar because it is rare and
-            // deliberate, and because a backup is not part of the day's work —
-            // it is what makes the day's work survivable.
-            label: 'Back up to a folder…',
-            click: () => {
-              // Errors surfaced in a dialog: a menu click has nowhere else to
-              // report to, and a backup that silently did nothing is worse than
-              // one that failed loudly.
-              runArchiveExport().catch((error) =>
-                dialog.showErrorBox('Backup failed', String(error?.message ?? error)),
-              );
+  //
+  // The menu is also where the one-off actions live. The toolbar had grown to
+  // eight of them beside the three that get used every day, and a disclosure
+  // only hid the problem: refreshing the sidebar list, reading an export,
+  // undoing one and the four repair actions are each done once and not thought
+  // about again. A menu is what that is for.
+  //
+  // Each item sends a command NAME to the renderer rather than doing the work
+  // here. The handlers already exist there, they report into the toolbar's own
+  // status line, and several of them open a panel — none of which the main
+  // process can reach. Doing the work here would mean a second implementation
+  // of each, reporting into a dialog.
+  const command = (name: string) => () => mainWindow.webContents.send('menu:command', name);
+
+  // Rebuilt rather than built once, so the counts in the labels are current.
+  // They are the reason those items are findable at all: "Move inline images"
+  // says nothing about whether there is anything to move, and 2245 does.
+  const buildMenu = () => {
+    // Cheap now — both are index lookups. This was a scan of every byte of
+    // stored markup until the has_inline flag replaced it, and putting THAT on
+    // a menu rebuild would have re-created the ten-second freeze somewhere new.
+    const inline = db.countMessagesWithInlineImages();
+    const pending = inline.inline + (inline.unexamined > 0 ? inline.unexamined : 0);
+
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        {
+          label: 'Archive',
+          submenu: [
+            {
+              // In the menu rather than the toolbar because it is rare and
+              // deliberate, and because a backup is not part of the day's work —
+              // it is what makes the day's work survivable.
+              label: 'Back up to a folder…',
+              click: () => {
+                // Errors surfaced in a dialog: a menu click has nowhere else to
+                // report to, and a backup that silently did nothing is worse than
+                // one that failed loudly.
+                runArchiveExport().catch((error) =>
+                  dialog.showErrorBox('Backup failed', String(error?.message ?? error)),
+                );
+              },
             },
-          },
-          {
-            label: 'Restore from a backup…',
-            click: () => {
-              runArchiveImport().catch((error) =>
-                dialog.showErrorBox('Restore failed', String(error?.message ?? error)),
-              );
+            {
+              label: 'Restore from a backup…',
+              click: () => {
+                runArchiveImport().catch((error) =>
+                  dialog.showErrorBox('Restore failed', String(error?.message ?? error)),
+                );
+              },
             },
-          },
-        ],
-      },
-      {
-        label: 'View',
-        submenu: [
-          { role: 'reload' },
-          { role: 'toggleDevTools' },
-          { type: 'separator' },
-          { role: 'resetZoom' },
-          { role: 'zoomIn' },
-          { role: 'zoomOut' },
-          { type: 'separator' },
-          { role: 'togglefullscreen' },
-        ],
-      },
-      {
-        label: 'Debug',
-        submenu: [
-          {
-            label: 'Open AI Mode DevTools',
-            click: () => openAiModeDevTools(),
-          },
-        ],
-      },
-    ]),
-  );
+            { type: 'separator' },
+            { label: 'Read a Takeout export…', click: command('scanTakeout') },
+            {
+              label: 'Undo the Takeout import',
+              click: command('undoImport'),
+            },
+          ],
+        },
+        {
+          label: 'Threads',
+          submenu: [
+            {
+              label: 'Refresh the list from Google',
+              click: command('harvest'),
+            },
+            { type: 'separator' },
+            {
+              label: 'Match entries to threads',
+              click: command('matchEntries'),
+            },
+            {
+              label:
+                pending > 0
+                  ? `Move inline images out of the text (${pending})`
+                  : 'Move inline images out of the text',
+              // Disabled rather than hidden when there is nothing to move: an
+              // item that comes and goes is one you cannot learn the place of.
+              enabled: pending > 0,
+              click: command('moveInlineImages'),
+            },
+            { type: 'separator' },
+            {
+              label: 'Check for identical threads',
+              click: command('checkCopies'),
+            },
+            { label: 'Show link failures', click: command('linkFailures') },
+          ],
+        },
+        {
+          label: 'View',
+          submenu: [
+            { role: 'reload' },
+            { role: 'toggleDevTools' },
+            { type: 'separator' },
+            { role: 'resetZoom' },
+            { role: 'zoomIn' },
+            { role: 'zoomOut' },
+            { type: 'separator' },
+            { role: 'togglefullscreen' },
+          ],
+        },
+        {
+          label: 'Debug',
+          submenu: [
+            {
+              label: 'Open AI Mode DevTools',
+              click: () => openAiModeDevTools(),
+            },
+          ],
+        },
+      ]),
+    );
+  };
+  buildMenu();
+  setMenuRebuilder(buildMenu);
 
   const aiModeView = createAiModeView(mainWindow);
   const sendStatus = (status: AiModeStatus) => {

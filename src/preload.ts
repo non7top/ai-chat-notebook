@@ -19,7 +19,6 @@ const api: NotebookApi = {
     ipcRenderer.on('archive:progress', listener);
     return () => ipcRenderer.removeListener('archive:progress', listener);
   },
-  countInlineImages: () => ipcRenderer.invoke('archive:inlineCount'),
   repairInlineImages: () => ipcRenderer.invoke('archive:repairInlineImages'),
   exportArchive: () => ipcRenderer.invoke('archive:export'),
   importArchive: () => ipcRenderer.invoke('archive:import'),
@@ -38,6 +37,13 @@ const api: NotebookApi = {
     ipcRenderer.on('capture:progress', listener);
     return () => ipcRenderer.removeListener('capture:progress', listener);
   },
+
+  onMenuCommand: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, name: string) => callback(name);
+    ipcRenderer.on('menu:command', listener);
+    return () => ipcRenderer.removeListener('menu:command', listener);
+  },
+  refreshMenu: () => ipcRenderer.invoke('menu:refresh'),
 
   harvestThreadList: () => ipcRenderer.invoke('harvest:threadList'),
   cancelHarvest: () => ipcRenderer.invoke('harvest:cancel'),
