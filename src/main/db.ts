@@ -1196,15 +1196,29 @@ export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetT
 
 export function getChatForCapture(chatId: number): ChatToCapture | null {
   const row = db
-    .prepare(`SELECT id, external_id, ${CHAT_TITLE_SQL} AS title FROM chats WHERE id = ?`)
-    .get(chatId) as unknown as { id: number; external_id: string; title: string } | undefined;
-  return row ? { id: row.id, externalId: row.external_id, title: row.title } : null;
+    .prepare(
+      `SELECT id, external_id, capture_attempts, ${CHAT_TITLE_SQL} AS title
+         FROM chats WHERE id = ?`,
+    )
+    .get(chatId) as unknown as
+    | { id: number; external_id: string; title: string; capture_attempts: number }
+    | undefined;
+  return row
+    ? {
+        id: row.id,
+        externalId: row.external_id,
+        title: row.title,
+        attempts: row.capture_attempts,
+      }
+    : null;
 }
 
 export interface ChatToCapture {
   id: number;
   externalId: string;
   title: string;
+  /** Failures on earlier runs — what tells a transient miss from a doomed one. */
+  attempts: number;
 }
 
 /**
@@ -1218,10 +1232,27 @@ export interface ChatToCapture {
  * only while Google still lists the conversation — so a Takeout-sourced chat
  * stays queued until it has been pulled from the panel.
  */
-export function chatsWithoutTurns(limit: number): ChatToCapture[] {
+/**
+ * How many times a thread is tried before the automatic flows leave it alone.
+ *
+ * capture_attempts was recorded from the start and used only for ORDERING, so
+ * nothing ever gave up. Measured on the real archive: 18 threads sitting at six
+ * and seven attempts each, every one of them failing the same way — "Injected
+ * script timed out after 120000ms" — and every run picking up exactly the same
+ * 18 because there was nothing else to pick. Two minutes per timeout, twice each
+ * counting the retry pass. Once capture became a STEP of a flow meant to be run
+ * repeatedly, that became most of what running it did.
+ *
+ * Four, not one: the retry pass exists because most failures here really are
+ * transient, a page that took longer than usual to settle. Four attempts is
+ * generous about that and still finite.
+ */
+export const MAX_CAPTURE_ATTEMPTS = 4;
+
+export function chatsWithoutTurns(limit: number, includeExhausted = false): ChatToCapture[] {
   const rows = db
     .prepare(
-      `SELECT c.id, c.external_id, ${CHAT_TITLE_SQL} AS title
+      `SELECT c.id, c.external_id, c.capture_attempts, ${CHAT_TITLE_SQL} AS title
        FROM chats c
        WHERE c.merged_into IS NULL
          AND (
@@ -1241,6 +1272,11 @@ export function chatsWithoutTurns(limit: number): ChatToCapture[] {
          -- capture that had real work left to do.
          AND c.external_id NOT LIKE 'takeout:%'
          AND c.external_id NOT LIKE 'entry:%'
+         -- Threads that have been tried and tried. Excluded from the automatic
+         -- flows, NOT from the archive: they are still listed, still say how
+         -- many times they failed, and "Retry the threads that gave up" takes
+         -- them again deliberately.
+         AND (? OR c.capture_attempts < ${MAX_CAPTURE_ATTEMPTS})
        -- Never-attempted conversations first, then by Google's recency order.
        -- Without this, a long unattended run re-tries the same early failures
        -- ahead of hundreds of conversations it has never even looked at, and
@@ -1250,8 +1286,42 @@ export function chatsWithoutTurns(limit: number): ChatToCapture[] {
                 c.list_rank ASC
        LIMIT ?`,
     )
-    .all(limit) as unknown as { id: number; external_id: string; title: string }[];
-  return rows.map((r) => ({ id: r.id, externalId: r.external_id, title: r.title }));
+    .all(includeExhausted ? 1 : 0, limit) as unknown as {
+    id: number;
+    external_id: string;
+    title: string;
+    capture_attempts: number;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    externalId: r.external_id,
+    title: r.title,
+    attempts: r.capture_attempts,
+  }));
+}
+
+/**
+ * Threads the automatic flows have given up on.
+ *
+ * Counted and shown rather than silently dropped. A queue that quietly shrinks
+ * from 18 to 0 with nothing captured is indistinguishable from finishing the
+ * work, and this archive's whole premise is that nothing disappears from view.
+ */
+export function countExhaustedCaptures(): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM chats c
+        WHERE c.merged_into IS NULL
+          AND (
+            NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
+            OR c.source = 'takeout'
+          )
+          AND c.external_id NOT LIKE 'takeout:%'
+          AND c.external_id NOT LIKE 'entry:%'
+          AND c.capture_attempts >= ${MAX_CAPTURE_ATTEMPTS}`,
+    )
+    .get() as unknown as { n: number };
+  return row.n;
 }
 
 /** Counted, so a conversation that keeps failing sinks in the queue. */
@@ -1259,7 +1329,15 @@ export function recordCaptureFailure(chatId: number): void {
   db.prepare('UPDATE chats SET capture_attempts = capture_attempts + 1 WHERE id = ?').run(chatId);
 }
 
-export function countChatsWithoutTurns(): number {
+/**
+ * How many threads a capture would actually attempt.
+ *
+ * Mirrors chatsWithoutTurns exactly, exhaustion clause included. It labels the
+ * button that starts the run, and a count that offers 18 to a run that will take
+ * none of them is the same class of lie as a tree count that disagrees with its
+ * own list.
+ */
+export function countChatsWithoutTurns(includeExhausted = false): number {
   const row = db
     .prepare(
       `SELECT COUNT(*) AS n FROM chats c
@@ -1269,9 +1347,10 @@ export function countChatsWithoutTurns(): number {
            OR c.source = 'takeout'
          )
          AND c.external_id NOT LIKE 'takeout:%'
-         AND c.external_id NOT LIKE 'entry:%'`,
+         AND c.external_id NOT LIKE 'entry:%'
+         AND (? OR c.capture_attempts < ${MAX_CAPTURE_ATTEMPTS})`,
     )
-    .get() as unknown as { n: number };
+    .get(includeExhausted ? 1 : 0) as unknown as { n: number };
   return row.n;
 }
 

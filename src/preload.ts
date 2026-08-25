@@ -28,7 +28,9 @@ const api: NotebookApi = {
   activityStats: () => ipcRenderer.invoke('takeout:stats'),
   getAssetsBaseUrl: () => ipcRenderer.invoke('assets:baseUrl'),
   openExternal: (url) => ipcRenderer.invoke('shell:open', url),
-  captureTurns: (limit) => ipcRenderer.invoke('capture:turns', limit),
+  captureTurns: (limit, includeExhausted) =>
+    ipcRenderer.invoke('capture:turns', limit, includeExhausted),
+  countExhaustedCaptures: () => ipcRenderer.invoke('capture:exhausted'),
   cancelCapture: () => ipcRenderer.invoke('capture:cancel'),
   recaptureChat: (chatId) => ipcRenderer.invoke('capture:recapture', chatId),
   countChatsWithoutTurns: () => ipcRenderer.invoke('capture:remaining'),

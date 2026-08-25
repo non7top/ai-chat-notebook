@@ -191,10 +191,13 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('takeout:rematch', () => rematchActivity());
   ipcMain.handle('takeout:stats', () => db.activityStats());
 
-  ipcMain.handle('capture:turns', (_event, limit: number) => captureTurns(limit));
+  ipcMain.handle('capture:turns', (_event, limit: number, includeExhausted?: boolean) =>
+    captureTurns(limit, includeExhausted ?? false),
+  );
   ipcMain.handle('capture:cancel', () => cancelCapture());
   ipcMain.handle('capture:recapture', (_event, chatId: number) => recaptureChat(chatId));
   ipcMain.handle('capture:remaining', () => db.countChatsWithoutTurns());
+  ipcMain.handle('capture:exhausted', () => db.countExhaustedCaptures());
   // The route to everything Google has rotated out of the sidebar. Drives the
   // live panel one page load at a time, and every page is checked against the
   // export's own reading before anything is stored.

@@ -205,6 +205,8 @@ export interface CaptureProgress {
   errors: number;
   /** Threads Google no longer lists — not failures, and not retryable. */
   unlisted?: number;
+  /** Threads the run left alone, having failed too many times already. */
+  exhausted?: number;
   current?: string;
   stoppedEarly?: string;
   turns?: number;
@@ -237,6 +239,12 @@ export interface CaptureSummary {
   images: number;
   errors: number;
   remaining: number;
+  /**
+   * Threads the run deliberately left alone because they have failed too many
+   * times already. Reported, not silent: a queue that shrinks to nothing with
+   * nothing captured looks exactly like finishing the work.
+   */
+  exhausted?: number;
   cancelled: boolean;
   /** Kept rather than only counted — a bare error count is unactionable. */
   failures: { title: string; reason: string }[];
@@ -487,7 +495,14 @@ export interface NotebookApi {
   openExternal(url: string): Promise<void>;
   /** file:// base for resolving the relative asset paths in stored HTML. */
   getAssetsBaseUrl(): Promise<string>;
-  captureTurns(limit: number): Promise<CaptureSummary>;
+  /**
+   * Reads turns for threads that have none. `includeExhausted` takes the ones
+   * the automatic flows have given up on — measured at two minutes each to fail,
+   * so only ever a deliberate act.
+   */
+  captureTurns(limit: number, includeExhausted?: boolean): Promise<CaptureSummary>;
+  /** Threads that have failed enough times to be left out of the flows. */
+  countExhaustedCaptures(): Promise<number>;
   cancelCapture(): Promise<void>;
   /** Re-reads one conversation, discarding what was stored for it. */
   recaptureChat(chatId: number): Promise<{ turns: number; images: number }>;

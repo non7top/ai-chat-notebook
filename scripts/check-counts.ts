@@ -169,5 +169,29 @@ try {
 if (!rejected) throw new Error('a colour outside the palette was stored');
 console.log('  a colour outside the palette is refused');
 
+// The capture queue gives up. It never did: capture_attempts was recorded from
+// the first release and used only for ordering, so 18 threads sat at six and
+// seven attempts each, every one failing the same way, and every run took the
+// same 18 because there was nothing else to take. Two minutes per timeout.
+//
+// Checked here because the failure is invisible from the outside — a run that
+// grinds through doomed threads looks exactly like a run doing work.
+const stuck = db.listChats({ kind: 'all' }).find((c) => c.messageCount === 0);
+if (!stuck) throw new Error('no empty thread to exhaust');
+for (let i = 0; i < db.MAX_CAPTURE_ATTEMPTS; i += 1) db.recordCaptureFailure(stuck.id);
+const queued = db.chatsWithoutTurns(100).map((c) => c.id);
+console.log(`  after ${db.MAX_CAPTURE_ATTEMPTS} failures: queued=${queued.includes(stuck.id)}`);
+if (queued.includes(stuck.id)) throw new Error('an exhausted thread is still queued');
+if (db.countExhaustedCaptures() < 1) throw new Error('the exhausted thread is not counted');
+// The label on the button and the queue the run takes must be the same set —
+// offering 18 to a run that will take none of them is the same class of lie as
+// a tree count that disagrees with its own list.
+agree('capture queue', db.countChatsWithoutTurns(), db.chatsWithoutTurns(100000).length);
+// And the deliberate way back to them.
+if (!db.chatsWithoutTurns(100, true).some((c) => c.id === stuck.id)) {
+  throw new Error('an exhausted thread cannot be retried on purpose');
+}
+console.log('  it comes back when asked for deliberately');
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('OK');

@@ -1021,6 +1021,11 @@ export interface CaptureSummary {
   images: number;
   errors: number;
   remaining: number;
+  /**
+   * Threads deliberately left alone, having failed too many times already. See
+   * MAX_CAPTURE_ATTEMPTS — reported rather than silently dropped.
+   */
+  exhausted?: number;
   cancelled: boolean;
   failures: { title: string; reason: string }[];
   stoppedEarly?: string;
@@ -1034,7 +1039,15 @@ export interface CaptureSummary {
  * so this is seconds per conversation, not milliseconds. A bounded, resumable
  * run beats one that has to be left alone for an hour.
  */
-export async function captureTurns(limit: number): Promise<CaptureSummary> {
+export async function captureTurns(
+  limit: number,
+  /**
+   * Take the threads the automatic flows have given up on. Only ever set by the
+   * menu item that exists to do exactly that — a deliberate act, because these
+   * are threads with a measured history of costing two minutes each to fail.
+   */
+  includeExhausted = false,
+): Promise<CaptureSummary> {
   const captureStartedAt = new Date().toISOString();
   if (capturing) throw new Error('A capture is already running');
   capturing = true;
@@ -1058,7 +1071,11 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
     // Re-reading it in a loop would retry the same failure forever in an
     // unattended run; a fresh run picks failures up again, ordered behind
     // anything never tried.
-    const queue = db.chatsWithoutTurns(limit);
+    const queue = db.chatsWithoutTurns(limit, includeExhausted);
+    // Said out loud rather than silently skipped. A queue that quietly shrinks
+    // from 18 to 0 with nothing captured looks exactly like finishing the work.
+    const exhausted = includeExhausted ? 0 : db.countExhaustedCaptures();
+    summary.exhausted = exhausted;
     let consecutiveFailures = 0;
     // Conversations that failed this pass, retried once at the end. Most
     // failures here are transient — a page that took longer than 60s to settle
@@ -1112,7 +1129,12 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
         }
 
         consecutiveFailures += 1;
-        if (!isRetry) retryable.push(chat);
+        // Retried only if this thread has not already failed several times on
+        // earlier runs. The retry pass is for a page that took longer than usual
+        // to settle; a thread on its seventh attempt is not being unlucky, and
+        // retrying it inside the run is what turned 18 doomed threads into 26
+        // attempts and the better part of an hour.
+        if (!isRetry && chat.attempts < 2) retryable.push(chat);
         if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
           summary.stoppedEarly =
             `Stopped after ${consecutiveFailures} consecutive failures — ` +
@@ -1151,6 +1173,7 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
       total: summary.attempted,
       errors: summary.errors,
       unlisted: summary.unlisted,
+      exhausted: summary.exhausted,
       turns: summary.turns,
       images: summary.images,
       remaining: summary.remaining,

@@ -386,14 +386,14 @@ export default function HarvestBar({
     }
   };
 
-  const startCapture = async (limit: number) => {
+  const startCapture = async (limit: number, includeExhausted = false) => {
     setCapturing(true);
     setCapture(null);
     // Capture drives the real sidebar, so the panel has to be on screen for the
     // same reason harvesting does.
     onNeedPanel();
     try {
-      await window.notebook.captureTurns(limit);
+      await window.notebook.captureTurns(limit, includeExhausted);
     } catch (err) {
       setCapture({
         phase: 'error',
@@ -444,6 +444,7 @@ export default function HarvestBar({
     commands.current = {
       harvest: start,
       capture: () => startCapture(CAPTURE_ALL_LIMIT),
+      retryStuck: () => startCapture(CAPTURE_ALL_LIMIT, true),
       fetchLinks,
       scanTakeout,
       applyTakeout,
@@ -626,6 +627,11 @@ export default function HarvestBar({
                   // that can never work.
                   capture.unlisted ? ` · ${capture.unlisted} no longer listed` : ''
                 }${capture.errors ? ` · ${capture.errors} failed` : ''}${
+                  // Named rather than left as a silently smaller queue. These
+                  // are threads the run chose not to attempt, which is a
+                  // different thing from threads it finished.
+                  capture.exhausted ? ` · ${capture.exhausted} given up on` : ''
+                }${
                   capture.remaining ? ` · ${capture.remaining} left` : ''
                 }${capture.stoppedEarly ? ` — ${capture.stoppedEarly}` : ''}`}
         </span>

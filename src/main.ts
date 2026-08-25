@@ -230,6 +230,7 @@ const createWindow = () => {
     // a menu rebuild would have re-created the ten-second freeze somewhere new.
     const inline = db.countMessagesWithInlineImages();
     const pending = inline.inline + (inline.unexamined > 0 ? inline.unexamined : 0);
+    const stuck = db.countExhaustedCaptures();
 
     Menu.setApplicationMenu(
       Menu.buildFromTemplate([
@@ -280,6 +281,18 @@ const createWindow = () => {
             {
               label: 'Read threads from the panel',
               click: command('capture'),
+            },
+            {
+              // The way back to the threads the flows have stopped taking. A
+              // deliberate act on purpose: measured on the real archive, these
+              // cost two minutes each to fail, so having them back in an
+              // automatic run is exactly what this stopped.
+              label:
+                stuck > 0
+                  ? `Retry the threads that gave up (${stuck})`
+                  : 'Retry the threads that gave up',
+              enabled: stuck > 0,
+              click: command('retryStuck'),
             },
             {
               label: "Open the export's links",
