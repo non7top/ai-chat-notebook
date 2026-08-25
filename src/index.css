@@ -506,11 +506,29 @@ button:disabled {
   /* Rows off screen are not laid out or painted. The list runs to 2848 rows, each
      with a thumbnail and several spans, and switching folders re-rendered every
      one of them — five seconds of locked window for a pane showing about
-     fifteen. contain-intrinsic-size gives the browser a height to reserve so the
-     scrollbar stays honest while the content is skipped; without it the bar
-     jumps as rows are realised. */
+     fifteen.
+
+     contain-intrinsic-size is the height the browser reserves for a row it has
+     skipped, and it MUST match what the row really is. It did not: .chat-meta
+     was a block with no wrapping rule and nine spans in it — id, date, folder,
+     turns, sources, entries, differs, images, previews — which in a pane a third
+     of the window wide wrapped to two lines and sometimes three. So the
+     estimate was short on an unknown fraction of 2848 rows, the document's
+     scroll height was wrong by a large and varying amount, and dragging the
+     scrollbar meant dragging against a total that kept being corrected under
+     the cursor as rows were realised. That is the thumb lagging behind the
+     mouse.
+
+     Fixed by making the row height DETERMINISTIC below rather than by nudging
+     this number, so the reservation cannot drift out of step with reality
+     again. */
   content-visibility: auto;
-  contain-intrinsic-size: auto 3.4rem;
+  /* The HEIGHT longhand, not contain-intrinsic-size. A single-value shorthand
+     sets both axes, so it would also declare an intrinsic WIDTH of 3.4rem for
+     every skipped row — which is not a claim anyone wants to make about a row
+     that fills its pane. Only the block direction needs reserving here; the
+     inline size comes from the container either way. */
+  contain-intrinsic-height: 3.4rem;
 }
 
 /* An export entry is the baseline and deliberately carries no colour at all:
@@ -547,6 +565,14 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  /* Exactly the height reserved for a skipped row, and fixed rather than
+     derived from the content. Derived is what broke: every span added to the
+     meta line was another chance for a row to grow past the reservation, and
+     the last one added — the folder chip — did exactly that. A fixed height
+     means the next one cannot. */
+  height: 3.4rem;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .chat-text {
@@ -577,11 +603,18 @@ button:disabled {
   font-style: italic;
 }
 
+/* One line, always. Nine spans in a narrow pane wrapped to two and three, and
+   the row grew past the height reserved for it — see .chat-row. The tail is cut
+   rather than dropped: the counts each carry a title attribute, and the reader
+   shows all of it for the thread that is open. */
 .chat-meta {
   display: block;
   font-size: 0.72rem;
   color: var(--muted);
   margin-top: 0.15rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ----------------------------------------------------------------- reader */
