@@ -1389,13 +1389,6 @@ export async function captureTurns(
         // The reason is kept, not just counted: "7 errors" is unactionable,
         // whereas knowing they were all load timeouts points straight at the
         // fix.
-        summary.errors += 1;
-        db.recordCaptureFailure(chat.id);
-        summary.failures.push({
-          title: chat.title.slice(0, 60),
-          reason: error instanceof Error ? error.message : String(error),
-        });
-
         // A thread Google no longer lists is a permanent fact about that thread,
         // not evidence that anything is broken — so it must not count toward the
         // systemic-failure abort and must not be retried. These arrive in runs,
@@ -1403,6 +1396,13 @@ export async function captureTurns(
         // exactly the ones rotated out, so ten in a row is the NORMAL shape of
         // reaching the end of what the sidebar still holds. Counting them
         // stopped a run with 123 threads left, most of which were capturable.
+        //
+        // Checked FIRST, and that is the fix. The error tally and the failure
+        // list were both filled in before this branch, so an unlisted thread was
+        // counted twice — a real run reported "unlisted=16 errors=18" when there
+        // were exactly two errors, and listed all sixteen among the failures.
+        // "Counted apart from errors" was the stated intention and the code did
+        // the opposite.
         if (error instanceof ThreadNotListedError) {
           summary.unlisted += 1;
           // Taken out of the queue now rather than after three more walks of the
@@ -1412,6 +1412,18 @@ export async function captureTurns(
           await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS));
           continue;
         }
+
+        // One unreadable conversation must not abort the run — with hundreds
+        // queued, stopping on the first oddity would make the feature useless.
+        // The reason is kept, not just counted: "7 errors" is unactionable,
+        // whereas knowing they were all load timeouts points straight at the
+        // fix.
+        summary.errors += 1;
+        db.recordCaptureFailure(chat.id);
+        summary.failures.push({
+          title: chat.title.slice(0, 60),
+          reason: error instanceof Error ? error.message : String(error),
+        });
 
         consecutiveFailures += 1;
         // Retried only if this thread has not already failed several times on
