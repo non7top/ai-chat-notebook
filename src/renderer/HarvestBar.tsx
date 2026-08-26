@@ -674,10 +674,15 @@ export default function HarvestBar({
                 // captured alone read "3/21" for minutes on a run that was
                 // working through all 21 and failing them — which looks exactly
                 // like a loop, and was reported as one.
+                // One line, each number once. Attempts first because that is
+                // the figure that always moves; everything else appears only
+                // when it is non-zero, so a clean run stays short.
                 `${capture.attempted ?? capture.done}/${capture.total}` +
                 (capture.attempted && capture.attempted !== capture.done
                   ? ` · ${capture.done} ok`
                   : '') +
+                (capture.rejected ? ` · ${capture.rejected} no match` : '') +
+                (capture.notReady ? ` · ${capture.notReady} slow` : '') +
                 (capture.errors ? ` · ${capture.errors} failed` : '') +
                 (capture.unlisted ? ` · ${capture.unlisted} gone` : '') +
                 ` · ${capture.current ?? ''}`

@@ -873,15 +873,19 @@ export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
       broadcastCapture({
         phase: 'capturing',
         done: summary.fetched,
+        // The tallies travel as FIELDS, not as text inside `current`.
+        //
+        // They used to be formatted into current, which was the only way to get
+        // them on screen — and then the shared progress line grew counters of its
+        // own, so the strip read "3/35 · 2 failed · #6 of 35 · 3 ok · 0 no match ·
+        // 2 slow · 2 errors". The same run, reported twice, in two vocabularies.
+        // A field can be rendered once; a sentence cannot be un-formatted.
+        attempted: summary.attempted,
         total: queue.length,
         errors: summary.errors,
-        // The tallies travel with the progress, so a run that has stopped
-        // advancing shows WHAT it was doing rather than only a number that no
-        // longer moves.
-        current:
-          `#${summary.attempted} of ${queue.length} · ${summary.fetched} ok · ` +
-          `${summary.rejected} no match · ${summary.notReady} slow · ` +
-          `${summary.errors} errors · ${item.title.slice(0, 40)}`,
+        rejected: summary.rejected,
+        notReady: summary.notReady,
+        current: item.title.slice(0, 44),
       });
       try {
         // A hard ceiling per thread, whatever the cause. The image fetch is

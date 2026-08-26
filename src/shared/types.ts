@@ -214,6 +214,13 @@ export interface CaptureProgress {
   unlisted?: number;
   /** Threads the run left alone, having failed too many times already. */
   exhausted?: number;
+  /**
+   * Link-run outcomes, carried as fields so the strip renders each number once.
+   * They were formatted into `current` before, which meant the shared progress
+   * line and the link run each printed their own tally of the same run.
+   */
+  rejected?: number;
+  notReady?: number;
   current?: string;
   stoppedEarly?: string;
   turns?: number;
