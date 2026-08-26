@@ -881,7 +881,13 @@ export async function syncArchive(mode: SyncMode): Promise<SyncSummary> {
 
     if (!syncCancelled) {
       step(steps[1]);
-      const captured = await captureTurns(NO_LIMIT);
+      // 'all' takes the threads that have been given up on too, and that is what
+      // the button means. The attempt cap exists to stop the REPEATED path
+      // grinding on the same doomed threads every time it runs — it was never
+      // meant to put them out of reach, and it did: with the queue empty and 18
+      // threads held back, "capture everything" attempted nothing at all while
+      // Re-capture on any one of them worked first time.
+      const captured = await captureTurns(NO_LIMIT, mode === 'all');
       summary.captured = captured.captured;
       summary.errors += captured.errors;
     }

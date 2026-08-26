@@ -86,6 +86,9 @@ export default function HarvestBar({
   // Only set while a run is in progress; the prop is the truth otherwise.
   const [remainingOverride, setRemainingOverride] = useState<number | null>(null);
   const [linksToFetch, setLinksToFetch] = useState(0);
+  // Threads the repeated path has stopped taking. Counted into "Catch up"
+  // because that button means everything outstanding, and they are outstanding.
+  const [stuck, setStuck] = useState(0);
   const [sync, setSync] = useState<SyncProgress | null>(null);
   // Which flow is going, or null. Kept apart from `sync` because the button has
   // to say "Getting new…" the instant it is pressed, before the first progress
@@ -117,6 +120,7 @@ export default function HarvestBar({
   // biome-ignore lint/correctness/useExhaustiveDependencies: triggers, not inputs — they mark when the count can have changed
   useEffect(() => {
     window.notebook.countLinksToFetch().then(setLinksToFetch);
+    window.notebook.countExhaustedCaptures().then(setStuck);
     window.notebook.lastJobs().then((jobs) => setLastJob(jobs[0] ?? null));
   }, [uncaptured, activity]);
 
@@ -345,14 +349,20 @@ export default function HarvestBar({
   };
 
   /**
-   * How much is left for "Catch up" to do. Uncaptured threads plus threads whose
-   * export link has not been opened — the two backlogs the flow works through.
+   * How much is left for "Catch up" to do: threads with no turns, threads the
+   * repeated path has given up on, and threads whose export link has not been
+   * opened. All three are outstanding, so all three are counted.
+   *
+   * The given-up ones belong here specifically because leaving them out is what
+   * made the button appear broken — it read "Catch up (2)" while eighteen
+   * capturable threads sat behind a cap meant only to keep the REPEATED path
+   * from grinding on them.
    *
    * A label, not a bound: the main process takes whatever is actually
    * outstanding. A stale number used as a limit is how "Capture all (296)"
    * would have left seven behind.
    */
-  const outstanding = remaining + linksToFetch;
+  const outstanding = remaining + stuck + linksToFetch;
 
   // Anything at all going on. The flows drive the same panel every other
   // operation does, so starting one on top of another means two runs clicking
