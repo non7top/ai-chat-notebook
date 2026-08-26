@@ -50,6 +50,47 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* The anchor for .panel-tab, which sits on this pane's right edge. */
+  position: relative;
+}
+
+/* The pull-tab for the live panel, attached to the right edge of the app's own
+   pane — which is the boundary the native panel appears from.
+
+   Half-rounded on the left and flush on the right, so it reads as attached to
+   the edge rather than floating near it. Tall and narrow: it costs 14px of a
+   boundary that already exists, where the labelled button it replaces cost a
+   whole row of a scrolling strip. */
+.panel-tab {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 5;
+  width: 14px;
+  height: 52px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-right: none;
+  border-radius: 6px 0 0 6px;
+  background: linear-gradient(to left, #ffffff, #ececec);
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1;
+  cursor: pointer;
+  /* A 14px target is small, so it earns its visibility on hover rather than by
+     being big. */
+  transition: background 0.12s, color 0.12s;
+}
+
+.panel-tab:hover {
+  background: linear-gradient(to left, #ffffff, #dbeafe);
+  color: #1d4ed8;
+}
+
+.panel-tab:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: -2px;
 }
 
 /* There is no horizontal toolbar any more. A row of chrome across the top of a
@@ -165,12 +206,20 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
-  /* A long status line wraps here rather than being cut, because down is the
-     direction this strip has to spare. Capped so a run's summary cannot push
-     the buttons off the bottom. */
-  max-height: 45%;
+  /* Bounded and scrollable — but the panel toggle is no longer inside it (see
+     .side-pin). That combination is what hid the button: the toggle was the
+     last child, the strip scrolled, and showing the panel starts a run whose
+     status lines fill the space above it.
+
+     Run controls come first in the strip, so what scrolls out of reach under
+     pressure is the tail of a status message rather than a button. */
+  max-height: 60%;
   overflow-y: auto;
 }
+
+/* The panel toggle is a tab on the pane boundary — see .panel-tab. It is not in
+   any pane's flow, so nothing can push it out of reach: a labelled button at the
+   foot of the scrolling control strip could be, and was. */
 
 .pane-list {
   width: 260px;
@@ -804,18 +853,22 @@ button:disabled {
   font-size: 0.72rem;
 }
 
-.harvest-bar button,
-.side-actions > button {
+.harvest-bar button {
   width: 100%;
   text-align: center;
 }
 
 /* Wraps instead of ellipsising: a run's summary is several facts joined by
    dots, and cutting it at 220px would leave only the first. Vertical is the
-   direction this strip has. */
+   direction this strip has.
+
+   Bounded, so a long summary cannot swallow the strip. The panel toggle is
+   outside it entirely (.side-pin) — measured at window heights down to 200px,
+   the toggle and Stop both stay visible. */
 .side-actions .harvest-status {
   white-space: normal;
-  overflow: visible;
+  overflow-y: auto;
+  max-height: 3.5rem;
   line-height: 1.3;
 }
 

@@ -113,6 +113,27 @@ export default function App() {
 
   return (
     <div className="workspace">
+      {/* A tab on the pane's right edge, which is the boundary with the live
+          panel — the panel is a native view painted alongside this one, so that
+          edge is literally where it appears from.
+
+          It was a labelled button in the left strip before, and the strip
+          scrolls: showing the panel starts a run, the run's status filled the
+          space, and the one control that puts the panel away went behind its own
+          fold. A tab on the boundary cannot be pushed anywhere by anything —
+          it is not in the flow at all.
+
+          The chevron points the way the app pane will move: left when opening
+          the panel (this pane gives up room), right when closing it. */}
+      <button
+        type="button"
+        className="panel-tab"
+        onClick={() => setPanelVisible((v) => !v)}
+        aria-label={panelVisible ? 'Hide the live AI Mode panel' : 'Show the live AI Mode panel'}
+        title={panelVisible ? 'Hide the live AI Mode panel' : 'Show the live AI Mode panel'}
+      >
+        {panelVisible ? '›' : '‹'}
+      </button>
       {archive && (
         <div className="banner">
           {archive.phase === 'database'
@@ -197,16 +218,6 @@ export default function App() {
           activity={activity}
         />
 
-          {/* Last in the strip, and separated: showing the panel is not part of
-              running anything — it is what you do to watch a run happen. */}
-          <button
-            type="button"
-            className="panel-toggle"
-            onClick={() => setPanelVisible((v) => !v)}
-            title={panelVisible ? 'Hide the live AI Mode panel' : 'Show the live AI Mode panel'}
-          >
-            {panelVisible ? 'Hide panel' : 'Show panel'}
-          </button>
           </div>
         </div>
         {/* Orphan entries are not conversations, so they get the list and
