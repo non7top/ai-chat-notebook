@@ -697,6 +697,14 @@ button:disabled {
   text-overflow: ellipsis;
 }
 
+/* Reads this thread and every candidate the fingerprint matched. Sits with the
+   entry list rather than in the header: it acts on what that disclosure is
+   about, and the header is for the thread itself. */
+.capture-similar {
+  margin: 0.2rem 0 0.3rem;
+  font-size: 0.75rem;
+}
+
 /* ----------------------------------------------------------------- reader */
 
 .reader {

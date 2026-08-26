@@ -462,6 +462,18 @@ const OPEN_SIDEBAR_SCRIPT = `
  * The list stays in the DOM with the sidebar closed, so presence proves
  * nothing — every read has to happen against a visible container or it silently
  * scrapes a stale copy.
+ *
+ * MEASURED 2026-08-26, and it changes what this function can promise: the
+ * scroller's `display` stayed `flex` across a close AND a reopen. It is never
+ * 'none' in practice, so `alreadyOpen` is effectively always true and the toggle
+ * is effectively never clicked. Worse, the list can sit in a stub state —
+ * observed holding 10 rows of 300, laid out, with scrollHeight already sized for
+ * all 300 — and no amount of scrolling adds to it. A harvest against that reads
+ * ten threads and calls it the history.
+ *
+ * So "open" is not a thing this can test for. What CAN be tested is whether the
+ * list is LIVE: whether scrolling it produces rows. See recycleHistorySidebar
+ * and the growth check in harvestThreadList.
  */
 export async function ensureHistorySidebarOpen(): Promise<boolean> {
   const result = await run<{ alreadyOpen: boolean }>(OPEN_SIDEBAR_SCRIPT);
@@ -470,6 +482,46 @@ export async function ensureHistorySidebarOpen(): Promise<boolean> {
     await new Promise((resolve) => setTimeout(resolve, 1200));
   }
   return result.alreadyOpen;
+}
+
+/**
+ * Clicks the history toggle twice, closing and reopening the list.
+ *
+ * The remedy for the stub state described above, and it is the user's own
+ * suggestion — tested live: a list frozen at 10 rows, which four different ways
+ * of scrolling could not grow, began yielding 10 rows per step after this. The
+ * toggle's own effect on `display` is nil, so this is not "make it visible"; it
+ * is "make Google build the list again".
+ *
+ * Deliberately clicks even when everything looks fine. Looking fine is exactly
+ * what the broken state does, and two clicks cost a second and a half against a
+ * harvest that takes minutes.
+ */
+const RECYCLE_SIDEBAR_SCRIPT = `
+(async () => {
+  try {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const toggle = document.querySelector(${JSON.stringify(HISTORY_TOGGLE_SELECTOR)});
+    if (!toggle) return { ok: false, error: 'History toggle button not found' };
+    toggle.click();
+    await wait(900);
+    toggle.click();
+    await wait(1800);
+    const scroller = document.querySelector(${JSON.stringify(THREAD_LIST_SCROLLER)});
+    if (!scroller) return { ok: false, error: 'Thread list scroller gone after recycling' };
+    return {
+      ok: true,
+      rows: document.querySelectorAll(${JSON.stringify(THREAD_BUTTON_SELECTOR)}).length,
+      scrollHeight: scroller.scrollHeight,
+    };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+})();
+`;
+
+export async function recycleHistorySidebar(): Promise<{ rows: number; scrollHeight: number }> {
+  return run<{ rows: number; scrollHeight: number }>(RECYCLE_SIDEBAR_SCRIPT, 20_000);
 }
 
 const GEOMETRY_SCRIPT = `

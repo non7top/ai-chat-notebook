@@ -256,6 +256,42 @@ export default function ChatReader({ chat, onChange }: Props) {
           )}
         </button>
 
+        {/* This thread and everything the archive thinks is the same
+            conversation, read from the panel in one go.
+
+            The list comes from here rather than from a query in the main
+            process, deliberately: these are CANDIDATES, judged by fingerprint
+            and shown for exactly that reason — nothing is grouped
+            automatically. Reading them is safe where merging them would not be,
+            so the action that needs no judgement is the one offered in bulk.
+
+            Re-capture on a single thread has always worked while the bulk paths
+            attempted nothing, because the fault was never the capture, it was
+            which threads the queue would hand over. This hands over a list. */}
+        {candidates.length > 0 && (
+          <button
+            type="button"
+            className="capture-similar"
+            disabled={fetching}
+            title="Reads this thread and every similar one from the live panel, one after another. Stop works at any point."
+            onClick={async () => {
+              setFetching(true);
+              try {
+                const ids = [chat.id, ...candidates.map((c) => c.id)];
+                await window.notebook.recaptureMany(ids);
+                loadSources();
+                onChange();
+              } finally {
+                setFetching(false);
+              }
+            }}
+          >
+            {fetching
+              ? 'Fetching…'
+              : `Fetch this and ${candidates.length} similar`}
+          </button>
+        )}
+
         {showEntries && (
           <div className="sources-body">
             {entries.length === 0 && (

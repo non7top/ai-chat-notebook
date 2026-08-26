@@ -506,6 +506,11 @@ export interface NotebookApi {
   cancelCapture(): Promise<void>;
   /** Re-reads one conversation, discarding what was stored for it. */
   recaptureChat(chatId: number): Promise<{ turns: number; images: number }>;
+  /**
+   * Re-captures a named list of threads in order. Reports on the ordinary
+   * capture channel, so the control strip shows it and Stop works.
+   */
+  recaptureMany(chatIds: number[]): Promise<CaptureSummary>;
   onCaptureProgress(callback: (progress: CaptureProgress) => void): () => void;
   countChatsWithoutTurns(): Promise<number>;
 

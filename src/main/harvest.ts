@@ -6,6 +6,7 @@ import { assetHref, storeImage } from './assets';
 import { rewriteImageSources } from '../shared/rewriteImages.ts';
 import {
   ensureHistorySidebarOpen,
+  recycleHistorySidebar,
   getListGeometry,
   readRenderedThreads,
   scrollListBy,
@@ -25,6 +26,25 @@ import type { CaptureProgress, HarvestProgress, SyncProgress } from '../shared/t
 // finished, which for ~300 threads is half a minute of apparent hang.
 const SETTLE_MS = 700;
 const STEP_FRACTION = 0.8;
+/**
+ * The furthest one step may jump, whatever the panel's height.
+ *
+ * This is the fix for a harvest that reported "150 / ~301 threads · INCOMPLETE".
+ * Measured live, walking the real sidebar step by step: the scroll never stalls,
+ * but Google renders about TEN ROWS per step regardless of how far the step
+ * went. Rows obtained is therefore ~10 x steps taken, and steps taken is
+ * scrollHeight / step — so a bigger step means FEWER rows, not the same rows
+ * sooner.
+ *
+ *   panel 459px -> step 367px -> 33 steps -> ~330 rows -> complete
+ *   panel 1000px -> step 800px -> 15 steps -> ~150 rows -> exactly the shortfall
+ *
+ * The old step was 0.8 x clientHeight with no ceiling, so how much of the
+ * history a harvest found depended on how tall the window happened to be. 320px
+ * is comfortably inside the ~400px Google renders per step, with margin for a
+ * chunk that turns out smaller.
+ */
+const STEP_MAX_PX = 320;
 const MAX_STEPS = 200;
 // The end condition is deliberately not "no new ids": a virtualised list
 // produces nothing new for several steps in the middle of a run whenever the
@@ -104,6 +124,16 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }
     await ensureHistorySidebarOpen();
+    // Closed and reopened before reading, because "open" cannot be tested for:
+    // the scroller's display stays 'flex' either way, so ensureHistorySidebarOpen
+    // reports alreadyOpen every time and never clicks anything. Measured live, a
+    // list can sit at 10 rows of 300 — laid out, scrollHeight already sized for
+    // all 300 — and no way of scrolling grows it. Two clicks on the history
+    // toggle made the same list start yielding rows again.
+    //
+    // Done unconditionally: looking fine is precisely what the broken state
+    // does, and a second and a half is nothing against a walk of minutes.
+    await recycleHistorySidebar();
     await scrollListToTop();
 
     const geometry = await getListGeometry();
@@ -154,7 +184,10 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
       if (cancelRequested) break;
 
       const before = seen.size;
-      const scrolled = await scrollListBy(geometry.clientHeight * STEP_FRACTION);
+      // Capped, so the walk cannot outrun the rendering. See STEP_MAX_PX.
+      const scrolled = await scrollListBy(
+        Math.min(geometry.clientHeight * STEP_FRACTION, STEP_MAX_PX),
+      );
       await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
       absorb(await readRenderedThreads());
 
@@ -180,6 +213,12 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
         stagnantAtBottom = 0;
       }
     }
+
+    // One last read. Rendering lags the scroll by a step — measured: eleven steps
+    // passed before the first new rows appeared — so the final step's rows are
+    // still arriving when the loop's own read happens.
+    await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+    absorb(await readRenderedThreads());
 
     // Compared against the pre-measured expectation rather than just reported.
     // A virtualised list that yields 40 of 300 looks exactly like a finished one
@@ -412,6 +451,95 @@ export async function recaptureChat(chatId: number): Promise<{ turns: number; im
   // to take their place.
   const result = await captureOneChat(chat);
   return { turns: result.turns, images: result.images };
+}
+
+/**
+ * Re-captures a named list of threads, one after another.
+ *
+ * Exists because re-capture worked on any thread picked by hand while the bulk
+ * paths attempted nothing — and the reason was always the QUEUE, never the
+ * capture. This takes ids straight from the caller, so nothing decides on its
+ * own what is worth reading: the reader offers a thread and everything it thinks
+ * is similar, and the answer to "fetch these" is these.
+ *
+ * Reports on the same channel as every other capture, so the control strip shows
+ * it and Stop works, rather than a second progress mechanism nobody watches.
+ */
+export async function recaptureMany(chatIds: number[]): Promise<CaptureSummary> {
+  const startedAt = new Date().toISOString();
+  if (capturing) throw new Error('A capture is already running');
+  capturing = true;
+  captureCancelled = false;
+  const summary: CaptureSummary = {
+    attempted: 0,
+    captured: 0,
+    unlisted: 0,
+    turns: 0,
+    images: 0,
+    errors: 0,
+    remaining: 0,
+    cancelled: false,
+    failures: [],
+  };
+  try {
+    await ensureOnAiMode();
+    for (const id of chatIds) {
+      if (captureCancelled) break;
+      const chat = db.getChatForCapture(id);
+      // A thread that has gone — merged away, deleted — is skipped rather than
+      // counted as a failure. The caller's list can be a moment out of date.
+      if (!chat) continue;
+      summary.attempted += 1;
+      broadcastCapture({
+        phase: 'capturing',
+        done: summary.captured,
+        total: chatIds.length,
+        errors: summary.errors,
+        unlisted: summary.unlisted,
+        current: chat.title.slice(0, 60),
+      });
+      try {
+        const result = await captureOneChat(chat);
+        summary.captured += 1;
+        summary.turns += result.turns;
+        summary.images += result.images;
+      } catch (error) {
+        if (error instanceof ThreadNotListedError) {
+          summary.unlisted += 1;
+          db.recordThreadNotListed(chat.id);
+        } else {
+          summary.errors += 1;
+          db.recordCaptureFailure(chat.id);
+          summary.failures.push({
+            title: chat.title.slice(0, 60),
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS));
+    }
+    summary.cancelled = captureCancelled;
+    summary.remaining = db.countChatsWithoutTurns();
+    db.recordJob(
+      'recapture',
+      captureCancelled ? 'stopped' : summary.errors > 0 ? 'failed' : 'finished',
+      startedAt,
+      { ...summary, failures: summary.failures.slice(0, 20) },
+    );
+    broadcastCapture({
+      phase: captureCancelled ? 'cancelled' : 'done',
+      done: summary.captured,
+      total: summary.attempted,
+      errors: summary.errors,
+      unlisted: summary.unlisted,
+      turns: summary.turns,
+      images: summary.images,
+    });
+    return summary;
+  } finally {
+    capturing = false;
+    captureCancelled = false;
+  }
 }
 
 /**
