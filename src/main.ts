@@ -324,15 +324,22 @@ const createWindow = () => {
               click: command('retryStuck'),
             },
             {
+              // Named for what it PRODUCES, not for what it does to a browser.
+              // "Open the export's links" described the mechanism and read as
+              // though it would merely navigate somewhere — the point is that
+              // conversations come back into the archive, and it is the same act
+              // as the item above it, from a different source. Parallel wording
+              // says that; "open" hid it.
               label:
                 links > 0
-                  ? `Open the export's links (${links})`
-                  : "Open the export's links",
+                  ? `Read threads from the export's links (${links})`
+                  : "Read threads from the export's links",
               enabled: links > 0,
               toolTip:
-                'Opens each record\'s Takeout link and captures what the page shows — ' +
-                'the only route to threads Google no longer lists. Includes entries ' +
-                'that belong to no thread yet.',
+                'Loads each record by its Takeout link and stores the conversation — ' +
+                'the only route to threads Google no longer lists. Includes records ' +
+                'that belong to no thread yet. Every page is checked against the ' +
+                "export's own reading before anything is stored.",
               click: command('fetchLinks'),
             },
             {

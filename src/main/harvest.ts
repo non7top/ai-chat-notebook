@@ -1043,7 +1043,7 @@ export async function syncArchive(mode: SyncMode): Promise<SyncSummary> {
       : [
           'Refreshing the thread list',
           'Reading threads from the panel',
-          'Opening export links',
+          "Reading threads from the export's links",
           'Matching entries to threads',
         ];
   let index = 0;
