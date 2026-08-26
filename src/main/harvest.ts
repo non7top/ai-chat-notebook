@@ -118,6 +118,7 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
     let created = 0;
     let updated = 0;
     let stagnantAtBottom = 0;
+    let lastScrollHeight = geometry.scrollHeight;
 
     const absorb = (entries: ThreadListEntry[]) => {
       for (const entry of entries) {
@@ -165,7 +166,14 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
         updated,
       });
 
-      if (scrolled.atBottom && seen.size === before) {
+      // Growing scrollHeight means the list loaded more below: it was at its
+      // bottom, and its bottom moved. Treating that as "no new rows three times,
+      // stop" is how a lazy-loading list gets abandoned halfway — which is one
+      // of the two explanations for a harvest that reported 150 of a list a
+      // previous run had walked to 299.
+      const grew = scrolled.scrollHeight > lastScrollHeight;
+      lastScrollHeight = Math.max(lastScrollHeight, scrolled.scrollHeight);
+      if (scrolled.atBottom && seen.size === before && !grew) {
         stagnantAtBottom += 1;
         if (stagnantAtBottom >= STAGNANT_AT_BOTTOM_LIMIT) break;
       } else {
@@ -185,6 +193,12 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
     // container or a fractional row height can push it either way, so allow a
     // small margin and reserve the warning for a genuine shortfall.
     const complete = seen.size >= Math.floor(geometry.expectedTotal * 0.95);
+    // The measurements behind the verdict, recorded with it. A bare "150 / ~301
+    // INCOMPLETE" says a run fell short without saying whether the run or the
+    // expectation was wrong, and those need opposite fixes.
+    const geometryNote =
+      `scrollHeight ${geometry.scrollHeight}px / pitch ${geometry.pitch}px ` +
+      `(row ${geometry.rowHeight}px, ${geometry.rendered} rendered) = ~${geometry.expectedTotal}`;
     const summary: HarvestSummary = {
       found: seen.size,
       expected: geometry.expectedTotal,
@@ -193,6 +207,12 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
       complete,
       cancelled: cancelRequested,
     };
+    db.recordJob(
+      'harvest',
+      cancelRequested ? 'stopped' : complete ? 'finished' : 'failed',
+      new Date().toISOString(),
+      { ...summary, geometry: geometryNote },
+    );
     broadcast({ phase: cancelRequested ? 'cancelled' : 'done', ...summary });
     return summary;
   } catch (error) {

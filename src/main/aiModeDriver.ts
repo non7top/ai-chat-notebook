@@ -424,7 +424,15 @@ export interface ListGeometry {
   scrollTop: number;
   scrollHeight: number;
   clientHeight: number;
+  /** One row's own height. Kept for the report, and as a fallback for pitch. */
   rowHeight: number;
+  /**
+   * The distance from one row to the next — the number scrollHeight is actually
+   * made of. Divided into it, rowHeight gave 301 for a list of 150.
+   */
+  pitch: number;
+  /** Rows rendered right now, which for a virtualised list is a small window. */
+  rendered: number;
   /**
    * How many threads the list should ultimately yield, from the container's
    * pre-sized scroll height. The list is virtualised and never holds more than
@@ -472,14 +480,38 @@ const GEOMETRY_SCRIPT = `
     if (getComputedStyle(scroller).display === 'none') {
       return { ok: false, error: 'History sidebar is closed; the thread list in the DOM is stale' };
     }
-    const row = document.querySelector(${JSON.stringify(THREAD_BUTTON_SELECTOR)});
-    const rowHeight = row ? Math.round(row.getBoundingClientRect().height) : 0;
+    const rows = Array.from(
+      document.querySelectorAll(${JSON.stringify(THREAD_BUTTON_SELECTOR)}),
+    ).filter((el) => el.offsetParent !== null);
+    const rowHeight = rows[0] ? Math.round(rows[0].getBoundingClientRect().height) : 0;
+
+    // The PITCH from one row to the next, which is what scrollHeight is made
+    // of — not the height of the button, which is what used to be divided into
+    // it. They are the same number only while the row is nothing but its
+    // button: add a wrapper, a margin or a date header and the estimate doubles.
+    // A harvest reported "150 / ~301 threads · INCOMPLETE" on a sidebar that a
+    // previous run had walked to rank 299 with no gaps, and 150 x 2 = 300 is
+    // not a coincidence worth ignoring.
+    //
+    // The MEDIAN gap, so a date header inflating one interval does not move it.
+    let pitch = 0;
+    if (rows.length >= 3) {
+      const tops = rows
+        .map((el) => el.getBoundingClientRect().top)
+        .sort((a, b) => a - b);
+      const gaps = [];
+      for (let i = 1; i < tops.length; i += 1) gaps.push(tops[i] - tops[i - 1]);
+      gaps.sort((a, b) => a - b);
+      pitch = Math.round(gaps[Math.floor(gaps.length / 2)]);
+    }
     return {
       ok: true,
       scrollTop: Math.round(scroller.scrollTop),
       scrollHeight: scroller.scrollHeight,
       clientHeight: scroller.clientHeight,
       rowHeight,
+      pitch,
+      rendered: rows.length,
     };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
@@ -489,9 +521,11 @@ const GEOMETRY_SCRIPT = `
 
 export async function getListGeometry(): Promise<ListGeometry> {
   const g = await run<Omit<ListGeometry, 'expectedTotal'>>(GEOMETRY_SCRIPT);
-  // A rowHeight of 0 means nothing is laid out yet; refuse to invent a total
-  // rather than divide by zero and "expect" nothing.
-  const expectedTotal = g.rowHeight > 0 ? Math.round(g.scrollHeight / g.rowHeight) : 0;
+  // Pitch first, row height only as a fallback when too few rows are rendered to
+  // measure a gap. Zero for both means nothing is laid out yet; refuse to invent
+  // a total rather than divide by zero and "expect" nothing.
+  const per = g.pitch > 0 ? g.pitch : g.rowHeight;
+  const expectedTotal = per > 0 ? Math.round(g.scrollHeight / per) : 0;
   return { ...g, expectedTotal };
 }
 
@@ -546,6 +580,10 @@ const SCROLL_STEP_SCRIPT_SUFFIX = `, scroller.scrollHeight);
       ok: true,
       scrollTop: Math.round(scroller.scrollTop),
       moved: Math.round(scroller.scrollTop - before),
+      // Reported so the caller can tell "the list ended" from "the list is still
+      // loading". A lazy-loaded list is at its bottom repeatedly, each time with
+      // more below it.
+      scrollHeight: scroller.scrollHeight,
       atBottom: scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8,
     };
   } catch (err) {
@@ -557,6 +595,8 @@ const SCROLL_STEP_SCRIPT_SUFFIX = `, scroller.scrollHeight);
 export interface ScrollStepResult {
   scrollTop: number;
   moved: number;
+  /** Growing means more rows loaded — the bottom was not the end. */
+  scrollHeight: number;
   atBottom: boolean;
 }
 
