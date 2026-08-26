@@ -499,23 +499,57 @@ export async function recaptureMany(chatIds: number[]): Promise<CaptureSummary> 
   };
   try {
     await ensureOnAiMode();
+    // The same loaded list captureTurns uses, and for the same reason — which I
+    // failed to apply here when I added it there. Every thread did its own full
+    // walk of the sidebar hunting for its row: four threads, four sweeps of up
+    // to a minute each, all of them finding nothing, and reported as "0 captured
+    // · 3 no longer listed" after four minutes of the panel scrolling. From the
+    // outside that is a loop, and it was reported as one.
+    const listed = chatIds.length > 1 ? await loadSidebarIds() : null;
     for (const id of chatIds) {
       if (captureCancelled) break;
       const chat = db.getChatForCapture(id);
       // A thread that has gone — merged away, deleted — is skipped rather than
       // counted as a failure. The caller's list can be a moment out of date.
       if (!chat) continue;
+      // Answered from the list rather than by sending the sidebar after it. Only
+      // when the load succeeded — a list that would not load says nothing about
+      // any particular thread.
+      if (listed && !listed.has(chat.externalId)) {
+        summary.attempted += 1;
+        summary.unlisted += 1;
+        db.recordThreadNotListed(chat.id);
+        broadcastCapture({
+          phase: 'capturing',
+          done: summary.captured,
+          attempted: summary.attempted,
+          total: chatIds.length,
+          errors: summary.errors,
+          unlisted: summary.unlisted,
+          current: `not listed: ${chat.title.slice(0, 46)}`,
+        });
+        continue;
+      }
       summary.attempted += 1;
       broadcastCapture({
         phase: 'capturing',
         done: summary.captured,
+        attempted: summary.attempted,
         total: chatIds.length,
         errors: summary.errors,
         unlisted: summary.unlisted,
         current: chat.title.slice(0, 60),
       });
       try {
-        const result = await captureOneChat(chat);
+        const result = await Promise.race([
+          captureOneChat(chat),
+          new Promise<never>((_resolve, reject) =>
+            setTimeout(
+              () => reject(new Error(`Gave up on this thread after ${CAPTURE_DEADLINE_MS / 1000}s`)),
+              CAPTURE_DEADLINE_MS,
+            ),
+          ),
+        ]);
         summary.captured += 1;
         summary.turns += result.turns;
         summary.images += result.images;
