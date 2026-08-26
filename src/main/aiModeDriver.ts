@@ -463,10 +463,16 @@ const OPEN_SIDEBAR_SCRIPT = `
  * nothing — every read has to happen against a visible container or it silently
  * scrapes a stale copy.
  *
- * MEASURED 2026-08-26, and it changes what this function can promise: the
- * scroller's `display` stayed `flex` across a close AND a reopen. It is never
- * 'none' in practice, so `alreadyOpen` is effectively always true and the toggle
- * is effectively never clicked. Worse, the list can sit in a stub state —
+ * MEASURED 2026-08-26, and then CORRECTED the same day. First reading: the
+ * scroller's `display` stayed `flex` across a close and a reopen, from which I
+ * concluded it is never 'none' and this test is vacuous. Second reading, hours
+ * later on the same machine: `display: none`, scrollHeight 0, zero rows. So the
+ * test is real and my generalisation from one observation was wrong — the panel
+ * does report itself closed, just not always when it looks closed.
+ *
+ * What holds from both readings is the weaker, more useful claim: display alone
+ * cannot tell a LOADED list from a stub. The list can sit open holding ten rows
+ * of three hundred —
  * observed holding 10 rows of 300, laid out, with scrollHeight already sized for
  * all 300 — and no amount of scrolling adds to it. A harvest against that reads
  * ten threads and calls it the history.
@@ -485,17 +491,19 @@ export async function ensureHistorySidebarOpen(): Promise<boolean> {
 }
 
 /**
- * Clicks the history toggle twice, closing and reopening the list.
+ * Rebuilds the history list, and leaves it OPEN — verified, not assumed.
  *
- * The remedy for the stub state described above, and it is the user's own
- * suggestion — tested live: a list frozen at 10 rows, which four different ways
- * of scrolling could not grow, began yielding 10 rows per step after this. The
- * toggle's own effect on `display` is nil, so this is not "make it visible"; it
- * is "make Google build the list again".
+ * The first version clicked the toggle exactly twice on the theory that the
+ * sidebar starts open, so two clicks close it and open it again. It does not
+ * always start open. Caught live: display 'none', scrollHeight 0, zero rows,
+ * with a harvest reporting "10 / ~301 · INCOMPLETE" and the capture behind it
+ * walking a list that was not on screen. Two blind clicks from a closed sidebar
+ * leave it closed, and nothing here checked.
  *
- * Deliberately clicks even when everything looks fine. Looking fine is exactly
- * what the broken state does, and two clicks cost a second and a half against a
- * harvest that takes minutes.
+ * So it reads the state, drives toward open, and CONFIRMS. Being open is also not
+ * enough on its own — a list can be open and hold ten rows of three hundred with
+ * no amount of scrolling adding to it, which is what the close-and-reopen is
+ * for — so "did the rows come back" is part of the check.
  */
 const RECYCLE_SIDEBAR_SCRIPT = `
 (async () => {
@@ -503,16 +511,40 @@ const RECYCLE_SIDEBAR_SCRIPT = `
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     const toggle = document.querySelector(${JSON.stringify(HISTORY_TOGGLE_SELECTOR)});
     if (!toggle) return { ok: false, error: 'History toggle button not found' };
-    toggle.click();
-    await wait(900);
-    toggle.click();
-    await wait(1800);
-    const scroller = document.querySelector(${JSON.stringify(THREAD_LIST_SCROLLER)});
-    if (!scroller) return { ok: false, error: 'Thread list scroller gone after recycling' };
+
+    const scroller = () => document.querySelector(${JSON.stringify(THREAD_LIST_SCROLLER)});
+    const isOpen = () => {
+      const s = scroller();
+      return !!s && getComputedStyle(s).display !== 'none';
+    };
+    const rows = () =>
+      document.querySelectorAll(${JSON.stringify(THREAD_BUTTON_SELECTOR)}).length;
+
+    const startedOpen = isOpen();
+    // Closed first if it is open, so the list is genuinely rebuilt rather than
+    // merely revealed — a revealed stub stays a stub.
+    if (startedOpen) {
+      toggle.click();
+      await wait(900);
+    }
+    // Then open, and keep trying until it is. A click landing during the panel's
+    // own animation does nothing at all, which is how two blind clicks ended
+    // with the sidebar shut.
+    for (let attempt = 0; attempt < 4 && !isOpen(); attempt += 1) {
+      toggle.click();
+      await wait(1000);
+    }
+    if (!isOpen()) {
+      return { ok: false, error: 'History sidebar would not open after four attempts' };
+    }
+    // Give the list a moment to populate before reporting what it holds.
+    for (let i = 0; i < 12 && rows() === 0; i += 1) await wait(250);
+    const s = scroller();
     return {
       ok: true,
-      rows: document.querySelectorAll(${JSON.stringify(THREAD_BUTTON_SELECTOR)}).length,
-      scrollHeight: scroller.scrollHeight,
+      startedOpen: startedOpen,
+      rows: rows(),
+      scrollHeight: s ? s.scrollHeight : 0,
     };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
@@ -520,8 +552,15 @@ const RECYCLE_SIDEBAR_SCRIPT = `
 })();
 `;
 
-export async function recycleHistorySidebar(): Promise<{ rows: number; scrollHeight: number }> {
-  return run<{ rows: number; scrollHeight: number }>(RECYCLE_SIDEBAR_SCRIPT, 20_000);
+export async function recycleHistorySidebar(): Promise<{
+  rows: number;
+  scrollHeight: number;
+  startedOpen: boolean;
+}> {
+  return run<{ rows: number; scrollHeight: number; startedOpen: boolean }>(
+    RECYCLE_SIDEBAR_SCRIPT,
+    30_000,
+  );
 }
 
 const GEOMETRY_SCRIPT = `

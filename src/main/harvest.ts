@@ -134,7 +134,18 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
     //
     // Done unconditionally: looking fine is precisely what the broken state
     // does, and a second and a half is nothing against a walk of minutes.
-    await recycleHistorySidebar();
+    // Recycled, and the result is CHECKED. A recycle that ended with the sidebar
+    // shut used to be indistinguishable from one that worked: every read then
+    // returns zero, and the run reported "10 / ~301 · INCOMPLETE" while walking
+    // a list that was not on screen. Better to fail here naming the reason than
+    // to publish a number that looks like a shortfall in the data.
+    const recycled = await recycleHistorySidebar();
+    if (recycled.rows === 0) {
+      throw new Error(
+        'The history sidebar holds no threads after being reopened — nothing to ' +
+          'harvest. The panel may not be signed in, or the list may still be loading.',
+      );
+    }
     await scrollListToTop();
 
     const geometry = await getListGeometry();
@@ -1290,7 +1301,11 @@ export interface CaptureSummary {
 async function loadSidebarIds(): Promise<Set<string> | null> {
   try {
     await ensureHistorySidebarOpen();
-    await recycleHistorySidebar();
+    const recycled = await recycleHistorySidebar();
+    // No rows means no list. Null sends the caller down the "cannot tell" path
+    // rather than declaring every thread in the queue missing — the sidebar
+    // being shut says nothing about any particular thread.
+    if (recycled.rows === 0) return null;
     await scrollListToTop();
     const geometry = await getListGeometry();
     if (geometry.clientHeight === 0) return null;
