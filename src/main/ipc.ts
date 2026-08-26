@@ -97,6 +97,8 @@ export function registerIpcHandlers(): void {
     db.mergeChats(keepId, mergeIds),
   );
   ipcMain.handle('chats:unmerge', (_event, id: number) => db.unmergeChat(id));
+  ipcMain.handle('chats:foldEmpty', () => db.foldEmptyDuplicates());
+  ipcMain.handle('chats:countEmptyDuplicates', () => db.emptyDuplicateThreads().length);
 
   // Routed through the main process rather than window.confirm. Electron does
   // support confirm(), but it does NOT support prompt() — that threw
@@ -209,10 +211,7 @@ export function registerIpcHandlers(): void {
   // Both queues, because the run works through both: threads whose link has not
   // been opened, and export entries that belong to no thread at all. Reported as
   // one number, since to the person pressing the button it is one job.
-  ipcMain.handle(
-    'links:remaining',
-    () => db.countThreadsWithLinksToFetch() + db.countOrphanEntriesWithLinks(),
-  );
+  ipcMain.handle('links:remaining', () => db.countEntriesWithLinksToFetch());
   ipcMain.handle('links:outcomes', () => db.linkOutcomes());
   ipcMain.handle('jobs:last', () => db.lastJobs());
   // Matching after the fact rather than during an import: only then is every

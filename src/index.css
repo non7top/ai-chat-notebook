@@ -702,6 +702,15 @@ button:disabled {
   text-overflow: ellipsis;
 }
 
+/* Pulls one record by its own link. On the row that shows the link, so there is
+   never a question of which record it acts on — the header's version was gated
+   on the entry being attached, and a thread whose only link was on an unattached
+   entry showed no fetch control at all. */
+.entry-fetch {
+  font-size: 0.7rem;
+  padding: 0.05rem 0.35rem;
+}
+
 /* Reads this thread and every candidate the fingerprint matched. Sits with the
    entry list rather than in the header: it acts on what that disclosure is
    about, and the header is for the thread itself. */

@@ -746,6 +746,9 @@ export async function captureFromEntryLink(entryId: number): Promise<LinkCapture
     // about today, and a thread that keeps its place in the queue after being
     // rejected makes every subsequent run repeat the same work.
     if (entry.chatId !== null) db.setLinkState(entry.chatId, 'rejected');
+    // On the entry too, because the entry is what the queue walks now. Without
+    // this a rejected record stays in the queue forever and every run re-walks it.
+    db.setEntryLinkState(entry.id, 'rejected');
     return {
       distance,
       rejected:
@@ -763,6 +766,7 @@ export async function captureFromEntryLink(entryId: number): Promise<LinkCapture
   const stored = await storeRenderedThread(chatId, turns);
   db.noteChatSource(chatId, 'link');
   db.setLinkState(chatId, 'fetched');
+  db.setEntryLinkState(entry.id, 'fetched');
   return { distance, rejected: null, chatId, turns: stored.turns, images: stored.images };
 }
 
@@ -837,15 +841,11 @@ export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
   const startedAt = new Date().toISOString();
   try {
     await ensureOnAiMode();
-    // Threads first, then the entries that belong to no thread. Both are
-    // "an export record with a link that has not been opened"; only the join
-    // used to build the queue made them look like different problems, and the
-    // orphans — 379 of them on the real archive — were reachable one at a time
-    // and no other way.
-    const queue = [
-      ...db.threadsWithLinksToFetch(limit),
-      ...db.orphanEntriesWithLinks(Math.max(0, limit - db.countThreadsWithLinksToFetch())),
-    ];
+    // One queue, per RECORD. The thread-based queue it replaces reported 1
+    // outstanding against 380: it could not see records attached to no thread, it
+    // skipped any thread already read from the panel, and it counted one job per
+    // thread where a thread can hold several records each with its own link.
+    const queue = db.entriesWithLinksToFetch(limit);
     let consecutiveErrors = 0;
 
     for (const item of queue) {
@@ -930,7 +930,9 @@ export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
     }
 
     summary.cancelled = captureCancelled;
-    summary.remaining = db.countThreadsWithLinksToFetch();
+    // The same count the button shows, or the run's own summary would disagree
+    // with the label that started it.
+    summary.remaining = db.countEntriesWithLinksToFetch();
     // Written before the broadcast, so a record exists even if the window has
     // gone away by the time the run ends — which for an hour-long job is not a
     // remote possibility.

@@ -238,7 +238,11 @@ const createWindow = () => {
     const queued = db.countChatsWithoutTurns();
     // Threads with an unopened link plus orphan entries with one. The second
     // group was invisible to every bulk path until now — 379 of them.
-    const links = db.countThreadsWithLinksToFetch() + db.countOrphanEntriesWithLinks();
+    const links = db.countEntriesWithLinksToFetch();
+    // Empty threads with a content-bearing twin. 37 on the real archive, and the
+    // one duplicate case the fingerprint cannot judge because there is no answer
+    // text on the empty side to compare.
+    const husks = db.emptyDuplicateThreads().length;
     // Two different quantities, and adding them was exactly the mistake this
     // codebase keeps making: `inline` is turns known to hold base64, `unexamined`
     // is turns nobody has looked at yet. Summed, the label read "(23263)" on a
@@ -361,6 +365,18 @@ const createWindow = () => {
               click: command('moveInlineImages'),
             },
             { type: 'separator' },
+            {
+              label:
+                husks > 0
+                  ? `Fold ${husks} empty duplicate${husks === 1 ? '' : 's'} into their twin`
+                  : 'Fold empty duplicates into their twin',
+              enabled: husks > 0,
+              toolTip:
+                'An empty thread that shares an opening prompt with a thread that has ' +
+                'content holds nothing of its own — no turns, no images, no records, no ' +
+                'link — so folding it in cannot lose anything. Undoable.',
+              click: command('foldEmpty'),
+            },
             {
               label: 'Check for identical threads',
               click: command('checkCopies'),

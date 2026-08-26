@@ -253,6 +253,29 @@ export function initDb(userDataPath: string): void {
   // The colour is a palette KEY, not a hex value: the app owns the palette, so
   // the swatches stay a set that works together and a stored folder cannot end
   // up an unreadable colour against the row it sits on.
+  // Whether THIS RECORD's link has been pulled. Per entry, because the entry is
+  // the unit of work and the thread never was: the queue joined chats to entries,
+  // so it could only see records attached to a thread, it excluded any thread
+  // already read from the panel, and it counted one job per thread where a thread
+  // can hold several records each with its own link. It reported "1" while 380
+  // records had never been pulled.
+  //
+  // Backfilled below from the per-chat verdict, so the 1641 threads already
+  // pulled are not pulled again.
+  ensureColumn('source_entries', 'link_state', 'link_state TEXT');
+  db.exec(`
+    UPDATE source_entries SET link_state = (
+      SELECT c.link_state FROM chat_sources cs JOIN chats c ON c.id = cs.chat_id
+       WHERE cs.source_entry_id = source_entries.id
+         AND c.link_state IN ('fetched', 'rejected')
+       LIMIT 1)
+     WHERE link_state IS NULL
+       AND EXISTS (
+         SELECT 1 FROM chat_sources cs JOIN chats c ON c.id = cs.chat_id
+          WHERE cs.source_entry_id = source_entries.id
+            AND c.link_state IN ('fetched', 'rejected'));
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS entries_link_state ON source_entries(link_state);');
   ensureColumn('folders', 'color', 'color TEXT');
   // One character, an emoji in practice. Not a fixed icon set — this archive is
   // one person's topics, and any set chosen here would be the wrong set.
@@ -865,6 +888,19 @@ export function listChats(scope: ChatScope): ChatSummary[] {
   // the uncertainty belongs in the label, not in the ordering.
   const order = `
     ORDER BY CASE WHEN c.started_at IS NULL THEN 1 ELSE 0 END,
+             -- As an INSTANT, not as text. The archive holds three date shapes at
+             -- once — measured: 2024 threads with a +hh:mm offset, 830 in UTC
+             -- with a trailing Z, and 18 with no zone at all — because the export
+             -- carries local offsets while every date this app writes itself is
+             -- toISOString. Compared as strings, '...T11:22:53.000Z' sorts BEFORE
+             -- '...T18:22:53+07:00' even though they are the same moment, so a
+             -- thread could sit up to seven hours from where it belongs.
+             --
+             -- strftime resolves all three to the same epoch; verified against
+             -- the real archive, where that pair both give 1779708173.
+             CAST(strftime('%s', c.started_at) AS INTEGER) DESC,
+             -- Kept as a tie-break for anything strftime cannot parse, which it
+             -- returns NULL for rather than failing.
              c.started_at DESC,
              CASE WHEN c.list_rank IS NULL THEN 1 ELSE 0 END,
              c.list_rank ASC,
@@ -3352,6 +3388,121 @@ export function threadsWithLinksToFetch(limit: number): ThreadToFetch[] {
  * captureFromEntryLink already copes: an entry with no chat is adopted into a new
  * one before its turns are stored. The only thing missing was a list to hand it.
  */
+/**
+ * Every export record with a link that has not been pulled yet.
+ *
+ * The queue this replaces was per THREAD, and that was wrong three ways at once:
+ * it joined chats to entries so it could not see records attached to no thread
+ * (379 of them), it skipped any thread already read from the panel even though
+ * the two readings hold different links and different text, and it counted one
+ * job per thread where a thread can hold several records each with a link of its
+ * own. It reported 1 outstanding against 380.
+ *
+ * Per entry, which is the unit of work: one record, one link, one verdict.
+ */
+/**
+ * Empty threads that share an opening prompt with a thread that has content.
+ *
+ * The one duplicate case that needs no judgement. Everywhere else in this app
+ * grouping is manual on purpose — two records with the same opening prompt may
+ * be one conversation snapshotted twice, the same question asked twice, or a
+ * clone Google made on its own, and the fingerprint compares ANSWERS precisely
+ * because prompts cannot tell those apart.
+ *
+ * An empty thread has no answer to compare, which is why the matcher declines
+ * it: measured on the real archive, 69 threads hold no turns and 37 of them
+ * share a content_key with a thread that does. Their dates cannot rescue it
+ * either — an empty thread carries a placeholder stamped when the app first saw
+ * it, so 0 of the 37 agree on a date even where the records plainly do.
+ *
+ * But an empty thread holds NOTHING. Folding it into its content-bearing twin
+ * cannot lose text, images, entries or a link, because it has none of them —
+ * which makes this the one merge that is safe without a person looking at it.
+ * Still not automatic: it is offered with a count, and mergeChats sets
+ * merged_into rather than deleting, so it is undoable like any other merge.
+ */
+export function emptyDuplicateThreads(): { emptyId: number; keepId: number }[] {
+  return db
+    .prepare(
+      `SELECT c.id AS emptyId,
+              (SELECT o.id FROM chats o
+                WHERE o.merged_into IS NULL
+                  AND o.id <> c.id
+                  AND o.content_key = c.content_key
+                  AND EXISTS (SELECT 1 FROM messages m2 WHERE m2.chat_id = o.id)
+                -- The fullest twin, so folding never picks a thinner reading to
+                -- keep than one already stored.
+                ORDER BY (SELECT COUNT(*) FROM messages m3 WHERE m3.chat_id = o.id) DESC
+                LIMIT 1) AS keepId
+         FROM chats c
+        WHERE c.merged_into IS NULL
+          AND c.content_key IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
+          -- Nor any entries of its own: a thread with a raw record attached is
+          -- not empty, it is unread, and those are different things.
+          AND NOT EXISTS (SELECT 1 FROM chat_sources cs WHERE cs.chat_id = c.id)
+          AND EXISTS (
+            SELECT 1 FROM chats o
+             WHERE o.merged_into IS NULL AND o.id <> c.id
+               AND o.content_key = c.content_key
+               AND EXISTS (SELECT 1 FROM messages m2 WHERE m2.chat_id = o.id))`,
+    )
+    .all() as unknown as { emptyId: number; keepId: number }[];
+}
+
+export function foldEmptyDuplicates(): { folded: number } {
+  const pairs = emptyDuplicateThreads();
+  let folded = 0;
+  for (const pair of pairs) {
+    if (!pair.keepId) continue;
+    mergeChats(pair.keepId, [pair.emptyId]);
+    folded += 1;
+  }
+  return { folded };
+}
+
+export function entriesWithLinksToFetch(limit: number): ThreadToFetch[] {
+  return db
+    .prepare(
+      `SELECT (SELECT cs.chat_id FROM chat_sources cs
+                 JOIN chats c ON c.id = cs.chat_id
+                WHERE cs.source_entry_id = e.id AND c.merged_into IS NULL
+                LIMIT 1) AS chatId,
+              e.id AS entryId,
+              COALESCE(NULLIF(e.query, ''), '(untitled record)') AS title
+         FROM source_entries e
+        WHERE e.href IS NOT NULL
+          -- NULL means never tried, or tried and failed transiently. 'rejected'
+          -- is a property of the link rather than of the moment — the page did
+          -- not match the export — so retrying spends a page load to reach the
+          -- same answer.
+          AND COALESCE(e.link_state, '') NOT IN ('fetched', 'rejected')
+        -- Newest first: an older record is likelier to have been dropped by
+        -- Google altogether, so the ones most likely to still be there go first.
+        -- As an instant; see the note on the list ordering. The export's own
+        -- dates carry local offsets and everything this app writes is UTC.
+        ORDER BY CAST(strftime('%s', e.occurred_at) AS INTEGER) DESC, e.id DESC
+        LIMIT ?`,
+    )
+    .all(limit) as unknown as ThreadToFetch[];
+}
+
+export function countEntriesWithLinksToFetch(): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM source_entries e
+        WHERE e.href IS NOT NULL
+          AND COALESCE(e.link_state, '') NOT IN ('fetched', 'rejected')`,
+    )
+    .get() as unknown as { n: number };
+  return row.n;
+}
+
+/** Records this entry's own verdict, so it is not pulled twice. */
+export function setEntryLinkState(entryId: number, state: string): void {
+  db.prepare('UPDATE source_entries SET link_state = ? WHERE id = ?').run(state, entryId);
+}
+
 export function orphanEntriesWithLinks(limit: number): ThreadToFetch[] {
   return db
     .prepare(

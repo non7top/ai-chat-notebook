@@ -645,6 +645,12 @@ export interface NotebookApi {
   similarChats(chatId: number): Promise<ChatSummary[]>;
   mergeChats(keepId: number, mergeIds: number[]): Promise<{ merged: number }>;
   unmergeChat(chatId: number): Promise<void>;
+  /**
+   * Folds empty threads into the content-bearing thread with the same opening
+   * prompt. The one merge that needs no judgement: an empty thread holds no
+   * text, images, records or link, so nothing can be lost. Undoable.
+   */
+  foldEmptyDuplicates(): Promise<{ folded: number }>;
 
   getAiModeStatus(): Promise<AiModeStatus>;
   navigateAiMode(url: string): Promise<void>;

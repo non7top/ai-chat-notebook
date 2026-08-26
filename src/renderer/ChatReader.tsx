@@ -33,7 +33,10 @@ export default function ChatReader({ chat, onChange }: Props) {
   // The entry carrying a link, if any. An entry with none — a Lens search, a
   // blank record — cannot be fetched, and offering the action would be a dead
   // end.
-  const linkEntry = entries.find((e) => e.linked && e.href)?.id ?? null;
+  // ANY entry with a link, attached or not. Requiring `e.linked` meant a thread
+  // whose only link sat on an unattached entry showed no fetch control anywhere —
+  // see the per-entry Fetch button below for the case that exposed it.
+  const linkEntry = entries.find((e) => e.href)?.id ?? null;
 
   // Reloaded on every chat change and after every link change: the entry list
   // is the record of what this conversation is made of, so a stale one would
@@ -365,6 +368,50 @@ export default function ChatReader({ chat, onChange }: Props) {
                       above one is a fact, not a fault. */}
                   {entry.chatCount > 1 && ` · also in ${entry.chatCount - 1} other`}
                 </span>
+                {/* On the entry that OWNS the link, unconditionally.
+
+                    The header carries a "Fetch from link" too, but it required an
+                    entry that was both attached AND had an href — and a thread
+                    whose only link sits on an unattached entry therefore offered
+                    nothing at all. Measured on a real thread: "0 data entries ·
+                    2 unattached with the same prompt", one of them holding 13
+                    turns, an image and a live mstk URL, and no button anywhere
+                    would pull it. Six hours were spent looking for a control
+                    that a condition had hidden.
+
+                    Here there is nothing to hide behind: if a record carries a
+                    link, the row that shows the link offers to pull it. */}
+                {entry.href && (
+                  <button
+                    type="button"
+                    className="entry-fetch"
+                    disabled={fetching}
+                    title={
+                      entry.linked
+                        ? "Loads this record by its link and stores the conversation into this thread. Refuses to store anything if the page's answer does not match the export's."
+                        : "Loads this record by its link and stores the conversation. This entry is not attached to this thread, so it becomes its own — Glue it first if it belongs here."
+                    }
+                    onClick={async () => {
+                      setFetching(true);
+                      setRecaptureError(null);
+                      try {
+                        const result = await window.notebook.captureFromEntryLink(entry.id);
+                        if (result.rejected) {
+                          setRecaptureError(`Not stored — ${result.rejected}`);
+                        } else {
+                          loadSources();
+                          onChange();
+                        }
+                      } catch (err) {
+                        setRecaptureError(err instanceof Error ? err.message : String(err));
+                      } finally {
+                        setFetching(false);
+                      }
+                    }}
+                  >
+                    {fetching ? '…' : 'Fetch'}
+                  </button>
+                )}
                 {entry.linked ? (
                   <button
                     type="button"
@@ -401,7 +448,12 @@ export default function ChatReader({ chat, onChange }: Props) {
             {candidates.map((other) => (
               <div key={`chat-${other.id}`} className="source-entry candidate">
                 <span className="chat-id">#{other.id}</span>
-                <span className="source-kind">separate thread</span>
+                <span
+                  className="source-kind"
+                  title="A different thread in this archive that opens with the same prompt. Not a source of this one — a candidate, listed because nothing is grouped automatically."
+                >
+                  another thread, same prompt
+                </span>
                 <span className="source-facts">
                   {other.startedAt ? displayDateTime(other.startedAt) : 'no date'}
                   {' · '}

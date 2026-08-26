@@ -98,6 +98,7 @@ const api: NotebookApi = {
   similarChats: (chatId) => ipcRenderer.invoke('chats:similar', chatId),
   mergeChats: (keepId, mergeIds) => ipcRenderer.invoke('chats:merge', keepId, mergeIds),
   unmergeChat: (chatId) => ipcRenderer.invoke('chats:unmerge', chatId),
+  foldEmptyDuplicates: () => ipcRenderer.invoke('chats:foldEmpty'),
 
   getAiModeStatus: () => ipcRenderer.invoke('aiMode:getStatus'),
   navigateAiMode: (url) => ipcRenderer.invoke('aiMode:navigate', url),

@@ -246,5 +246,58 @@ if (listed.indexOf('rank 0') !== 0) {
   throw new Error(`the newest of the refresh is at ${listed.indexOf('rank 0')}, not the top`);
 }
 
+// The export-link queue, which is per RECORD and not per thread. The version
+// this replaces reported 1 outstanding against 380: it joined chats to entries so
+// it could not see records attached to no thread, and it skipped any thread
+// already read from the panel even though the two readings hold different links.
+const withLink = db.entriesWithLinksToFetch(100);
+console.log(`  link queue: ${withLink.length} records, count says ${db.countEntriesWithLinksToFetch()}`);
+if (withLink.length !== db.countEntriesWithLinksToFetch()) {
+  throw new Error('the link queue and its count disagree');
+}
+// An entry attached to nothing must still be in it — that is the case the old
+// queue could not see at all.
+const orphanEntry = db.orphanSourceEntries()[0];
+if (orphanEntry && !withLink.some((r) => r.entryId === orphanEntry.id)) {
+  // Only meaningful when that orphan carries a link.
+  const hasHref = db.sourceEntryTurns(orphanEntry.id) !== null;
+  if (hasHref) throw new Error('an unattached record with a link is missing from the queue');
+}
+// A verdict takes a record out of the queue and keeps it out.
+if (withLink.length > 0) {
+  const first = withLink[0].entryId;
+  db.setEntryLinkState(first, 'fetched');
+  if (db.entriesWithLinksToFetch(100).some((r) => r.entryId === first)) {
+    throw new Error('a fetched record is still queued');
+  }
+  db.setEntryLinkState(first, 'rejected');
+  if (db.entriesWithLinksToFetch(100).some((r) => r.entryId === first)) {
+    throw new Error('a rejected record is still queued — every run would re-walk it');
+  }
+  console.log('  fetched and rejected both leave the queue');
+
+// Dates are compared as INSTANTS, not as text. The archive holds three shapes at
+// once — measured on the real one: 2024 threads with a +hh:mm offset, 830 in UTC
+// with a trailing Z, 18 with no zone — because the export carries local offsets
+// while every date the app writes itself is toISOString. As strings
+// '...T11:22:53.000Z' sorts BEFORE '...T18:22:53+07:00' though they are the same
+// moment, which put threads up to seven hours from where they belong.
+const later = db.upsertThreadFromList('t:utc', 'stored as UTC', null, 0);
+const earlier = db.upsertThreadFromList('t:offset', 'stored with an offset', null, 1);
+if (!later.created || !earlier.created) throw new Error('could not make the date pair');
+const byTitle = (t: string) => db.listChats({ kind: 'all' }).find((c) => c.title === t)?.id ?? 0;
+// 11:22Z is 18:22+07 — the same instant — and the offset one is one hour LATER.
+db.setPanelDate(byTitle('stored as UTC'), '2026-05-25T11:22:53.000Z');
+db.setPanelDate(byTitle('stored with an offset'), '2026-05-25T19:22:53+07:00');
+const order = db.listChats({ kind: 'all' }).map((c) => c.title);
+const posUtc = order.indexOf('stored as UTC');
+const posOff = order.indexOf('stored with an offset');
+console.log(`  UTC-stored at ${posUtc}, offset-stored at ${posOff}`);
+// The offset one is the genuinely later moment, so it must come first.
+if (posOff > posUtc) {
+  throw new Error('dates are being compared as text: the later instant sorted below');
+}
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('OK');
