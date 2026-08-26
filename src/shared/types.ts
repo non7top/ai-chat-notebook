@@ -657,6 +657,13 @@ export interface NotebookApi {
    * text, images, records or link, so nothing can be lost. Undoable.
    */
   foldEmptyDuplicates(): Promise<{ folded: number }>;
+  /**
+   * Undoes an over-eager link run: folds threads adopted from a record back into
+   * the thread that record belongs to, moving the pulled reading onto the keeper
+   * first when it is the fuller one. The merge carries the record's link across,
+   * so it also attaches records that were stranded. Undoable.
+   */
+  foldAdoptedDuplicates(): Promise<{ folded: number; turnsMoved: number; imagesMoved: number }>;
 
   getAiModeStatus(): Promise<AiModeStatus>;
   navigateAiMode(url: string): Promise<void>;

@@ -243,6 +243,9 @@ const createWindow = () => {
     // one duplicate case the fingerprint cannot judge because there is no answer
     // text on the empty side to compare.
     const husks = db.emptyDuplicateThreads().length;
+    // Threads adopted from a record that already had a thread. 346 of these were
+    // made by one link run before it learned to attach rather than adopt.
+    const adopted = db.planAdoptedFold().length;
     // Two different quantities, and adding them was exactly the mistake this
     // codebase keeps making: `inline` is turns known to hold base64, `unexamined`
     // is turns nobody has looked at yet. Summed, the label read "(23263)" on a
@@ -365,6 +368,22 @@ const createWindow = () => {
               click: command('moveInlineImages'),
             },
             { type: 'separator' },
+            {
+              // The recovery for a link run that adopted records into new threads
+              // instead of attaching them. Named with its count because the count
+              // IS the reason to press it, and greyed out when there is nothing
+              // to undo.
+              label:
+                adopted > 0
+                  ? `Fold ${adopted} duplicate${adopted === 1 ? '' : 's'} from the link run`
+                  : 'Fold duplicates from the link run',
+              enabled: adopted > 0,
+              toolTip:
+                'Folds threads created by pulling a record whose thread already existed. ' +
+                "Moves the pulled reading onto the original where it is fuller, keeps the " +
+                'original\'s folder and title, and attaches the record. Undoable.',
+              click: command('foldAdopted'),
+            },
             {
               label:
                 husks > 0

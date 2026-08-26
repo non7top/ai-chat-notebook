@@ -3641,6 +3641,147 @@ export function getEntryToOpen(entryId: number): EntryToOpen | null {
 }
 
 /** Gives an orphan entry a conversation of its own. */
+/**
+ * The one live thread this record plainly belongs to, or null.
+ *
+ * Exists because pulling a record's link used to ADOPT it into a brand-new
+ * thread whenever it was attached to none — and 1438 of 3085 records are
+ * attached to none, most of them matching a thread that already exists. A link
+ * run over 383 records created 346 new threads, and all 346 were duplicates of
+ * a thread already in the archive. Nothing was lost; everything was doubled.
+ *
+ * Deliberately narrow. It answers only when exactly ONE live, non-adopted thread
+ * shares the record's opening prompt: with two or more the record is genuinely
+ * ambiguous and adopting it into its own thread is the honest outcome, which is
+ * the rule this app has followed from the start.
+ */
+export interface AdoptedFoldStep {
+  adoptedId: number;
+  keepId: number;
+  adoptedTurns: number;
+  keepTurns: number;
+  /** True when the adopted thread holds the fuller reading and must be moved. */
+  movesTurns: boolean;
+  adoptedImages: number;
+}
+
+/**
+ * The plan for undoing an over-eager link run, and it is a PLAN so it can be
+ * read before it is run.
+ *
+ * A link run over 383 records adopted 346 of them into new threads because they
+ * were attached to none — and every one of those 346 shares an opening prompt
+ * with a thread that already existed. Nothing was lost, everything was doubled.
+ *
+ * The fold keeps the ORIGINAL thread, because that is where a folder, a
+ * hand-typed title and a Google thread id live, and moves the freshly pulled
+ * reading onto it when the adopted copy holds more turns. Then it merges, which
+ * carries the record's link onto the keeper — so the same act that removes the
+ * duplicate also attaches the record that was stranded.
+ *
+ * Nothing is deleted: mergeChats sets merged_into and unmergeChat reverses it.
+ */
+export function planAdoptedFold(): AdoptedFoldStep[] {
+  return db
+    .prepare(
+      `SELECT c.id AS adoptedId,
+              (SELECT o.id FROM chats o
+                WHERE o.merged_into IS NULL AND o.id <> c.id
+                  AND o.content_key = c.content_key
+                  AND o.external_id NOT LIKE 'entry:%'
+                ORDER BY (SELECT COUNT(*) FROM messages m3 WHERE m3.chat_id = o.id) DESC
+                LIMIT 1) AS keepId,
+              (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS adoptedTurns,
+              (SELECT COUNT(*) FROM assets a WHERE a.chat_id = c.id) AS adoptedImages,
+              (SELECT COUNT(*) FROM messages m2
+                WHERE m2.chat_id = (
+                  SELECT o.id FROM chats o
+                   WHERE o.merged_into IS NULL AND o.id <> c.id
+                     AND o.content_key = c.content_key
+                     AND o.external_id NOT LIKE 'entry:%'
+                   ORDER BY (SELECT COUNT(*) FROM messages m4 WHERE m4.chat_id = o.id) DESC
+                   LIMIT 1)) AS keepTurns
+         FROM chats c
+        WHERE c.merged_into IS NULL
+          AND c.external_id LIKE 'entry:%'
+          AND c.content_key IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM chats o
+             WHERE o.merged_into IS NULL AND o.id <> c.id
+               AND o.content_key = c.content_key
+               AND o.external_id NOT LIKE 'entry:%')
+        ORDER BY c.id`,
+    )
+    .all()
+    .map((r) => {
+      const row = r as unknown as Omit<AdoptedFoldStep, 'movesTurns'>;
+      return { ...row, movesTurns: Number(row.adoptedTurns) > Number(row.keepTurns) };
+    }) as AdoptedFoldStep[];
+}
+
+export function foldAdoptedDuplicates(): {
+  folded: number;
+  turnsMoved: number;
+  imagesMoved: number;
+} {
+  const plan = planAdoptedFold();
+  let folded = 0;
+  let turnsMoved = 0;
+  let imagesMoved = 0;
+  for (const step of plan) {
+    if (!step.keepId) continue;
+    if (step.movesTurns) {
+      // The adopted copy is the fuller reading, so it moves onto the keeper
+      // BEFORE the merge — mergeChats keeps the keeper's own turns and leaves
+      // the loser's behind, so merging first would hide the reading this run
+      // spent hours pulling.
+      const turns = db
+        .prepare('SELECT seq, role, text, html FROM messages WHERE chat_id = ? ORDER BY seq')
+        .all(step.adoptedId) as unknown as TurnToSave[];
+      const assets = db
+        .prepare(
+          `SELECT m.seq AS messageSeq, a.kind, a.original_url AS originalUrl, a.sha256,
+                  a.mime, a.local_path AS localPath, a.bytes
+             FROM assets a LEFT JOIN messages m ON m.id = a.message_id
+            WHERE a.chat_id = ?`,
+        )
+        .all(step.adoptedId) as unknown as AssetToSave[];
+      // Images with no turn of their own would land on seq -1 and be dropped by
+      // replaceTurns; they stay on the adopted row, which the merge keeps.
+      replaceTurns(
+        step.keepId,
+        turns,
+        assets.filter((a) => a.messageSeq !== null),
+      );
+      turnsMoved += turns.length;
+      imagesMoved += assets.length;
+    }
+    mergeChats(step.keepId, [step.adoptedId]);
+    folded += 1;
+  }
+  return { folded, turnsMoved, imagesMoved };
+}
+
+export function soleThreadForEntry(entryId: number): number | null {
+  const row = db
+    .prepare(
+      `SELECT c.id AS id,
+              (SELECT COUNT(*) FROM chats o
+                WHERE o.merged_into IS NULL
+                  AND o.content_key = c.content_key
+                  AND o.external_id NOT LIKE 'entry:%') AS matches
+         FROM chats c
+         JOIN source_entries e ON e.query_key = c.content_key
+        WHERE e.id = ?
+          AND c.merged_into IS NULL
+          AND c.external_id NOT LIKE 'entry:%'
+        LIMIT 1`,
+    )
+    .get(entryId) as unknown as { id: number; matches: number } | undefined;
+  if (!row || Number(row.matches) !== 1) return null;
+  return row.id;
+}
+
 export function adoptSourceEntry(entryId: number, folderId: number | null): { chatId: number } {
   db.exec('BEGIN');
   try {

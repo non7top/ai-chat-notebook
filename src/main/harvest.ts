@@ -772,7 +772,15 @@ export async function captureFromEntryLink(entryId: number): Promise<LinkCapture
   }
 
   // Only now is there a thread worth writing to.
-  const chatId = entry.chatId ?? db.adoptSourceEntry(entry.id, null).chatId;
+  // Attach to the thread this record plainly belongs to, before considering a
+  // new one. Adopting unconditionally is what doubled the archive: a run over
+  // 383 records created 346 threads and every one of them was a duplicate of a
+  // thread already there. Only when exactly one live thread shares the record's
+  // opening prompt — with two or more it is genuinely ambiguous, and its own
+  // thread is the honest answer.
+  const sole = entry.chatId ?? db.soleThreadForEntry(entry.id);
+  if (sole !== null && entry.chatId === null) db.linkSourceEntry(sole, entry.id);
+  const chatId = sole ?? db.adoptSourceEntry(entry.id, null).chatId;
   // The very turns that were checked, not a fresh read of the page.
   const stored = await storeRenderedThread(chatId, turns);
   db.noteChatSource(chatId, 'link');

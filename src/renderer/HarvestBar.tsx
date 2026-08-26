@@ -466,6 +466,19 @@ export default function HarvestBar({
       applyTakeout,
       undoImport,
       checkCopies,
+      foldAdopted: async () => {
+        setTakeoutBusy(true);
+        try {
+          const r = await window.notebook.foldAdoptedDuplicates();
+          setTakeoutNote(
+            `${r.folded} duplicate${r.folded === 1 ? '' : 's'} folded · ` +
+              `${r.turnsMoved} turns and ${r.imagesMoved} images moved onto the originals`,
+          );
+          onFinished();
+        } finally {
+          setTakeoutBusy(false);
+        }
+      },
       foldEmpty: async () => {
         setTakeoutBusy(true);
         try {
