@@ -99,6 +99,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('chats:unmerge', (_event, id: number) => db.unmergeChat(id));
   ipcMain.handle('chats:foldEmpty', () => db.foldEmptyDuplicates());
   ipcMain.handle('chats:foldAdopted', () => db.foldAdoptedDuplicates());
+  ipcMain.handle('chats:foldSameInstant', () => db.foldPromptInstantDuplicates());
   ipcMain.handle('chats:planAdoptedFold', () => db.planAdoptedFold());
   ipcMain.handle('chats:countEmptyDuplicates', () => db.emptyDuplicateThreads().length);
 

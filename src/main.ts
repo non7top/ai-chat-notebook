@@ -246,6 +246,9 @@ const createWindow = () => {
     // Threads adopted from a record that already had a thread. 346 of these were
     // made by one link run before it learned to attach rather than adopt.
     const adopted = db.planAdoptedFold().length;
+    // Groups that are the same conversation stored twice, settled by the start
+    // instant rather than by the prompt alone.
+    const sameInstant = db.planPromptInstantFold().reduce((n, g) => n + g.foldIds.length, 0);
     // Two different quantities, and adding them was exactly the mistake this
     // codebase keeps making: `inline` is turns known to hold base64, `unexamined`
     // is turns nobody has looked at yet. Summed, the label read "(23263)" on a
@@ -368,6 +371,23 @@ const createWindow = () => {
               click: command('moveInlineImages'),
             },
             { type: 'separator' },
+            {
+              // Same opening prompt AND same start instant. The prompt alone is
+              // ambiguous, which is why grouping is manual — but two separate
+              // asks do not land on the same second, and 670 groups in this
+              // archive were the same conversation imported twice.
+              label:
+                sameInstant > 0
+                  ? `Fold ${sameInstant} threads imported twice`
+                  : 'Fold threads imported twice',
+              enabled: sameInstant > 0,
+              toolTip:
+                'Folds threads that share an opening prompt AND the same start instant — ' +
+                'the same conversation stored twice. Keeps the one with a folder or a ' +
+                'hand-typed title, else the fullest. Groups that start at DIFFERENT ' +
+                'instants are separate asks and are left alone. Undoable.',
+              click: command('foldSameInstant'),
+            },
             {
               // The recovery for a link run that adopted records into new threads
               // instead of attaching them. Named with its count because the count

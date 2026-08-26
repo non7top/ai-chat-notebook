@@ -3655,6 +3655,113 @@ export function getEntryToOpen(entryId: number): EntryToOpen | null {
  * ambiguous and adopting it into its own thread is the honest outcome, which is
  * the rule this app has followed from the start.
  */
+export interface DuplicateFoldStep {
+  keepId: number;
+  foldIds: number[];
+  keepTurns: number;
+  /** The fullest reading in the group, when it is not the keeper's. */
+  fullestId: number;
+  fullestTurns: number;
+}
+
+/**
+ * Threads that share an opening prompt AND a start instant.
+ *
+ * The archive holds 738 groups sharing an opening prompt, which is NOT enough to
+ * merge on: two records with the same prompt may be one conversation twice, the
+ * same question asked twice, or a clone Google made, and that ambiguity is why
+ * grouping has been manual from the start.
+ *
+ * The start instant settles it. Two separate asks do not land on the same second.
+ * Measured: of the 738, 670 have every member starting at the same instant — 594
+ * of those with identical turn counts and 76 where one reading is fuller — and 68
+ * have different instants. Those 68 are the genuinely ambiguous case and are left
+ * alone.
+ *
+ * The instant is compared through strftime rather than as text, because the same
+ * moment is written three ways in this archive: 2024 threads with a +hh:mm
+ * offset, 830 in UTC, 18 with no zone.
+ *
+ * The keeper is the thread carrying a hand-typed title or a folder, because that
+ * is work a person did and no reading is worth losing it for; failing that, the
+ * fullest; failing that, the lowest id, which is the earliest import. When the
+ * keeper is not the fullest, the fullest reading moves onto it before the merge.
+ */
+export function planPromptInstantFold(): DuplicateFoldStep[] {
+  const groups = db
+    .prepare(
+      `SELECT c.content_key AS k
+         FROM chats c
+        WHERE c.merged_into IS NULL AND c.content_key IS NOT NULL AND c.started_at IS NOT NULL
+        GROUP BY c.content_key
+       HAVING COUNT(*) > 1
+          AND COUNT(DISTINCT CAST(strftime('%s', c.started_at) AS INTEGER)) = 1`,
+    )
+    .all() as unknown as { k: string }[];
+
+  const members = db.prepare(
+    `SELECT c.id,
+            (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS turns,
+            (CASE WHEN COALESCE(NULLIF(c.user_title, ''), NULL) IS NOT NULL
+                    OR c.folder_id IS NOT NULL THEN 1 ELSE 0 END) AS claimed
+       FROM chats c
+      WHERE c.merged_into IS NULL AND c.content_key = ?
+      ORDER BY claimed DESC, turns DESC, c.id ASC`,
+  );
+
+  const steps: DuplicateFoldStep[] = [];
+  for (const group of groups) {
+    const rows = members.all(group.k) as unknown as {
+      id: number;
+      turns: number;
+      claimed: number;
+    }[];
+    if (rows.length < 2) continue;
+    const keep = rows[0];
+    const fullest = rows.reduce((best, r) => (Number(r.turns) > Number(best.turns) ? r : best), rows[0]);
+    steps.push({
+      keepId: Number(keep.id),
+      foldIds: rows.slice(1).map((r) => Number(r.id)),
+      keepTurns: Number(keep.turns),
+      fullestId: Number(fullest.id),
+      fullestTurns: Number(fullest.turns),
+    });
+  }
+  return steps;
+}
+
+export function foldPromptInstantDuplicates(): {
+  groups: number;
+  folded: number;
+  turnsMoved: number;
+} {
+  const plan = planPromptInstantFold();
+  let folded = 0;
+  let turnsMoved = 0;
+  for (const step of plan) {
+    // The fullest reading moves onto the keeper first when they differ, because
+    // mergeChats keeps the keeper's turns and leaves the others' behind.
+    if (step.fullestId !== step.keepId && step.fullestTurns > step.keepTurns) {
+      const turns = db
+        .prepare('SELECT seq, role, text, html FROM messages WHERE chat_id = ? ORDER BY seq')
+        .all(step.fullestId) as unknown as TurnToSave[];
+      const assets = db
+        .prepare(
+          `SELECT m.seq AS messageSeq, a.kind, a.original_url AS originalUrl, a.sha256,
+                  a.mime, a.local_path AS localPath, a.bytes
+             FROM assets a JOIN messages m ON m.id = a.message_id
+            WHERE a.chat_id = ?`,
+        )
+        .all(step.fullestId) as unknown as AssetToSave[];
+      replaceTurns(step.keepId, turns, assets);
+      turnsMoved += turns.length;
+    }
+    mergeChats(step.keepId, step.foldIds);
+    folded += step.foldIds.length;
+  }
+  return { groups: plan.length, folded, turnsMoved };
+}
+
 export interface AdoptedFoldStep {
   adoptedId: number;
   keepId: number;

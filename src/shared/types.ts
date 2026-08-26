@@ -664,6 +664,13 @@ export interface NotebookApi {
    * so it also attaches records that were stranded. Undoable.
    */
   foldAdoptedDuplicates(): Promise<{ folded: number; turnsMoved: number; imagesMoved: number }>;
+  /**
+   * Folds threads that share an opening prompt AND a start instant. The prompt
+   * alone is ambiguous — that is why grouping is manual — but two separate asks
+   * do not land on the same second. Groups whose members start at DIFFERENT
+   * instants are left alone. Undoable.
+   */
+  foldSameInstantDuplicates(): Promise<{ groups: number; folded: number; turnsMoved: number }>;
 
   getAiModeStatus(): Promise<AiModeStatus>;
   navigateAiMode(url: string): Promise<void>;
