@@ -52,33 +52,15 @@ body {
   min-height: 0;
 }
 
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid var(--border);
-  flex: none;
-}
+/* There is no horizontal toolbar any more. A row of chrome across the top of a
+   three-pane window spends the scarce direction — vertical — to hold four
+   buttons in a strip a thousand pixels wide. The controls live in the left pane
+   now, stacked, where the spare direction is the one they need. */
 
-/* The build label, where the app's name used to be. It had flex: 1, so a
-   heading nobody needed took the whole first row and pushed the one button on
-   it to the far edge — which is what made two rows of chrome look half empty
-   each. */
-.build-id {
-  font-size: 0.7rem;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  flex: none;
-}
-
-/* A debug build has remote debugging on and the panel holds a live Google
-   session. That is not a detail to render in the same grey as everything else. */
-.build-id.debug {
-  color: #b45309;
-  font-weight: 600;
-}
+/* The build label lived here and no longer does — it is in Help > About, which
+   is where a version belongs. In a toolbar it was permanent chrome answering a
+   question asked about once a day, in a window where vertical space is the
+   scarce thing. */
 
 /* Pushed to the right edge by the harvest bar's own flex: 1 between them. */
 .panel-toggle {
@@ -155,11 +137,39 @@ button:disabled {
   min-height: 0;
 }
 
+/* The tree and the controls, stacked: the tree scrolls, the controls stay put at
+   the bottom so they are reachable whatever the tree is doing. */
 .pane-tree {
   width: 220px;
   flex: none;
   border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.tree-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   padding: 0.4rem 0;
+}
+
+/* The controls, one per line and full width. A button whose label changes with
+   the archive — "Catch up (21)" — cannot share a line with another and stay
+   readable in 220px. */
+.side-actions {
+  flex: none;
+  border-top: 1px solid var(--border);
+  padding: 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  /* A long status line wraps here rather than being cut, because down is the
+     direction this strip has to spare. Capped so a run's summary cannot push
+     the buttons off the bottom. */
+  max-height: 45%;
+  overflow-y: auto;
 }
 
 .pane-list {
@@ -784,17 +794,38 @@ button:disabled {
 
 /* --------------------------------------------------------------- harvesting */
 
-/* Now a group INSIDE the toolbar rather than a second bar under it. It takes
-   the slack between the build label and the panel toggle, and min-width: 0 is
-   what lets a long status line ellipsis instead of shoving the toggle off the
-   edge. */
+/* A column in the left pane now, not a bar across the top. */
 .harvest-bar {
   display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  flex: 1;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.3rem;
   min-width: 0;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
+}
+
+.harvest-bar button,
+.side-actions > button {
+  width: 100%;
+  text-align: center;
+}
+
+/* Wraps instead of ellipsising: a run's summary is several facts joined by
+   dots, and cutting it at 220px would leave only the first. Vertical is the
+   direction this strip has. */
+.side-actions .harvest-status {
+  white-space: normal;
+  overflow: visible;
+  line-height: 1.3;
+}
+
+/* Was a vertical rule between groups in a horizontal bar; it is a horizontal
+   one between groups in a vertical strip. */
+.side-actions .harvest-sep {
+  width: auto;
+  height: 1px;
+  align-self: stretch;
+  margin: 0.1rem 0;
 }
 
 .harvest-status {

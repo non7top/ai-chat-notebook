@@ -231,6 +231,11 @@ const createWindow = () => {
     // a menu rebuild would have re-created the ten-second freeze somewhere new.
     const inline = db.countMessagesWithInlineImages();
     const stuck = db.countExhaustedCaptures();
+    // What a run would actually attempt. Without it "Read threads from the
+    // panel" looked broken: every remaining thread had been given up on, so the
+    // run finished instantly having attempted nothing, and the menu said the
+    // same thing it says when there are three hundred waiting.
+    const queued = db.countChatsWithoutTurns();
     // Two different quantities, and adding them was exactly the mistake this
     // codebase keeps making: `inline` is turns known to hold base64, `unexamined`
     // is turns nobody has looked at yet. Summed, the label read "(23263)" on a
@@ -290,7 +295,17 @@ const createWindow = () => {
               click: command('harvest'),
             },
             {
-              label: 'Read threads from the panel',
+              label:
+                queued > 0
+                  ? `Read threads from the panel (${queued})`
+                  : 'Read threads from the panel',
+              enabled: queued > 0,
+              toolTip:
+                queued > 0
+                  ? `${queued} threads have no turns stored`
+                  : stuck > 0
+                    ? `Nothing waiting — but ${stuck} threads have been given up on, below`
+                    : 'Every listed thread has been read',
               click: command('capture'),
             },
             {
@@ -354,6 +369,41 @@ const createWindow = () => {
             {
               label: 'Open AI Mode DevTools',
               click: () => openAiModeDevTools(),
+            },
+          ],
+        },
+        {
+          label: 'Help',
+          submenu: [
+            {
+              // Where a version belongs. It spent a while in the toolbar, which
+              // is permanent chrome answering a question asked about once a day
+              // — in a window where the scarce thing is vertical space for the
+              // archive itself.
+              label: 'About AI Chat Notebook',
+              click: () => {
+                // Everything needed to say WHICH copy of the app this is and
+                // where its data lives. The paths are here because they have
+                // been guessed wrong before: the README documented an install
+                // directory that did not exist, reasoned from productName
+                // rather than from an actual install.
+                const detail = [
+                  `Build: ${__BUILD_ID__}`,
+                  __DEBUG_BUILD__
+                    ? 'Debug build — remote debugging is ON, and the embedded panel holds a live signed-in Google session.'
+                    : 'Release build — remote debugging is off unless asked for explicitly.',
+                  '',
+                  `Archive: ${path.join(app.getPath('userData'), 'notebook.sqlite')}`,
+                  `Images: ${path.join(app.getPath('userData'), 'assets')}`,
+                ].join('\n');
+                dialog.showMessageBox(mainWindow, {
+                  type: 'info',
+                  title: 'About AI Chat Notebook',
+                  message: 'AI Chat Notebook',
+                  detail,
+                  buttons: ['Close'],
+                });
+              },
             },
           ],
         },

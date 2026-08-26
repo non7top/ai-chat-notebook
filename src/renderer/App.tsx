@@ -113,64 +113,6 @@ export default function App() {
 
   return (
     <div className="workspace">
-      {/* One row, not two. The title bar held a heading and a single button and
-          the harvest bar held the rest, so both were mostly empty space — and
-          once the run controls came down to two buttons, two rows of chrome
-          above a three-pane window was most of the window's chrome. */}
-      <div className="toolbar">
-        {/* The build, not the app's name. The window title already says what
-            this is; what it could not say is WHICH build is running, and that
-            has mattered — a 106-byte error page once sat in the downloads
-            folder wearing an .exe name and claiming to be the newest one.
-            Baked in at package time; see electron.vite.config.ts. */}
-        <span
-          className={__DEBUG_BUILD__ ? 'build-id debug' : 'build-id'}
-          title={
-            __DEBUG_BUILD__
-              ? 'Debug build — remote debugging is on, and the panel holds a live Google session'
-              : 'The build this window is running'
-          }
-        >
-          {__BUILD_ID__}
-          {__DEBUG_BUILD__ && ' · debug'}
-        </span>
-
-        <HarvestBar
-          onReport={(next) => {
-          setReport(next);
-          // The native panel is a separate window-level view painted over the
-          // app, so it would cover the report rather than sit beside it. Hiding
-          // it is what makes the space available at all.
-          if (next) {
-            setPanelVisible(false);
-            window.notebook.setAiModeHidden(true);
-          }
-        }}
-          onCopies={(groups) => {
-          setCopies(groups);
-          // Takes the panes, like the export report: a list of threads to compare
-          // needs the width, and the native panel would paint over it.
-          setPanelVisible(false);
-          window.notebook.setAiModeHidden(true);
-        }}
-          onNeedPanel={() => setPanelVisible(true)}
-          onFinished={reloadAll}
-          uncaptured={uncaptured}
-          activity={activity}
-        />
-
-        {/* Last, so it sits at the right edge: the harvest bar between it and
-            the title takes the slack. */}
-        <button
-          type="button"
-          className="panel-toggle"
-          onClick={() => setPanelVisible((v) => !v)}
-          title={panelVisible ? 'Hide the live AI Mode panel' : 'Show the live AI Mode panel'}
-        >
-          {panelVisible ? 'Hide panel' : 'Show panel'}
-        </button>
-      </div>
-
       {archive && (
         <div className="banner">
           {archive.phase === 'database'
@@ -202,7 +144,14 @@ export default function App() {
       )}
 
       <div className="panes">
+        {/* The left pane is the tree AND the controls, stacked. There used to
+            be a horizontal toolbar across the top of the window; a row of
+            chrome above three panes of list costs vertical space in the one
+            direction this app never has enough of, to hold four buttons in a
+            strip a thousand pixels wide. The tree scrolls, the controls stay
+            put at the bottom. */}
         <div className="pane pane-tree">
+          <div className="tree-scroll">
           <FolderTree
             folders={folders}
             counts={counts}
@@ -222,6 +171,43 @@ export default function App() {
             onChatsFiled={() => setPicked(new Set())}
             onError={setError}
           />
+          </div>
+          <div className="side-actions">
+        <HarvestBar
+          onReport={(next) => {
+          setReport(next);
+          // The native panel is a separate window-level view painted over the
+          // app, so it would cover the report rather than sit beside it. Hiding
+          // it is what makes the space available at all.
+          if (next) {
+            setPanelVisible(false);
+            window.notebook.setAiModeHidden(true);
+          }
+        }}
+          onCopies={(groups) => {
+          setCopies(groups);
+          // Takes the panes, like the export report: a list of threads to compare
+          // needs the width, and the native panel would paint over it.
+          setPanelVisible(false);
+          window.notebook.setAiModeHidden(true);
+        }}
+          onNeedPanel={() => setPanelVisible(true)}
+          onFinished={reloadAll}
+          uncaptured={uncaptured}
+          activity={activity}
+        />
+
+          {/* Last in the strip, and separated: showing the panel is not part of
+              running anything — it is what you do to watch a run happen. */}
+          <button
+            type="button"
+            className="panel-toggle"
+            onClick={() => setPanelVisible((v) => !v)}
+            title={panelVisible ? 'Hide the live AI Mode panel' : 'Show the live AI Mode panel'}
+          >
+            {panelVisible ? 'Hide panel' : 'Show panel'}
+          </button>
+          </div>
         </div>
         {/* Orphan entries are not conversations, so they get the list and
             reader panes to themselves rather than being forced into a chat
