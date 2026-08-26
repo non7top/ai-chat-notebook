@@ -64,15 +64,20 @@ body {
 .panel-tab {
   position: absolute;
   right: 0;
-  top: 50%;
-  transform: translateY(-50%);
+  /* At the top corner rather than halfway down. Centred, it floated in the
+     middle of whatever pane happened to be behind it; in the corner it reads as
+     part of the frame, and it is where the eye already goes. */
+  top: 0;
   z-index: 5;
   width: 14px;
   height: 52px;
   padding: 0;
   border: 1px solid var(--border);
+  /* No top or right edge: both coincide with the pane's own, and drawing them
+     twice is what makes a tab look stuck ON the frame instead of part of it. */
+  border-top: none;
   border-right: none;
-  border-radius: 6px 0 0 6px;
+  border-radius: 0 0 0 6px;
   background: linear-gradient(to left, #ffffff, #ececec);
   color: var(--muted);
   font-size: 0.8rem;

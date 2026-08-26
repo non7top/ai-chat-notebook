@@ -113,9 +113,9 @@ export default function App() {
 
   return (
     <div className="workspace">
-      {/* A tab on the pane's right edge, which is the boundary with the live
-          panel — the panel is a native view painted alongside this one, so that
-          edge is literally where it appears from.
+      {/* A tab at the top of the pane's right edge, which is the boundary with
+          the live panel — the panel is a native view painted alongside this one,
+          so that edge is literally where it appears from.
 
           It was a labelled button in the left strip before, and the strip
           scrolls: showing the panel starts a run, the run's status filled the

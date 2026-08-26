@@ -113,6 +113,7 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
   }
   running = true;
   cancelRequested = false;
+  const harvestStartedAt = new Date().toISOString();
 
   try {
     // The panel doubles as a browser, so it may well be parked on myactivity or
@@ -180,8 +181,10 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
       updated,
     });
 
+    let steps = 0;
     for (let step = 0; step < MAX_STEPS; step += 1) {
       if (cancelRequested) break;
+      steps += 1;
 
       const before = seen.size;
       // Capped, so the walk cannot outrun the rendering. See STEP_MAX_PX.
@@ -237,7 +240,15 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
     // expectation was wrong, and those need opposite fixes.
     const geometryNote =
       `scrollHeight ${geometry.scrollHeight}px / pitch ${geometry.pitch}px ` +
-      `(row ${geometry.rowHeight}px, ${geometry.rendered} rendered) = ~${geometry.expectedTotal}`;
+      `(row ${geometry.rowHeight}px, ${geometry.rendered} rendered) = ~${geometry.expectedTotal}` +
+      // clientHeight and the step, which are the numbers that decide how much of
+      // the list a walk sees at all — and which I left out of the first version
+      // of this note, so the run that reported "130 / ~301" could not be read.
+      // The step is capped now, but a note that omits the deciding variable is
+      // how the next surprise stays a surprise.
+      ` · panel ${geometry.clientHeight}px, step ${Math.round(
+        Math.min(geometry.clientHeight * STEP_FRACTION, STEP_MAX_PX),
+      )}px, ${steps} steps`;
     const summary: HarvestSummary = {
       found: seen.size,
       expected: geometry.expectedTotal,
@@ -249,7 +260,12 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
     db.recordJob(
       'harvest',
       cancelRequested ? 'stopped' : complete ? 'finished' : 'failed',
-      new Date().toISOString(),
+      // The real start, not the moment the record is written. Passing
+      // new Date() here made startedAt and endedAt identical — 09:07:17.951Z for
+      // both on a walk that took minutes — so the record could not answer "did
+      // it stop early or grind to the end", which is the first thing to ask of
+      // an incomplete run.
+      harvestStartedAt,
       { ...summary, geometry: geometryNote },
     );
     broadcast({ phase: cancelRequested ? 'cancelled' : 'done', ...summary });
