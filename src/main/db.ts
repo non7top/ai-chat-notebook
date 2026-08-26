@@ -1537,6 +1537,17 @@ export interface TakeoutConversationResult {
    * doing quietly.
    */
   regrouped: number;
+  /**
+   * Snapshots this import could not identify against a stored record.
+   *
+   * The ref that identifies a record is computed from parsed content, and the
+   * parser has changed repeatedly. A record stored under one version does not
+   * answer to the same ref under the next, so it falls out of the keep list, is
+   * detached, and nothing re-adds it. Non-zero means records were orphaned
+   * because their identity could not be recomputed — which looks identical to
+   * being orphaned for the legitimate reason, and was invisible until now.
+   */
+  unidentified: number;
   /** Entries whose date text the parser could not read. */
   unreadableDates: number;
   /**
@@ -2132,6 +2143,7 @@ export function importTakeoutConversations(
     mergedIntoHarvested: 0,
     ambiguousOpenings: 0,
     regrouped: 0,
+    unidentified: 0,
     unreadableDates: 0,
     orphaned: 0,
     turnsWritten: 0,
@@ -2413,8 +2425,42 @@ export function importTakeoutConversations(
             );
           })
           .filter((id): id is number => id !== undefined);
+        // A snapshot the ref could not identify is COUNTED, not just dropped.
+        //
+        // This filter is why records go missing. keepList decides which entries
+        // stay attached to this conversation, and anything not found here is
+        // detached by the delete below. The ref is computed from parsed content,
+        // and the parser has changed repeatedly — the timestamp pattern, the
+        // turn splitter, the fingerprints — so a record stored under one version
+        // does not answer to the same ref under the next. It falls out here,
+        // loses its link, and nothing re-adds it.
+        //
+        // Measured on the real archive: 1438 of 3085 records attached to
+        // nothing, 380 of them still matching a live thread by prompt and 248 of
+        // those matching exactly one. Orphaning is a legitimate outcome — it is
+        // the category the user asked for — but orphaning because an identity
+        // could not be recomputed is a different thing wearing the same clothes,
+        // and it was invisible. Now the import reports it.
+        result.unidentified += plan.snapshots.length - snapshotIds.length;
         const keepList = snapshotIds.length > 0 ? snapshotIds : [entryId];
         const placeholders = keepList.map(() => '?').join(',');
+        // The regroup: an import recomputes which records make up a
+        // conversation and detaches the ones it no longer counts.
+        //
+        // A record left attached to nothing by this is NOT a leak — it is the
+        // orphan category, which exists because "whats unmatched and no clue
+        // where should go, goes to orphaned". I briefly guarded this delete
+        // against stranding a record's last link, and check-sources rejected it
+        // immediately: keeping a record attached to a grouping the import has
+        // just decided is wrong is worse than showing it as unplaced. The check
+        // was right and the guard was wrong.
+        //
+        // What IS worth knowing: keepList drops any snapshot whose
+        // takeoutEntryRef is not found, silently, and that ref is computed from
+        // parsed content which has changed repeatedly. So a re-import under a
+        // new parser can orphan records it would otherwise have kept — 1438 of
+        // 3085 are attached to nothing, and 380 of those still match a live
+        // thread by prompt, which is what Match entries is for.
         const { changes } = db
           .prepare(
             `DELETE FROM chat_sources

@@ -307,6 +307,12 @@ export interface TakeoutImportSummary {
   /** Wrong groupings from an earlier import that this run repaired. */
   regrouped: number;
   /**
+   * Snapshots this import could not identify against a stored record, and so
+   * detached. Reported because it looks identical to a record being orphaned for
+   * a legitimate reason, and was invisible.
+   */
+  unidentified: number;
+  /**
    * Entries carrying date text the parser could not read — a bug here, not a
    * gap in the export, and reported separately so the two are not confused.
    */

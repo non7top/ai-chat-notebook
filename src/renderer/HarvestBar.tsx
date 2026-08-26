@@ -212,6 +212,12 @@ export default function HarvestBar({
           `(${summary.createdChats} new, ${summary.extendedChats} extended, ` +
           `${summary.datedHarvested} dated, ${summary.ambiguousOpenings} left to glue, ` +
           `${summary.regrouped} regrouped) · ` +
+          // Named rather than buried: a non-zero count here means records were
+          // detached because their identity could not be recomputed, not
+          // because the import judged them to belong elsewhere.
+          (summary.unidentified > 0
+            ? `${summary.unidentified} could not be re-identified · `
+            : '') +
           (summary.unreadableDates > 0
             ? `${summary.unreadableDates} dates unreadable · `
             : '') +
