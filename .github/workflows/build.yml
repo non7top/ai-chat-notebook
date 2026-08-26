@@ -245,18 +245,38 @@ jobs:
       # downloadable, never accumulating, and unaffected by however full the
       # artifact store is. Marked prerelease so it cannot be mistaken for a
       # published version, and pointed at the branch rather than a tag of its own.
+      # Runs for a manual dispatch too, not only for a pull_request event.
+      #
+      # It was gated on pull_request, which made workflow_dispatch useless for
+      # the one thing it exists for: getting an installer for a work-in-progress
+      # branch. GitHub failed to dispatch the pull_request workflows for one
+      # push — Build never appeared and release-please-preview reported
+      # startup_failure — so the branch was rebuilt by hand, and the build
+      # succeeded and published nothing.
+      #
+      # The PR number is not in the event payload on a dispatch, so it is looked
+      # up from the branch. No open PR means no rolling tag to publish to, which
+      # is reported rather than failing the build.
       - name: Publish to the rolling prerelease
-        if: github.event_name == 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           EXE=$(find dist -maxdepth 1 -name '*.exe' | head -1)
-          TAG="pr-${{ github.event.pull_request.number }}-latest"
+          PR="${{ github.event.pull_request.number }}"
+          if [ -z "$PR" ]; then
+            PR=$(gh pr list --head "${GITHUB_REF_NAME}" --state open \
+                   --json number --jq '.[0].number // empty')
+          fi
+          if [ -z "$PR" ]; then
+            echo "No open pull request for ${GITHUB_REF_NAME}; nothing to publish to."
+            exit 0
+          fi
+          TAG="pr-${PR}-latest"
           gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
             --prerelease \
-            --target "${{ github.event.pull_request.head.sha }}" \
-            --title "PR #${{ github.event.pull_request.number }} — latest build" \
+            --target "$GITHUB_SHA" \
+            --title "PR #${PR} — latest build" \
             --notes "Rolling build of this pull request. Replaced on every push; not a release."
           gh release upload "$TAG" "$EXE" --clobber
 
