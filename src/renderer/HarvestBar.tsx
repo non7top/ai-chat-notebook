@@ -627,7 +627,17 @@ export default function HarvestBar({
           {capture.phase === 'error'
             ? capture.error
             : capture.phase === 'capturing'
-              ? `${capture.done}/${capture.total} · ${capture.current ?? ''}`
+              ? // Attempts first, because that is the number that moves. Showing
+                // captured alone read "3/21" for minutes on a run that was
+                // working through all 21 and failing them — which looks exactly
+                // like a loop, and was reported as one.
+                `${capture.attempted ?? capture.done}/${capture.total}` +
+                (capture.attempted && capture.attempted !== capture.done
+                  ? ` · ${capture.done} ok`
+                  : '') +
+                (capture.errors ? ` · ${capture.errors} failed` : '') +
+                (capture.unlisted ? ` · ${capture.unlisted} gone` : '') +
+                ` · ${capture.current ?? ''}`
               : `${capture.done} captured · ${capture.turns ?? 0} turns · ${
                   capture.images ?? 0
                 } images${

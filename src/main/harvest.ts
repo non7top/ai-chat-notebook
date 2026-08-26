@@ -771,6 +771,21 @@ export interface LinkRunSummary {
  */
 const PER_THREAD_DEADLINE_MS = 240_000;
 
+/**
+ * The longest ONE thread may hold up a capture.
+ *
+ * PER_THREAD_DEADLINE_MS above says "one thread must never be able to stop the
+ * run", and it was wired into the link fetch and nowhere else. captureTurns had
+ * no ceiling at all: a thread sat there for as long as its internal waits
+ * allowed — a 60s settle, a page load, then its images — with nothing above to
+ * cut it off. Observed on a real run, a single thread holding the counter still
+ * for over a minute while eighteen more waited behind it.
+ *
+ * Shorter than the link fetch's, because this path has a bounded settle to begin
+ * with: past two minutes a thread is not slow, it is not coming.
+ */
+const CAPTURE_DEADLINE_MS = 120_000;
+
 export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
   const summary: LinkRunSummary = {
     attempted: 0,
@@ -1209,6 +1224,65 @@ export interface CaptureSummary {
  * so this is seconds per conversation, not milliseconds. A bounded, resumable
  * run beats one that has to be left alone for an hour.
  */
+/**
+ * Loads the sidebar list once and returns every thread id it holds.
+ *
+ * The fix for a capture run that "just scrolls the panel". Each capture calls
+ * openThreadById, which walks the entire virtualised list hunting for its row —
+ * visibly, for up to its 60-second budget — and most of a Catch-up queue is
+ * threads Google no longer lists, so most of those walks were never going to
+ * find anything. Twenty-one threads, twenty-one full sweeps of the sidebar, and
+ * from the outside it is a loop that scrolls and never ends.
+ *
+ * One walk up front costs about twenty seconds and answers the question for the
+ * whole run: a thread whose id is not in a fully loaded list is not there, and
+ * saying so takes no scrolling at all.
+ *
+ * Returns null when the list could not be loaded, and the caller must then fall
+ * back to searching per thread rather than declaring everything missing. "The
+ * sidebar would not load" and "the thread is gone" are opposite conclusions, and
+ * confusing them would mark a whole queue as unrecoverable.
+ */
+async function loadSidebarIds(): Promise<Set<string> | null> {
+  try {
+    await ensureHistorySidebarOpen();
+    await recycleHistorySidebar();
+    await scrollListToTop();
+    const geometry = await getListGeometry();
+    if (geometry.clientHeight === 0) return null;
+
+    const ids = new Set<string>();
+    const absorb = async () => {
+      for (const entry of await readRenderedThreads()) ids.add(entry.externalId);
+    };
+    await absorb();
+    let stagnant = 0;
+    for (let step = 0; step < MAX_STEPS; step += 1) {
+      if (captureCancelled) break;
+      const before = ids.size;
+      const scrolled = await scrollListBy(
+        Math.min(geometry.clientHeight * STEP_FRACTION, STEP_MAX_PX),
+      );
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+      await absorb();
+      if (scrolled.atBottom && ids.size === before) {
+        stagnant += 1;
+        if (stagnant >= STAGNANT_AT_BOTTOM_LIMIT) break;
+      } else {
+        stagnant = 0;
+      }
+    }
+    // Rendering lags the scroll, so the last step's rows are still arriving.
+    await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+    await absorb();
+    return ids;
+  } catch {
+    // Same reasoning as the null above: a failure here says nothing about any
+    // individual thread.
+    return null;
+  }
+}
+
 export async function captureTurns(
   limit: number,
   /**
@@ -1242,6 +1316,10 @@ export async function captureTurns(
     // unattended run; a fresh run picks failures up again, ordered behind
     // anything never tried.
     const queue = db.chatsWithoutTurns(limit, includeExhausted);
+    // The sidebar list, once, instead of once per thread — see loadSidebarIds.
+    // Only worth the twenty seconds when there is more than one thread to place;
+    // a single re-capture can just go and look.
+    const listed = queue.length > 1 ? await loadSidebarIds() : null;
     // Said out loud rather than silently skipped. A queue that quietly shrinks
     // from 18 to 0 with nothing captured looks exactly like finishing the work.
     const exhausted = includeExhausted ? 0 : db.countExhaustedCaptures();
@@ -1257,17 +1335,50 @@ export async function captureTurns(
     const runPass = async (chats: db.ChatToCapture[]) => {
     for (const chat of chats) {
       if (captureCancelled) break;
+      // Answered from the list already loaded rather than by sending the sidebar
+      // on another fruitless walk. Only when the load succeeded: a list that
+      // would not load says nothing about any particular thread, and treating
+      // those two as the same would mark the whole queue as gone.
+      if (listed && !listed.has(chat.externalId)) {
+        summary.attempted += 1;
+        summary.unlisted += 1;
+        db.recordThreadNotListed(chat.id);
+        broadcastCapture({
+          phase: 'capturing',
+          done: summary.captured,
+          attempted: summary.attempted,
+          total: queue.length + retryable.length,
+          errors: summary.errors,
+          unlisted: summary.unlisted,
+          current: `not listed: ${chat.title.slice(0, 46)}`,
+        });
+        continue;
+      }
       summary.attempted += 1;
       broadcastCapture({
         phase: 'capturing',
+        // The number that MOVES. done is the captured count, and on a run where
+        // every thread fails it never changes — observed sitting at "3/21" while
+        // the run worked through thread after thread, which from the outside is
+        // indistinguishable from a loop. The attempt count is the honest measure
+        // of progress; captured and failed are reported beside it.
         done: summary.captured,
+        attempted: summary.attempted,
         total: queue.length + retryable.length,
         errors: summary.errors,
         unlisted: summary.unlisted,
         current: `${isRetry ? 'retry: ' : ''}${chat.title.slice(0, 60)}`,
       });
       try {
-        const result = await captureOneChat(chat);
+        const result = await Promise.race([
+          captureOneChat(chat),
+          new Promise<never>((_resolve, reject) =>
+            setTimeout(
+              () => reject(new Error(`Gave up on this thread after ${CAPTURE_DEADLINE_MS / 1000}s`)),
+              CAPTURE_DEADLINE_MS,
+            ),
+          ),
+        ]);
         summary.captured += 1;
         consecutiveFailures = 0;
         summary.turns += result.turns;

@@ -200,7 +200,14 @@ export interface SyncProgress {
 
 export interface CaptureProgress {
   phase: 'capturing' | 'done' | 'cancelled' | 'error';
+  /** Threads captured. Does NOT move on a run where every thread fails. */
   done: number;
+  /**
+   * Threads tried. This is the one that always moves, which is why it is
+   * displayed: a run failing everything showed "3/21" for minutes while working
+   * through twenty-one threads, and looked stuck.
+   */
+  attempted?: number;
   total: number;
   errors: number;
   /** Threads Google no longer lists — not failures, and not retryable. */
