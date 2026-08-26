@@ -206,7 +206,13 @@ export function registerIpcHandlers(): void {
   // live panel one page load at a time, and every page is checked against the
   // export's own reading before anything is stored.
   ipcMain.handle('links:fetch', (_event, limit: number) => fetchFromLinks(limit));
-  ipcMain.handle('links:remaining', () => db.countThreadsWithLinksToFetch());
+  // Both queues, because the run works through both: threads whose link has not
+  // been opened, and export entries that belong to no thread at all. Reported as
+  // one number, since to the person pressing the button it is one job.
+  ipcMain.handle(
+    'links:remaining',
+    () => db.countThreadsWithLinksToFetch() + db.countOrphanEntriesWithLinks(),
+  );
   ipcMain.handle('links:outcomes', () => db.linkOutcomes());
   ipcMain.handle('jobs:last', () => db.lastJobs());
   // Matching after the fact rather than during an import: only then is every

@@ -3339,6 +3339,46 @@ export function threadsWithLinksToFetch(limit: number): ThreadToFetch[] {
     .all(limit) as unknown as ThreadToFetch[];
 }
 
+/**
+ * Orphan entries that carry a link.
+ *
+ * The queue above joins chats to entries, so it can only ever see entries that
+ * are ATTACHED to a thread. Measured on the real archive: 2026 entries hold a
+ * Takeout href, 1641 threads have been enriched from one, one thread's link is
+ * still unfetched — and 379 entries with a link belong to no thread at all, so
+ * nothing bulk has ever been able to reach them. They were fetchable only one at
+ * a time, from the orphan pane.
+ *
+ * captureFromEntryLink already copes: an entry with no chat is adopted into a new
+ * one before its turns are stored. The only thing missing was a list to hand it.
+ */
+export function orphanEntriesWithLinks(limit: number): ThreadToFetch[] {
+  return db
+    .prepare(
+      `SELECT NULL AS chatId, e.id AS entryId,
+              COALESCE(NULLIF(e.query, ''), '(untitled entry)') AS title
+         FROM source_entries e
+        WHERE e.href IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM chat_sources cs WHERE cs.source_entry_id = e.id)
+        -- Newest first, for the same reason as the thread queue: an older record
+        -- is likelier to have been dropped by Google altogether.
+        ORDER BY e.occurred_at DESC, e.id DESC
+        LIMIT ?`,
+    )
+    .all(limit) as unknown as ThreadToFetch[];
+}
+
+export function countOrphanEntriesWithLinks(): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM source_entries e
+        WHERE e.href IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM chat_sources cs WHERE cs.source_entry_id = e.id)`,
+    )
+    .get() as unknown as { n: number };
+  return row.n;
+}
+
 export function countThreadsWithLinksToFetch(): number {
   const row = db
     .prepare(

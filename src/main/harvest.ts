@@ -803,7 +803,15 @@ export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
   const startedAt = new Date().toISOString();
   try {
     await ensureOnAiMode();
-    const queue = db.threadsWithLinksToFetch(limit);
+    // Threads first, then the entries that belong to no thread. Both are
+    // "an export record with a link that has not been opened"; only the join
+    // used to build the queue made them look like different problems, and the
+    // orphans — 379 of them on the real archive — were reachable one at a time
+    // and no other way.
+    const queue = [
+      ...db.threadsWithLinksToFetch(limit),
+      ...db.orphanEntriesWithLinks(Math.max(0, limit - db.countThreadsWithLinksToFetch())),
+    ];
     let consecutiveErrors = 0;
 
     for (const item of queue) {

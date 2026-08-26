@@ -236,6 +236,9 @@ const createWindow = () => {
     // run finished instantly having attempted nothing, and the menu said the
     // same thing it says when there are three hundred waiting.
     const queued = db.countChatsWithoutTurns();
+    // Threads with an unopened link plus orphan entries with one. The second
+    // group was invisible to every bulk path until now — 379 of them.
+    const links = db.countThreadsWithLinksToFetch() + db.countOrphanEntriesWithLinks();
     // Two different quantities, and adding them was exactly the mistake this
     // codebase keeps making: `inline` is turns known to hold base64, `unexamined`
     // is turns nobody has looked at yet. Summed, the label read "(23263)" on a
@@ -321,7 +324,15 @@ const createWindow = () => {
               click: command('retryStuck'),
             },
             {
-              label: "Open the export's links",
+              label:
+                links > 0
+                  ? `Open the export's links (${links})`
+                  : "Open the export's links",
+              enabled: links > 0,
+              toolTip:
+                'Opens each record\'s Takeout link and captures what the page shows — ' +
+                'the only route to threads Google no longer lists. Includes entries ' +
+                'that belong to no thread yet.',
               click: command('fetchLinks'),
             },
             {
