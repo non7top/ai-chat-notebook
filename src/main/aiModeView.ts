@@ -151,29 +151,19 @@ export function navigateAiMode(input: string): void {
 }
 
 /**
- * Puts the panel back on AI Mode if it has wandered — following a link to
- * myactivity, say. The harvester depends on this page being loaded, and making
- * it navigate itself is far better than failing with advice: the panel is a
- * general browser now, so being somewhere else is normal, not user error.
+ * Loads AI Mode fresh, whatever the panel is currently showing.
  *
- * Returns true if it had to navigate.
+ * Extracted from ensureOnAiMode, which returns early when the URL already
+ * matches — correct for "make sure we are there", useless for "start this page
+ * over". Both now share one navigation-and-wait.
  */
-export function ensureOnAiMode(timeoutMs = 25000): Promise<boolean> {
+function loadAiMode(timeoutMs: number): Promise<void> {
   if (!view) return Promise.reject(new Error('AI Mode view has not been created yet'));
-  // Anything that reads the page needs the panel laid out: while hidden it has
-  // zero bounds, so clientHeight is 0 and the thread list has no geometry to
-  // scroll. Re-capture failed with "Thread list never laid out" for exactly
-  // this reason — it had no equivalent of the capture buttons' "show the panel
-  // first" step. Arranging it here covers every caller instead of each one
-  // remembering.
-  showAiModePanel();
   const webContents = view.webContents;
-  if (AI_MODE_URL_PATTERN.test(webContents.getURL())) return Promise.resolve(false);
-
-  return new Promise<boolean>((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
     const onLoaded = () => {
       cleanup();
-      resolve(true);
+      resolve();
     };
     const onFailed = (
       _event: Electron.Event,
@@ -197,11 +187,47 @@ export function ensureOnAiMode(timeoutMs = 25000): Promise<boolean> {
       webContents.removeListener('did-finish-load', onLoaded);
       webContents.removeListener('did-fail-load', onFailed);
     }
-
-    webContents.on('did-finish-load', onLoaded);
+    webContents.once('did-finish-load', onLoaded);
     webContents.on('did-fail-load', onFailed);
     webContents.loadURL(AI_MODE_URL);
   });
+}
+
+/**
+ * Starts AI Mode over from a fresh load.
+ *
+ * For the one case where being on the page is not enough: a history sidebar that
+ * has stopped yielding rows. The app's own record shows a list sitting at a
+ * fraction of its length with scrollHeight already sized for all of it and no
+ * amount of scrolling growing it, and reopening the sidebar does not always
+ * clear it.
+ */
+export async function reloadAiMode(timeoutMs = 25000): Promise<void> {
+  if (!view) throw new Error('AI Mode view has not been created yet');
+  showAiModePanel();
+  await loadAiMode(timeoutMs);
+}
+
+/**
+ * Puts the panel back on AI Mode if it has wandered — following a link to
+ * myactivity, say. The harvester depends on this page being loaded, and making
+ * it navigate itself is far better than failing with advice: the panel is a
+ * general browser now, so being somewhere else is normal, not user error.
+ *
+ * Returns true if it had to navigate.
+ */
+export async function ensureOnAiMode(timeoutMs = 25000): Promise<boolean> {
+  if (!view) throw new Error('AI Mode view has not been created yet');
+  // Anything that reads the page needs the panel laid out: while hidden it has
+  // zero bounds, so clientHeight is 0 and the thread list has no geometry to
+  // scroll. Re-capture failed with "Thread list never laid out" for exactly
+  // this reason — it had no equivalent of the capture buttons' "show the panel
+  // first" step. Arranging it here covers every caller instead of each one
+  // remembering.
+  showAiModePanel();
+  if (AI_MODE_URL_PATTERN.test(view.webContents.getURL())) return false;
+  await loadAiMode(timeoutMs);
+  return true;
 }
 
 export function aiModeGoBack(): void {

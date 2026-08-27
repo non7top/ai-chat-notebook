@@ -1,7 +1,7 @@
 import { BrowserWindow } from 'electron';
 import * as db from './db';
 import { hammingDistance, promptFingerprint } from '../shared/fingerprint.ts';
-import { ensureOnAiMode, navigateAiMode } from './aiModeView';
+import { ensureOnAiMode, navigateAiMode, reloadAiMode } from './aiModeView';
 import { assetHref, storeImage } from './assets';
 import { rewriteImageSources } from '../shared/rewriteImages.ts';
 import {
@@ -226,6 +226,63 @@ async function walkSidebarThreads(hooks: {
 }
 
 /**
+ * Walks the sidebar, and gives a short walk one second chance from a fresh page.
+ *
+ * A HYPOTHESIS, stated as one rather than presented as a fix: the app's own
+ * record shows a harvest finding 50 rows of a list whose geometry says 305,
+ * minutes after a run that had clicked through hundreds of threads, and the
+ * comment on recycleHistorySidebar describes the same shape from an earlier
+ * session — a list stuck at a fraction of its length, scrollHeight already sized
+ * for all of it, no amount of scrolling growing it. Reopening the sidebar was
+ * the fix that time and evidently is not always.
+ *
+ * So: if the first walk falls short, load the page again and walk once more,
+ * keeping whichever saw more. What makes this worth shipping unmeasured is that
+ * BOTH walks' measurements go into the job record — the next short run says
+ * whether a fresh page helped, which is the thing I cannot find out from here.
+ * The cost of being wrong is one wasted walk; the cost of guessing silently
+ * would be never learning.
+ */
+async function walkSidebarWithSecondChance(
+  hooks: Parameters<typeof walkSidebarThreads>[0] = {},
+): Promise<SidebarWalk> {
+  const first = await walkSidebarThreads(hooks);
+  if (first.complete || hooks.cancelled?.()) return first;
+
+  console.warn(
+    `[sidebar] short walk (${first.ids.size} of ~${first.expected}) — reloading the page ` +
+      `and walking again · ${first.note}`,
+  );
+  try {
+    await reloadAiMode();
+    // Google sorts by recent activity on load and never re-sorts live, so a
+    // freshly loaded list is also a correctly ordered one.
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await ensureHistorySidebarOpen();
+    const recycled = await recycleHistorySidebar();
+    if (recycled.rows === 0) return first;
+  } catch (error) {
+    console.warn(
+      `[sidebar] the reload itself failed — keeping the first walk · ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return first;
+  }
+
+  const second = await walkSidebarThreads(hooks);
+  const better = second.ids.size > first.ids.size ? second : first;
+  return {
+    ...better,
+    // Both, always, and in order. A note carrying only the winner cannot answer
+    // "did the reload help", which is the entire reason this exists.
+    note: `first ${first.ids.size}/~${first.expected} [${first.note}] · after reload ${
+      second.ids.size
+    }/~${second.expected} [${second.note}]`,
+  };
+}
+
+/**
  * Walks the history sidebar top to bottom and records every thread it finds.
  *
  * Only the list: titles and ids, no turns. That is a deliberate first slice —
@@ -272,9 +329,13 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
       );
     }
     const known = db.knownExternalIds();
-    let created = 0;
-    let updated = 0;
-    const walk = await walkSidebarThreads({
+    // Sets, not counters. A short walk gets a second pass over the same list, so
+    // a thread can be reported twice — and "created 3 · updated 100" for a
+    // fifty-row list would be a report of the retry, not of Google. Counting ids
+    // makes the second pass idempotent, which is what re-walking a list is.
+    const createdIds = new Set<string>();
+    const updatedIds = new Set<string>();
+    const walk = await walkSidebarWithSecondChance({
       cancelled: () => cancelRequested,
       onNew: (entry, rank) => {
         const result = db.upsertThreadFromList(
@@ -284,14 +345,22 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
           rank,
         );
         if (result.created) {
-          created += 1;
+          createdIds.add(entry.externalId);
         } else if (known.has(entry.externalId)) {
-          updated += 1;
+          updatedIds.add(entry.externalId);
         }
       },
       onStep: (found, expected) =>
-        broadcast({ phase: 'scanning', found, expected, created, updated }),
+        broadcast({
+          phase: 'scanning',
+          found,
+          expected,
+          created: createdIds.size,
+          updated: updatedIds.size,
+        }),
     });
+    const created = createdIds.size;
+    const updated = updatedIds.size;
 
     const summary: HarvestSummary = {
       found: walk.ids.size,
@@ -1400,7 +1469,7 @@ async function loadSidebarIds(): Promise<Set<string> | null> {
     // being shut says nothing about any particular thread.
     if (recycled.rows === 0) return null;
 
-    const walk = await walkSidebarThreads({ cancelled: () => captureCancelled });
+    const walk = await walkSidebarWithSecondChance({ cancelled: () => captureCancelled });
     // The verdict this whole function exists to support is "Google no longer
     // lists this thread", and an incomplete walk cannot support it. Measured on
     // the real archive: a walk that fell far short of the list's own expected
