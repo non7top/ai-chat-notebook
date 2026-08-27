@@ -6,12 +6,34 @@ show the scale a term operates at, not as a fixed property.
 
 ## Entry
 
-**One row in the second column.** The app's unit: the thing you name, file into a
-folder, pick in a multi-select, and read. Ids look like `#1852`.
+**A unified umbrella: the linking point for an exchange's conversations.**
 
-An entry is not itself the text of a conversation. It is the identity the archive
-keeps for one conversation, and **several conversations can be linked to it** —
-one per source that has an account of it.
+One row in the second column, with an id like `#1852`. It is what you name, file
+into a folder, pick in a multi-select and open. It is the identity the archive
+keeps for one real exchange.
+
+An entry holds **no content of its own**. Everything — the turns, the images, the
+date, the link — belongs to a conversation linked to it. The entry exists so that
+several accounts of the same exchange have somewhere to meet.
+
+### An entry has an origin, and its conversations have sources
+
+Two different provenance facts, easily confused:
+
+- the **source** of a conversation: where that account came from
+- the **origin** of the entry: which source first caused the identity to exist
+
+An entry can arrive from any of them, and `external_id` records which:
+
+| origin | `external_id` | how the entry came to exist |
+|---|---|---|
+| threads | `<google id>` | seen in Google's list |
+| takeout | `takeout:...` | an export described a conversation no entry existed for |
+| a conversation | `entry:<n>` | an orphaned conversation was adopted, creating an umbrella for it |
+
+So an entry that arrived from takeout may later gain a `threads` conversation, and
+one that arrived from threads may later gain a `takeout` one. Neither changes the
+origin: that records how the identity started, not what it now holds.
 
 ## Conversation
 
@@ -84,7 +106,12 @@ of them have a conversation row recording that capture.
 So a capture is a conversation in every sense except how it is stored — which
 means that of the three sources, two produce rows that can coexist and the third
 cannot. The accumulation described above works for `takeout` and `link` and stops
-short for `threads`. What that costs, concretely:
+short for `threads`.
+
+Put against the definition of an entry, it is plainer still: **an entry is meant
+to hold no content of its own, and it holds the capture's turns.** The umbrella is
+carrying one of the things it is supposed to be linking. That single fact is where
+each of the following comes from:
 
 - no date for when it was read, so a stale capture is indistinguishable from a
   fresh one
