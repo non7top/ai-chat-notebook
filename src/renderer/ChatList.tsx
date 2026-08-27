@@ -351,9 +351,14 @@ export default function ChatList({
                 {chat.sources
                   .split(',')
                   .filter(Boolean)
+                  // The stored words are the schema's; these are the ones the
+                  // glossary settled on. 'capture' is stored, 'threads' is what
+                  // it means: read from Google's threads page. Translated at the
+                  // point of display rather than migrated, because 1943 rows
+                  // carry the string and several queries match on it.
                   .map((s) =>
                     s === 'capture'
-                      ? 'panel'
+                      ? 'threads'
                       : s === 'harvest'
                         ? 'listed'
                         : s === 'takeout-date'

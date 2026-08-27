@@ -41,6 +41,30 @@ the only thing worth naming, so the buttons name it and nothing else.
 This is why nothing is discarded when a second account arrives: neither contains
 the other.
 
+## Source
+
+Where a conversation came from. Three today, and the list is open:
+
+| source | the conversation is | reached by |
+|---|---|---|
+| **takeout** | what the export FILE recorded — parsed from `MyActivity.html` | importing an export |
+| **link** | what the page shows when its saved URL is opened | `Read from links` |
+| **threads** | what Google's live page shows now | `Read from threads` |
+
+`takeout` and `link` are not the same source even though the link comes from the
+export: one is the file's own account, the other is what Google serves today when
+that address is opened, and they can disagree. Where they do, both are kept.
+
+Future sources will sit alongside these rather than replacing them —
+`myactivity` first, which holds the same activity live and should loosely match
+the export's. It may well produce different results, which is the reason for
+keeping them apart rather than merging them into one "imported" bucket.
+
+The database stores `capture` where this table says `threads`. The word is
+translated at the point of display: 1943 rows carry the stored string and several
+queries match on it, so a rename there is a migration rather than an edit, and one
+that gains nothing the translation does not.
+
 ## What a conversation records — and the gap
 
 Each conversation should carry its own provenance: which source it came from, and

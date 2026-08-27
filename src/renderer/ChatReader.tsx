@@ -532,11 +532,11 @@ export default function ChatReader({ chat, onChange }: Props) {
             onClick={() => setReading('stored')}
             title={
               chat.sources.split(',').includes('capture')
-                ? 'Read from the live panel — the fullest text and the real images'
-                : 'What is stored for this thread; it has not been read from the panel yet'
+                ? "Read from Google's threads page — the fullest text and the real images"
+                : 'What is stored for this entry; it has not been read from threads yet'
             }
           >
-            {chat.sources.split(',').includes('capture') ? 'panel capture' : 'as imported'} ·{' '}
+            {chat.sources.split(',').includes('capture') ? 'from threads' : 'as imported'} ·{' '}
             {chat.messageCount} turns
             {/* Beside each reading, because neither contains the other's links —
                 one export record kept three inline while the page carried
