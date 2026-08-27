@@ -461,18 +461,24 @@ export default function HarvestBar({
       harvest: start,
       capture: () => startCapture(CAPTURE_ALL_LIMIT),
       retryStuck: () => startCapture(CAPTURE_ALL_LIMIT, true),
+      // Reports through the capture strip like every other capture, rather
+      // than into the status note. It broadcasts the same progress events, so a
+      // hand-written summary here was a second account of one run — and the one
+      // that could not show a live count during a run measured in hours.
       rereadAll: async () => {
-        onNeedPanel();
         setCapturing(true);
+        setCapture(null);
+        onNeedPanel();
         try {
-          const r = await window.notebook.rereadAllFromThreads(CAPTURE_ALL_LIMIT);
-          setTakeoutNote(
-            `${r.captured} re-read of ${r.attempted} tried · ${r.unlisted} no longer listed` +
-              (r.errors ? ` · ${r.errors} failed` : '') +
-              ` · ${r.turns} turns, ${r.images} images`,
-          );
-          onFinished();
-        } finally {
+          await window.notebook.rereadAllFromThreads(CAPTURE_ALL_LIMIT);
+        } catch (err) {
+          setCapture({
+            phase: 'error',
+            done: 0,
+            total: 0,
+            errors: 1,
+            error: err instanceof Error ? err.message : String(err),
+          });
           setCapturing(false);
         }
       },
