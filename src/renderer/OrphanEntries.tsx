@@ -118,7 +118,7 @@ export default function OrphanEntries({ onChange, onNeedPanel }: Props) {
             )}
             <button
               type="button"
-              title="Adopt: give this entry a thread of its own"
+              title="Adopt: give this conversation an entry of its own"
               onClick={async () => {
                 // Unfiled deliberately: filing it is a separate decision, and
                 // guessing a folder here would bury it somewhere unexpected.

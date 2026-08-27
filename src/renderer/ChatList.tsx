@@ -164,7 +164,7 @@ export default function ChatList({
         className="find-input"
         type="search"
         value={query}
-        placeholder="Search thread titles…"
+        placeholder="Search entry titles…"
         onChange={(event) => onQueryChange(event.target.value)}
         onKeyDown={(event) => {
           if (event.key === 'Escape') {
@@ -206,7 +206,7 @@ export default function ChatList({
   );
 
   if (chats.length === 0) {
-    return <p className="hint empty">No threads here yet.</p>;
+    return <p className="hint empty">No entries here yet.</p>;
   }
 
   return (
@@ -214,7 +214,7 @@ export default function ChatList({
       {find}
       {shown.length === 0 && (
         <p className="hint empty">
-          No title matches “{query}”. {chats.length} thread{chats.length === 1 ? '' : 's'} here.
+          No title matches “{query}”. {chats.length} entr{chats.length === 1 ? 'y' : 'ies'} here.
         </p>
       )}
       {shown.map((chat) => {
@@ -316,7 +316,7 @@ export default function ChatList({
                   // sitting alongside the others.
                   <span
                     className="date-placeholder"
-                    title="No real date is known for this thread. This is when the app first saved it — a stand-in until an export supplies the real one."
+                    title="No real date is known for this entry. This is when the app first saved it — a stand-in until an export supplies the real one."
                   >
                     saved {started}
                     {' · '}

@@ -83,7 +83,7 @@ export default function ChatReader({ chat, onChange }: Props) {
             // Focused on appearance: it only exists because Rename was just clicked.
             autoFocus
             value={draft}
-            placeholder="Name this thread"
+            placeholder="Name this entry"
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') commit();
@@ -174,7 +174,7 @@ export default function ChatReader({ chat, onChange }: Props) {
           constructed mtid URL creates a duplicate conversation. Clicking the
           sidebar row is the only faithful route, so it is a button. */}
       <p className="provenance">
-        <span title="Every source that contributed to this thread">
+        <span title="Every source that contributed to this entry">
           {chat.sources
             .split(',')
             .filter(Boolean)
@@ -195,13 +195,13 @@ export default function ChatReader({ chat, onChange }: Props) {
           (chat.dateBasis === 'placeholder' ? (
             <span
               className="date-placeholder"
-              title="No real date is known for this thread. This is when the app first saved it."
+              title="No real date is known for this entry. This is when the app first saved it."
             >
               {' · saved '}
               {displayDateTime(chat.startedAt)} (no real date known)
             </span>
           ) : (
-            <span title="Inferred by matching the Takeout prompt text, not from a thread id">
+            <span title="Inferred by matching the Takeout prompt text, not from an id">
               {' · ~'}
               {displayDateTime(chat.startedAt)} (inferred)
             </span>
@@ -243,18 +243,22 @@ export default function ChatReader({ chat, onChange }: Props) {
           click. */}
       <div className="sources">
         <button type="button" className="sources-toggle" onClick={() => setShowEntries((v) => !v)}>
-          {showEntries ? '▾' : '▸'} {entries.filter((e) => e.linked).length} data{' '}
-          {entries.filter((e) => e.linked).length === 1 ? 'entry' : 'entries'}
+          {/* "conversations", not "data entries". Under the vocabulary the second
+              column holds entries and each of these is one source's account of
+              the exchange — calling them entries too was the confusion the
+              glossary exists to end. */}
+          {showEntries ? '▾' : '▸'} {entries.filter((e) => e.linked).length}{' '}
+          {entries.filter((e) => e.linked).length === 1 ? 'conversation' : 'conversations'}
           {entries.some((e) => !e.linked) && (
             <span className="sources-hint">
               {' '}
-              · {entries.filter((e) => !e.linked).length} unattached with the same prompt
+              · {entries.filter((e) => !e.linked).length} unattached, same prompt
             </span>
           )}
           {candidates.length > 0 && (
             <span className="sources-hint">
               {' '}
-              · {candidates.length} similar {candidates.length === 1 ? 'thread' : 'threads'}
+              · {candidates.length} similar {candidates.length === 1 ? 'entry' : 'entries'}
             </span>
           )}
         </button>
@@ -391,8 +395,8 @@ export default function ChatReader({ chat, onChange }: Props) {
                     disabled={fetching}
                     title={
                       entry.linked
-                        ? "Loads this record by its link and stores the conversation into this thread. Refuses to store anything if the page's answer does not match the export's."
-                        : "Loads this record by its link and stores the conversation. This entry is not attached to this thread, so it becomes its own — Glue it first if it belongs here."
+                        ? "Loads this record by its link and stores the conversation into this entry. Refuses to store anything if the page's answer does not match the export's."
+                        : "Loads this record by its link and stores the conversation. This conversation is not attached to this entry, so it becomes its own — Glue it first if it belongs here."
                     }
                     onClick={async () => {
                       setFetching(true);
@@ -435,7 +439,7 @@ export default function ChatReader({ chat, onChange }: Props) {
                 ) : (
                   <button
                     type="button"
-                    title="Glue: this entry belongs to this thread"
+                    title="Glue: this conversation belongs to this entry"
                     onClick={async () => {
                       await window.notebook.linkSourceEntry(chat.id, entry.id);
                       loadSources();
@@ -453,9 +457,9 @@ export default function ChatReader({ chat, onChange }: Props) {
                 <span className="chat-id">#{other.id}</span>
                 <span
                   className="source-kind"
-                  title="A different thread in this archive that opens with the same prompt. Not a source of this one — a candidate, listed because nothing is grouped automatically."
+                  title="A different entry in this archive that opens with the same prompt. Not a source of this one — a candidate, listed because nothing is grouped automatically."
                 >
-                  another thread, same prompt
+                  another entry, same prompt
                 </span>
                 <span className="source-facts">
                   {other.startedAt ? displayDateTime(other.startedAt) : 'no date'}
@@ -466,7 +470,7 @@ export default function ChatReader({ chat, onChange }: Props) {
                 </span>
                 <button
                   type="button"
-                  title="Glue: fold this thread's entries into this one. Reversible."
+                  title="Glue: fold this entry's conversations into this one. Reversible."
                   onClick={async () => {
                     const ok = await window.notebook.confirm(
                       'Glue these threads?',

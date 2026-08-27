@@ -280,7 +280,7 @@ export default function FolderTree({
                 title={
                   isCollapsed && counts && subtree[folder.id] > (counts.byFolder[folder.id] ?? 0)
                     ? `${subtree[folder.id]} including subfolders — ${counts.byFolder[folder.id] ?? 0} directly in this one`
-                    : 'Threads in this folder'
+                    : 'Entries in this folder'
                 }
               />
               {/* Out of the flow entirely. visibility: hidden still RESERVES the
@@ -330,7 +330,7 @@ export default function FolderTree({
               <button
                 type="button"
                 className="row-action"
-                title="Delete folder (threads inside become Unfiled)"
+                title="Delete folder (entries inside become Unfiled)"
                 onClick={(event) => {
                   event.stopPropagation();
                   deleteFolder(folder);
@@ -448,8 +448,8 @@ export default function FolderTree({
         onClick={() => onScopeChange({ kind: 'all' })}
       >
         <span className="twisty-spacer" />
-        <span className="tree-name">All threads</span>
-        <Count n={counts?.all} title="Every thread, filed or not" />
+        <span className="tree-name">All entries</span>
+        <Count n={counts?.all} title="Every entry, filed or not" />
       </div>
       <div
         className={`tree-row${sameScope(scope, { kind: 'unfiled' }) ? ' selected' : ''}${
@@ -465,11 +465,11 @@ export default function FolderTree({
       >
         <span className="twisty-spacer" />
         <span className="tree-name">Unfiled</span>
-        <Count n={counts?.unfiled} title="Threads in no folder — drop one here to unfile it" />
+        <Count n={counts?.unfiled} title="Entries in no folder — drop one here to unfile it" />
       </div>
 
       {/* The counterpart to Unfiled, and the reason both now carry a number:
-          with almost everything unfiled, "All threads" and "Unfiled" listed
+          with almost everything unfiled, "All entries" and "Unfiled" listed
           nearly the same 2848 rows and nothing on screen said so. This is the
           pile you have actually sorted, across every folder at once — which no
           single folder can show. */}
@@ -479,7 +479,7 @@ export default function FolderTree({
       >
         <span className="twisty-spacer" />
         <span className="tree-name">Filed</span>
-        <Count n={counts?.filed} title="Threads placed in some folder" />
+        <Count n={counts?.filed} title="Entries placed in some folder" />
       </div>
 
       {/* The capture backlog. A thread with no turns is indistinguishable from a
@@ -490,8 +490,8 @@ export default function FolderTree({
         onClick={() => onScopeChange({ kind: 'empty' })}
       >
         <span className="twisty-spacer" />
-        <span className="tree-name">Empty threads</span>
-        <Count n={counts?.empty} title="Threads the app knows of but holds no turns for" />
+        <span className="tree-name">Empty entries</span>
+        <Count n={counts?.empty} title="Entries with no conversation stored yet" />
       </div>
 
       {/* Raw entries belonging to no conversation. Kept beside Unfiled rather
@@ -503,7 +503,7 @@ export default function FolderTree({
       >
         <span className="twisty-spacer" />
         <span className="tree-name">Orphan entries</span>
-        <Count n={counts?.orphans} title="Export entries attached to no thread" />
+        <Count n={counts?.orphans} title="Conversations attached to no entry" />
       </div>
 
       <div className="tree-divider" />
