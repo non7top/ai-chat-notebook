@@ -43,8 +43,8 @@ images, and the date it happened.
 A conversation comes from a source, and the same real exchange can be known from
 more than one:
 
-Every way of getting content produces a conversation. They differ only in the
-source, which is why each action names its source and nothing else:
+Every way of getting content produces a conversation. They differ in the source,
+and in what that source is good for — see "Which one to believe" below:
 
 | from | action | what that conversation carries |
 |---|---|---|
