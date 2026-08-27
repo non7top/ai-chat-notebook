@@ -296,6 +296,14 @@ jobs:
       # So the room is made first and the upload fills it, leaving exactly one:
       # the installer from THIS build. Deleting all of them here is safe because
       # the rolling prerelease is the reliable route to a binary, not this store.
+      #
+      # It does NOT take effect the same run, and the log says why in one line:
+      # "Artifact storage quota has been hit. Unable to upload any new artifacts.
+      # Usage is recalculated every 6-12 hours." Deleting frees the bytes, not the
+      # accounting. So the first build after this lands still fails to upload with
+      # an EMPTY store, and the store only reopens once GitHub recounts. That is
+      # the reason the step below tolerates its own failure and the PR comment
+      # falls back to the prerelease link.
       - name: Make room in the artifact store
         shell: bash
         # Never fail a green build over housekeeping.
@@ -349,5 +357,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           LABEL_SUFFIX="${{ steps.artifact_names.outputs.version_tag || steps.vars.outputs.sha_short }}"
+          ARTIFACT_URL="${{ steps.upload-installer.outputs.artifact-url }}"
+          # An empty url means the upload failed, and it fails whenever the
+          # artifact quota's accounting says full — which it can for 6-12 hours
+          # after the store has actually been emptied. A comment linking an empty
+          # url reads as "here is your build" and goes nowhere; the prerelease has
+          # the same installer and was never affected.
+          if [ -n "$ARTIFACT_URL" ]; then
+            LINK="- [ai-chat-notebook-installer-${LABEL_SUFFIX}]($ARTIFACT_URL)"
+          else
+            LINK="- the artifact store would not take it (quota) — [get it from the rolling prerelease](https://github.com/${{ github.repository }}/releases/tag/pr-${{ github.event.pull_request.number }}-latest)"
+          fi
           gh pr comment "${{ github.event.pull_request.number }}" --body "Windows build ready for \`${{ steps.vars.outputs.sha_short }}\`:
-          - [ai-chat-notebook-installer-${LABEL_SUFFIX}](${{ steps.upload-installer.outputs.artifact-url }})"
+          $LINK"
