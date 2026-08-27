@@ -147,6 +147,24 @@ async function walkSidebarThreads(hooks: {
       'The thread list has no measurable height yet — the sidebar may still be opening',
     );
   }
+  // MEASURED on the live app, and it explains a walk that sees a handful of rows
+  // of a list that is plainly there: clientHeight 0 with scrollHeight 12184, and
+  // the page's own innerHeight and innerWidth both 0. The panel had no bounds at
+  // all while the UI showed it as visible.
+  //
+  // Nothing about that state is detectable from the row count — ten rows render
+  // and read perfectly well — but the step is clientHeight * STEP_FRACTION, so a
+  // height of zero is a step of zero: two hundred scrolls that move nothing,
+  // absorbing the same ten rows, and a walk that reports what it saw as though it
+  // had looked. The old loadSidebarIds checked this and I dropped the check when I
+  // merged the two walks into one. Restored here, where both callers get it.
+  if (geometry.clientHeight === 0) {
+    throw new Error(
+      'The thread list has zero height, so scrolling it cannot move: the panel has ' +
+        'no bounds. The window may be minimised, or the panel hidden — show it and ' +
+        'try again.',
+    );
+  }
 
   const ids = new Set<string>();
   const absorb = (entries: ThreadListEntry[]) => {
