@@ -63,6 +63,30 @@ the only thing worth naming, so the buttons name it and nothing else.
 This is why nothing is discarded when a second account arrives: neither contains
 the other.
 
+## Where this is going
+
+The model above describes what the app should be; the schema implements two
+thirds of it. The shift, agreed rather than assumed:
+
+**A conversation becomes a row, whatever its source.** Today only `takeout`
+conversations are rows; `threads` and `link` readings are written into the entry's
+turns, which is why there is one slot for them and the second overwrites the
+first. Giving every source a row of its own is what makes the accumulation real,
+and it brings a date, a link and an id with it.
+
+**Not a retroactive repair.** The readings already overwritten are gone — the
+evidence of what they held is the thing that was replaced — and no migration can
+reconstruct them. Existing entries keep what they have.
+
+**The cheap forward path needs no migration at all.** `threads` is the better
+content source 99% of the time, so any entry whose reading came from a link can be
+improved by reading it from threads again, while Google still lists it.
+`Read from threads` already does that.
+
+So this is a direction, not a defect list. Written down because the vocabulary now
+says these three sources are the same kind of thing, and until the storage agrees,
+anyone reading the schema will conclude the vocabulary is wrong rather than early.
+
 ## Source
 
 Where a conversation came from. Three today, and the list is open:
