@@ -8,7 +8,10 @@ images)**, lets them be named and filed into a folder tree by hand, and lets
 any saved conversation be **resumed** in an embedded browser panel, with the
 new turns saving straight back.
 
-See [project.md](project.md) for the original brief.
+See [project.md](project.md) for the original brief, and
+[docs/GLOSSARY.md](docs/GLOSSARY.md) for what the words mean — thread, entry,
+link, reading, orphan — since several of them name things that look alike and
+behave differently.
 
 The archive is the point, not a cache: once a conversation is here it should
 render fully with the network off.
