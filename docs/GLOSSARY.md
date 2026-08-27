@@ -81,8 +81,10 @@ Half of that is true today. Measured 2026-08-27:
 `kind = 'takeout'`. 1943 entries hold turns that came from a capture, and **0**
 of them have a conversation row recording that capture.
 
-So a capture is a conversation in every sense except how it is stored. What that
-costs, concretely:
+So a capture is a conversation in every sense except how it is stored — which
+means that of the three sources, two produce rows that can coexist and the third
+cannot. The accumulation described above works for `takeout` and `link` and stops
+short for `threads`. What that costs, concretely:
 
 - no date for when it was read, so a stale capture is indistinguishable from a
   fresh one
@@ -102,21 +104,41 @@ not agree.
 **Google's word, for what Google still holds: the ~300 latest entries.**
 
 AI Mode says "New thread" and "Search threads", and its history sidebar lists
-about three hundred. A thread is not a different kind of thing from an entry — it
-is an entry that Google can still show you. Everything older has been rotated out
-of that sidebar and survives only through a link.
+about three hundred. Everything older has been rotated out of it and survives only
+through a link.
 
-That distinction is most of this app's difficulty. An entry Google still lists can
-be re-read from the panel; an entry it has dropped can only be pulled through a
-link, and if the link fails there is no other route. Measured: about 300 of 2868
-entries are threads in this sense.
+A thread is **both** things at once, and an earlier version of this file got that
+wrong by calling it only an entry Google can still show you. It is:
 
-So "thread" appears here when the sentence is about Google's side — "Google no
-longer lists this thread" — and "entry" when it is about the archive's.
+- **an entry** — the identity the archive keeps, created the first time the thread
+  is seen in the list
+- **a source** — and reading it produces one conversation, the `threads` one
+
+## How one exchange accumulates
+
+The same real exchange arrives from up to three directions, and each arrival adds
+a conversation to the same entry rather than replacing what is there:
+
+```
+read the threads list        -> entry #1852 exists
+read it from threads         -> conversation: source threads
+import an export later       -> conversation: source takeout
+open that export's link      -> conversation: source link
+(myactivity, later)          -> conversation: source myactivity
+```
+
+One entry, several conversations, one per source. None of them is authoritative:
+the `threads` one has the fuller text and the original images, the `takeout` one
+has a second-precision date and links the live page has since dropped, and the
+`link` one is what Google serves for that address today, which may differ from
+what the export recorded when it was made.
+
+This is the whole reason the model is many-to-many, and the reason nothing is
+discarded when a later account arrives.
 
 An entry records which thread it came from:
 
-- `<google id>` — still listed, so the panel can open it
+- `<google id>` — still listed, so it can be read from threads
 - `takeout:...` — known only from an export; Google does not list it
 - `entry:<n>` — created from a conversation that belonged to no entry yet
 
