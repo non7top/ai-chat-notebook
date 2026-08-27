@@ -220,15 +220,22 @@ export async function ensureOnAiMode(timeoutMs = 25000): Promise<boolean> {
   if (!view) throw new Error('AI Mode view has not been created yet');
   // MINIMISED WINDOW, refused up front rather than discovered per thread.
   //
-  // The panel's bounds come from getContentSize(), so a minimised window sizes it
-  // 0x0 — measured on the live app: the page's own innerHeight and innerWidth both
-  // 0, the history scroller at clientHeight 0 with scrollHeight 12184, ten rows
-  // rendered. Chromium does not render or lazily load into a view with no size, so
-  // the list cannot grow however long it is scrolled, and every read succeeds while
-  // describing a page nobody is showing.
+  // Measured on the live app, and the numbers do not say what I first assumed.
+  // The app's OWN page keeps its layout while minimised — innerWidth 1267,
+  // innerHeight 691, so getContentSize() is not zero and a check on it would never
+  // have fired. What is zero is the panel: the AI Mode page reports innerHeight and
+  // innerWidth 0, its history scroller clientHeight 0 against scrollHeight 12184,
+  // ten rows rendered. A minimised window's child WebContentsView is simply not
+  // laid out, and document.visibilityState on the app's page reads 'hidden'.
   //
-  // That is almost certainly what a walk finding 50 rows of 305 was: a run left to
-  // get on with it, and a window minimised because it takes hours. Nothing said so.
+  // Chromium does not render or lazily load into a view with no size, so the list
+  // cannot grow however long it is scrolled, and every read succeeds while
+  // describing a page nobody is showing. That is what a walk finding 50 rows of 305
+  // was: a run left to get on with it, and a window minimised because it takes
+  // hours. Nothing said so.
+  //
+  // isMinimized() is therefore the check that works; the size check stays only as a
+  // belt for a genuinely zero-sized window.
   if (mainWindowRef?.isMinimized() || (mainWindowRef?.getContentSize()[1] ?? 0) === 0) {
     throw new Error(
       'The window is minimised, so the panel has no size and Google will not render ' +
