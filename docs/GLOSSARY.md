@@ -154,11 +154,45 @@ open that export's link      -> conversation: source link
 (myactivity, later)          -> conversation: source myactivity
 ```
 
-One entry, several conversations, one per source. None of them is authoritative:
-the `threads` one has the fuller text and the original images, the `takeout` one
-has a second-precision date and links the live page has since dropped, and the
-`link` one is what Google serves for that address today, which may differ from
-what the export recorded when it was made.
+One entry, several conversations, one per source.
+
+### Which one to believe
+
+Authority is **per field**, not per source. Measured on 1835 entries holding both
+a `threads` and a `takeout` conversation:
+
+| field | believe | evidence |
+|---|---|---|
+| turns, images, citations | **threads** | more turns than takeout on 229 entries, equal on 1592, fewer on only 16 — never worse in 99.1% of cases, and it carries the original images and the source chips |
+| the date | **takeout** | second-precision where the panel gives the day only. `date_basis` is `takeout` on 2789 of 2868 entries, `panel` on 18 |
+| links the page has dropped | **takeout** | at least one measured case where the export kept an anchor the live page no longer has |
+
+Ranked on content: **threads best, takeout worst, link unpredictable** — a link
+returns whatever Google serves for that address today, which may be the full
+exchange, may be a thinner one, and may be an error page.
+
+The 16 entries where threads has FEWER turns than takeout matter: a capture taken
+while the page was still rendering and an exchange that grew after being read look
+identical from the outside. That is why both readings are kept rather than the
+fuller one replacing the other.
+
+Except that they are not. See below.
+
+### Where a reading is lost today
+
+The `link` reading cannot be compared against anything, because the archive does
+not hold one. Measured: **0** entries were read from a link and never from
+threads.
+
+Both write to the same place — the entry's turns — so the second reading
+**replaces** the first. 972 entries carry the sources string
+`takeout,capture,link`, claiming three accounts while holding two: the takeout
+conversation, and whichever of threads-or-link ran last.
+
+So "nothing is ever lost" holds for takeout conversations, which are rows, and
+does not hold between `threads` and `link`. It is the same gap as the missing
+capture row, seen from the other side: with only one slot for a non-takeout
+reading, a second one has nowhere to go but on top of the first.
 
 This is the whole reason the model is many-to-many, and the reason nothing is
 discarded when a later account arrives.
