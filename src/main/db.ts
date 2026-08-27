@@ -1342,6 +1342,65 @@ export interface ChatToCapture {
  */
 export const MAX_CAPTURE_ATTEMPTS = 4;
 
+/**
+ * Every entry Google could still be holding, for a full re-read.
+ *
+ * chatsWithoutTurns answers "what has nothing yet", which is the right queue for
+ * filling gaps and the wrong one for improving what is already there. Measured on
+ * the real archive: 365 entries carry a Google id, and that queue would take
+ * ZERO of them — 351 because they already have turns from some source. Meanwhile
+ * 98 have never been read from threads at all. So pressing "Re-read from threads"
+ * by hand produced content on entry after entry while the bulk path reported
+ * nothing to do, which is exactly what it was asked about, repeatedly.
+ *
+ * This queue takes ALL of them, whatever they already hold and however many times
+ * they have been tried, because the threads reading is the better content account
+ * 99% of the time and the point is to get it everywhere it can be had.
+ *
+ * takeout: and entry: ids are excluded: they carry no Google thread id, so the
+ * sidebar cannot open them however many times it is asked.
+ *
+ * Ordered by Google's own list position, newest first — the oldest are the ones
+ * most likely to have been rotated out, so the run gets the reachable ones done
+ * before it meets the wall.
+ */
+export function entriesForFullReread(limit: number): ChatToCapture[] {
+  const rows = db
+    .prepare(
+      `SELECT id, external_id, capture_attempts, ${CHAT_TITLE_SQL} AS title
+         FROM chats
+        WHERE merged_into IS NULL
+          AND external_id NOT LIKE 'takeout:%'
+          AND external_id NOT LIKE 'entry:%'
+        ORDER BY CASE WHEN list_rank IS NULL THEN 1 ELSE 0 END, list_rank ASC, id ASC
+        LIMIT ?`,
+    )
+    .all(limit) as unknown as {
+    id: number;
+    external_id: string;
+    title: string;
+    capture_attempts: number;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    externalId: r.external_id,
+    title: r.title,
+    attempts: r.capture_attempts,
+  }));
+}
+
+export function countEntriesForFullReread(): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM chats
+        WHERE merged_into IS NULL
+          AND external_id NOT LIKE 'takeout:%'
+          AND external_id NOT LIKE 'entry:%'`,
+    )
+    .get() as unknown as { n: number };
+  return row.n;
+}
+
 export function chatsWithoutTurns(limit: number, includeExhausted = false): ChatToCapture[] {
   const rows = db
     .prepare(

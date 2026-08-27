@@ -283,6 +283,8 @@ const createWindow = () => {
     // Threads adopted from a record that already had a thread. 346 of these were
     // made by one link run before it learned to attach rather than adopt.
     const adopted = db.planAdoptedFold().length;
+    // Every entry with a Google id, whatever it already holds.
+    const rereadable = db.countEntriesForFullReread();
     // Groups that are the same conversation stored twice, settled by the start
     // instant rather than by the prompt alone.
     const sameInstant = db.planPromptInstantFold().reduce((n, g) => n + g.foldIds.length, 0);
@@ -357,6 +359,23 @@ const createWindow = () => {
                     ? `Nothing waiting — but ${stuck} threads have been given up on, below`
                     : 'Every listed thread has been read',
               click: command('capture'),
+            },
+            {
+              // The one that was asked for repeatedly: read EVERYTHING Google
+              // still holds, not just what has nothing yet. Measured, the
+              // gap-filling queue would take 0 of 365 sidebar-capable entries
+              // because 351 already have turns from some source.
+              label:
+                rereadable > 0
+                  ? `Re-read all ${rereadable} from threads`
+                  : 'Re-read all from threads',
+              enabled: rereadable > 0,
+              toolTip:
+                'Reads every entry Google could still be holding, one after another, ' +
+                'and replaces what is stored with what the threads page shows. Hours; ' +
+                'Stop works at any point. Entries Google no longer lists are skipped ' +
+                'from a single sweep of the sidebar rather than searched for one by one.',
+              click: command('rereadAll'),
             },
             {
               // The way back to the threads the flows have stopped taking. A

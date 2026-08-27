@@ -531,6 +531,12 @@ export interface NotebookApi {
    * capture channel, so the control strip shows it and Stop works.
    */
   recaptureMany(chatIds: number[]): Promise<CaptureSummary>;
+  /**
+   * Re-reads every entry Google could still be holding, from threads — whatever
+   * each already holds. The counterpart to captureTurns, which only fills entries
+   * that have nothing. Overwrites the stored reading.
+   */
+  rereadAllFromThreads(limit: number): Promise<CaptureSummary>;
   onCaptureProgress(callback: (progress: CaptureProgress) => void): () => void;
   countChatsWithoutTurns(): Promise<number>;
 

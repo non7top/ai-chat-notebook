@@ -461,6 +461,21 @@ export default function HarvestBar({
       harvest: start,
       capture: () => startCapture(CAPTURE_ALL_LIMIT),
       retryStuck: () => startCapture(CAPTURE_ALL_LIMIT, true),
+      rereadAll: async () => {
+        onNeedPanel();
+        setCapturing(true);
+        try {
+          const r = await window.notebook.rereadAllFromThreads(CAPTURE_ALL_LIMIT);
+          setTakeoutNote(
+            `${r.captured} re-read of ${r.attempted} tried · ${r.unlisted} no longer listed` +
+              (r.errors ? ` · ${r.errors} failed` : '') +
+              ` · ${r.turns} turns, ${r.images} images`,
+          );
+          onFinished();
+        } finally {
+          setCapturing(false);
+        }
+      },
       fetchLinks,
       scanTakeout,
       applyTakeout,

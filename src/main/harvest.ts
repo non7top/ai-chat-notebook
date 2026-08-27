@@ -606,6 +606,28 @@ export async function recaptureMany(chatIds: number[]): Promise<CaptureSummary> 
 }
 
 /**
+ * Re-reads every entry Google could still be holding, from threads.
+ *
+ * The single action that was asked for repeatedly and did not exist. captureTurns
+ * fills entries that have nothing; this improves entries that already have
+ * something, which is a different job and the one wanted: the threads reading has
+ * more turns than the export's on 229 entries, equal on 1592 and fewer on 16, and
+ * it carries the original images.
+ *
+ * Built on recaptureMany rather than beside it, so it inherits the sidebar list
+ * loaded once, the per-thread ceiling, the not-listed verdict and the progress
+ * reporting instead of a second copy of each.
+ *
+ * It OVERWRITES what is stored, which is the intent — and worth knowing: where an
+ * entry's stored reading came from a link, this replaces it, and until
+ * conversations become rows per source there is nowhere for both to live.
+ */
+export async function rereadAllFromThreads(limit: number): Promise<CaptureSummary> {
+  const queue = db.entriesForFullReread(limit);
+  return recaptureMany(queue.map((c) => c.id));
+}
+
+/**
  * Shows a conversation in the live panel.
  *
  * Uses the sidebar-click path, which is the only faithful way in: a Takeout

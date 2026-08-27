@@ -34,6 +34,7 @@ const api: NotebookApi = {
   cancelCapture: () => ipcRenderer.invoke('capture:cancel'),
   recaptureChat: (chatId) => ipcRenderer.invoke('capture:recapture', chatId),
   recaptureMany: (chatIds) => ipcRenderer.invoke('capture:recaptureMany', chatIds),
+  rereadAllFromThreads: (limit) => ipcRenderer.invoke('capture:rereadAll', limit),
   countChatsWithoutTurns: () => ipcRenderer.invoke('capture:remaining'),
   onCaptureProgress: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, progress: CaptureProgress) =>
