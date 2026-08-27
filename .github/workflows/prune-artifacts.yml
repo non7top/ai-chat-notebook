@@ -1,0 +1,77 @@
+# Keeps exactly one build artifact in the repository.
+#
+# retention-days: 3 in build.yml bounds how LONG an artifact lives, not how many
+# exist at once, and those are different problems: twenty pushes in a day is
+# twenty live artifacts of ~99MB inside a three-day window, which is 2GB of a
+# 10GB account quota. Measured before this ran: 27 live artifacts, ~2.7GB.
+#
+# A full quota fails the upload step of an otherwise green build, which reads as
+# a broken build rather than as a full disk — so the pile is worth deleting on a
+# schedule rather than noticing later.
+#
+# Runs AFTER a build rather than before its upload: the newest artifact is then a
+# real thing with an id to keep, instead of one this job has to predict. It also
+# means the pruning applies to builds that were made before this workflow existed.
+name: Prune artifacts
+
+on:
+  workflow_run:
+    workflows: [Build]
+    types: [completed]
+  # So the backlog can be cleared without waiting for a push.
+  workflow_dispatch:
+
+# Least privilege: this job deletes things, and `actions: write` is the only
+# scope it needs to do it.
+permissions:
+  actions: write
+
+concurrency:
+  # Two builds finishing together would otherwise both try to delete the same
+  # ids, and the loser reports a 404 as a failure.
+  group: prune-artifacts
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep only the newest artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Expired artifacts are already gone as bytes; listing them and then
+          # deleting them produces 404s that look like real failures.
+          gh api --paginate "repos/$REPO/actions/artifacts" \
+            --jq '.artifacts[] | select(.expired == false) | "\(.created_at)\t\(.id)\t\(.name)"' \
+            | sort -r > all.tsv || true
+
+          total=$(wc -l < all.tsv)
+          echo "live artifacts: $total"
+          if [ "$total" -le 1 ]; then
+            echo "nothing to prune"
+            exit 0
+          fi
+
+          keep=$(head -1 all.tsv)
+          echo "keeping: $keep"
+
+          # Deleted one at a time and reported by name, so a partial run says
+          # what it managed rather than only that it failed. A 404 here is a
+          # concurrent delete, not an error worth failing the job over.
+          failed=0
+          tail -n +2 all.tsv | while IFS=$'\t' read -r created id name; do
+            if gh api -X DELETE "repos/$REPO/actions/artifacts/$id" >/dev/null 2>&1; then
+              echo "  deleted $name ($created)"
+            else
+              echo "  could not delete $name ($created) — already gone?"
+              failed=$((failed + 1))
+            fi
+          done
+
+          left=$(gh api --paginate "repos/$REPO/actions/artifacts" \
+                 --jq '[.artifacts[] | select(.expired == false)] | length')
+          echo "live artifacts now: $left"

@@ -103,6 +103,129 @@ export interface HarvestSummary {
 }
 
 /**
+ * What one walk of Google's history sidebar saw.
+ *
+ * `complete` is the only field safe to draw a conclusion FROM. A virtualised
+ * list that yields 50 of 305 looks identical from the inside to one that holds
+ * 50, so every caller that would act on an absence has to know whether the walk
+ * finished — see the verdict below.
+ */
+interface SidebarWalk {
+  ids: Set<string>;
+  /** Reached the bottom, stopped growing, AND matched the expected total. */
+  complete: boolean;
+  /** Exited by stagnation at the bottom rather than by the step ceiling. */
+  reachedBottom: boolean;
+  expected: number;
+  steps: number;
+  /** The measurements behind the verdict, for the job record. */
+  note: string;
+}
+
+/**
+ * Walks the history sidebar top to bottom and reports what it saw.
+ *
+ * ONE implementation, used by the harvest and by the capture flows' listed-or-not
+ * check. There were two, and they had drifted: this one carries the `grew` guard
+ * that keeps a lazy-loading list from being abandoned at its first quiet moment,
+ * and the copy inside loadSidebarIds did not. The consequence was measured on the
+ * real archive — a walk that saw a handful of rows, and 358 entries marked
+ * "no longer listed" on the strength of it.
+ *
+ * Assumes the sidebar is already open and verified. Reads and scrolls only;
+ * every write is the caller's, through onNew.
+ */
+async function walkSidebarThreads(hooks: {
+  onNew?: (entry: ThreadListEntry, rank: number) => void;
+  onStep?: (found: number, expected: number) => void;
+  cancelled?: () => boolean;
+} = {}): Promise<SidebarWalk> {
+  await scrollListToTop();
+  const geometry = await getListGeometry();
+  if (geometry.expectedTotal === 0) {
+    throw new Error(
+      'The thread list has no measurable height yet — the sidebar may still be opening',
+    );
+  }
+
+  const ids = new Set<string>();
+  const absorb = (entries: ThreadListEntry[]) => {
+    for (const entry of entries) {
+      if (ids.has(entry.externalId)) continue;
+      // The size before insertion is this thread's position in Google's own
+      // ordering, because the walk starts at the top and never goes back.
+      const rank = ids.size;
+      ids.add(entry.externalId);
+      hooks.onNew?.(entry, rank);
+    }
+  };
+
+  absorb(await readRenderedThreads());
+  hooks.onStep?.(ids.size, geometry.expectedTotal);
+
+  let steps = 0;
+  let stagnantAtBottom = 0;
+  let reachedBottom = false;
+  let lastScrollHeight = geometry.scrollHeight;
+  for (let step = 0; step < MAX_STEPS; step += 1) {
+    if (hooks.cancelled?.()) break;
+    steps += 1;
+    const before = ids.size;
+    // Capped, so the walk cannot outrun the rendering. See STEP_MAX_PX.
+    const scrolled = await scrollListBy(
+      Math.min(geometry.clientHeight * STEP_FRACTION, STEP_MAX_PX),
+    );
+    await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+    absorb(await readRenderedThreads());
+    hooks.onStep?.(ids.size, geometry.expectedTotal);
+
+    // Growing scrollHeight means the list loaded more below: it was at its
+    // bottom, and its bottom moved. Treating that as "no new rows three times,
+    // stop" is how a lazy-loading list gets abandoned halfway.
+    const grew = scrolled.scrollHeight > lastScrollHeight;
+    lastScrollHeight = Math.max(lastScrollHeight, scrolled.scrollHeight);
+    if (scrolled.atBottom && ids.size === before && !grew) {
+      stagnantAtBottom += 1;
+      if (stagnantAtBottom >= STAGNANT_AT_BOTTOM_LIMIT) {
+        reachedBottom = true;
+        break;
+      }
+    } else {
+      stagnantAtBottom = 0;
+    }
+  }
+
+  // One last read. Rendering lags the scroll by a step — measured: eleven steps
+  // passed before the first new rows appeared — so the final step's rows are
+  // still arriving when the loop's own read happens.
+  await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+  absorb(await readRenderedThreads());
+  hooks.onStep?.(ids.size, geometry.expectedTotal);
+
+  // Deliberately fuzzy. expectedTotal is scrollHeight divided by a rounded row
+  // height, so it lands near the truth but not on it: measured live, 12052 / 40
+  // gives 301 for a list that really holds 300. An exact `>=` would have called
+  // every complete harvest incomplete.
+  const enough = ids.size >= Math.floor(geometry.expectedTotal * 0.95);
+  const note =
+    `scrollHeight ${geometry.scrollHeight}px / pitch ${geometry.pitch}px ` +
+    `(row ${geometry.rowHeight}px, ${geometry.rendered} rendered) = ~${geometry.expectedTotal}` +
+    ` · panel ${geometry.clientHeight}px, step ${Math.round(
+      Math.min(geometry.clientHeight * STEP_FRACTION, STEP_MAX_PX),
+    )}px, ${steps} steps` +
+    ` · ${reachedBottom ? 'reached the bottom' : 'stopped at the step ceiling'}`;
+
+  return {
+    ids,
+    complete: reachedBottom && enough,
+    reachedBottom,
+    expected: geometry.expectedTotal,
+    steps,
+    note,
+  };
+}
+
+/**
  * Walks the history sidebar top to bottom and records every thread it finds.
  *
  * Only the list: titles and ids, no turns. That is a deliberate first slice —
@@ -148,29 +271,12 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
           'harvest. The panel may not be signed in, or the list may still be loading.',
       );
     }
-    await scrollListToTop();
-
-    const geometry = await getListGeometry();
-    if (geometry.expectedTotal === 0) {
-      throw new Error(
-        'The thread list has no measurable height yet — the sidebar may still be opening',
-      );
-    }
-
-    const seen = new Map<string, string>();
     const known = db.knownExternalIds();
     let created = 0;
     let updated = 0;
-    let stagnantAtBottom = 0;
-    let lastScrollHeight = geometry.scrollHeight;
-
-    const absorb = (entries: ThreadListEntry[]) => {
-      for (const entry of entries) {
-        if (seen.has(entry.externalId)) continue;
-        // seen.size before insertion is this thread's position in Google's
-        // own ordering, because the scroll walks the list from the top.
-        const rank = seen.size;
-        seen.set(entry.externalId, entry.title);
+    const walk = await walkSidebarThreads({
+      cancelled: () => cancelRequested,
+      onNew: (entry, rank) => {
         const result = db.upsertThreadFromList(
           entry.externalId,
           entry.title,
@@ -182,104 +288,29 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
         } else if (known.has(entry.externalId)) {
           updated += 1;
         }
-      }
-    };
-
-    absorb(await readRenderedThreads());
-    broadcast({
-      phase: 'scanning',
-      found: seen.size,
-      expected: geometry.expectedTotal,
-      created,
-      updated,
+      },
+      onStep: (found, expected) =>
+        broadcast({ phase: 'scanning', found, expected, created, updated }),
     });
 
-    let steps = 0;
-    for (let step = 0; step < MAX_STEPS; step += 1) {
-      if (cancelRequested) break;
-      steps += 1;
-
-      const before = seen.size;
-      // Capped, so the walk cannot outrun the rendering. See STEP_MAX_PX.
-      const scrolled = await scrollListBy(
-        Math.min(geometry.clientHeight * STEP_FRACTION, STEP_MAX_PX),
-      );
-      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
-      absorb(await readRenderedThreads());
-
-      broadcast({
-        phase: 'scanning',
-        found: seen.size,
-        expected: geometry.expectedTotal,
-        created,
-        updated,
-      });
-
-      // Growing scrollHeight means the list loaded more below: it was at its
-      // bottom, and its bottom moved. Treating that as "no new rows three times,
-      // stop" is how a lazy-loading list gets abandoned halfway — which is one
-      // of the two explanations for a harvest that reported 150 of a list a
-      // previous run had walked to 299.
-      const grew = scrolled.scrollHeight > lastScrollHeight;
-      lastScrollHeight = Math.max(lastScrollHeight, scrolled.scrollHeight);
-      if (scrolled.atBottom && seen.size === before && !grew) {
-        stagnantAtBottom += 1;
-        if (stagnantAtBottom >= STAGNANT_AT_BOTTOM_LIMIT) break;
-      } else {
-        stagnantAtBottom = 0;
-      }
-    }
-
-    // One last read. Rendering lags the scroll by a step — measured: eleven steps
-    // passed before the first new rows appeared — so the final step's rows are
-    // still arriving when the loop's own read happens.
-    await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
-    absorb(await readRenderedThreads());
-
-    // Compared against the pre-measured expectation rather than just reported.
-    // A virtualised list that yields 40 of 300 looks exactly like a finished one
-    // from the inside, so a short result has to be visible as a shortfall.
-    //
-    // The comparison is deliberately fuzzy. expectedTotal is scrollHeight
-    // divided by a rounded row height, so it lands near the truth but not on
-    // it: measured live, 12052 / 40 gives 301 for a list that really holds 300.
-    // An exact `>=` would therefore have reported every single complete harvest
-    // as incomplete — caught only by running the real numbers. Padding on the
-    // container or a fractional row height can push it either way, so allow a
-    // small margin and reserve the warning for a genuine shortfall.
-    const complete = seen.size >= Math.floor(geometry.expectedTotal * 0.95);
-    // The measurements behind the verdict, recorded with it. A bare "150 / ~301
-    // INCOMPLETE" says a run fell short without saying whether the run or the
-    // expectation was wrong, and those need opposite fixes.
-    const geometryNote =
-      `scrollHeight ${geometry.scrollHeight}px / pitch ${geometry.pitch}px ` +
-      `(row ${geometry.rowHeight}px, ${geometry.rendered} rendered) = ~${geometry.expectedTotal}` +
-      // clientHeight and the step, which are the numbers that decide how much of
-      // the list a walk sees at all — and which I left out of the first version
-      // of this note, so the run that reported "130 / ~301" could not be read.
-      // The step is capped now, but a note that omits the deciding variable is
-      // how the next surprise stays a surprise.
-      ` · panel ${geometry.clientHeight}px, step ${Math.round(
-        Math.min(geometry.clientHeight * STEP_FRACTION, STEP_MAX_PX),
-      )}px, ${steps} steps`;
     const summary: HarvestSummary = {
-      found: seen.size,
-      expected: geometry.expectedTotal,
+      found: walk.ids.size,
+      expected: walk.expected,
       created,
       updated,
-      complete,
+      complete: walk.complete,
       cancelled: cancelRequested,
     };
     db.recordJob(
       'harvest',
-      cancelRequested ? 'stopped' : complete ? 'finished' : 'failed',
+      cancelRequested ? 'stopped' : walk.complete ? 'finished' : 'failed',
       // The real start, not the moment the record is written. Passing
       // new Date() here made startedAt and endedAt identical — 09:07:17.951Z for
       // both on a walk that took minutes — so the record could not answer "did
       // it stop early or grind to the end", which is the first thing to ask of
       // an incomplete run.
       harvestStartedAt,
-      { ...summary, geometry: geometryNote },
+      { ...summary, geometry: walk.note },
     );
     broadcast({ phase: cancelRequested ? 'cancelled' : 'done', ...summary });
     return summary;
@@ -1368,35 +1399,25 @@ async function loadSidebarIds(): Promise<Set<string> | null> {
     // rather than declaring every thread in the queue missing — the sidebar
     // being shut says nothing about any particular thread.
     if (recycled.rows === 0) return null;
-    await scrollListToTop();
-    const geometry = await getListGeometry();
-    if (geometry.clientHeight === 0) return null;
 
-    const ids = new Set<string>();
-    const absorb = async () => {
-      for (const entry of await readRenderedThreads()) ids.add(entry.externalId);
-    };
-    await absorb();
-    let stagnant = 0;
-    for (let step = 0; step < MAX_STEPS; step += 1) {
-      if (captureCancelled) break;
-      const before = ids.size;
-      const scrolled = await scrollListBy(
-        Math.min(geometry.clientHeight * STEP_FRACTION, STEP_MAX_PX),
+    const walk = await walkSidebarThreads({ cancelled: () => captureCancelled });
+    // The verdict this whole function exists to support is "Google no longer
+    // lists this thread", and an incomplete walk cannot support it. Measured on
+    // the real archive: a walk that fell far short of the list's own expected
+    // total led to 358 entries being marked as gone in one run, each of them
+    // still perfectly present in Google's sidebar.
+    //
+    // So a short walk returns null — "cannot tell" — exactly as a shut sidebar
+    // does. The caller then attempts each thread instead of writing off a queue
+    // on the strength of a list it never finished reading.
+    if (!walk.complete) {
+      console.warn(
+        `[capture] the sidebar walk fell short (${walk.ids.size} of ~${walk.expected}) ` +
+          `— every thread will be attempted rather than declared missing · ${walk.note}`,
       );
-      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
-      await absorb();
-      if (scrolled.atBottom && ids.size === before) {
-        stagnant += 1;
-        if (stagnant >= STAGNANT_AT_BOTTOM_LIMIT) break;
-      } else {
-        stagnant = 0;
-      }
+      return null;
     }
-    // Rendering lags the scroll, so the last step's rows are still arriving.
-    await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
-    await absorb();
-    return ids;
+    return walk.ids;
   } catch {
     // Same reasoning as the null above: a failure here says nothing about any
     // individual thread.
