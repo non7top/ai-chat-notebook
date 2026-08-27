@@ -104,7 +104,7 @@ export default function ChatReader({ chat, onChange }: Props) {
             <button
               type="button"
               disabled={recapturing}
-              title="Re-read this thread from Google, replacing what is stored"
+              title="Re-reads this thread by clicking its row in Google's live sidebar. That reading has the fuller text and the original images — but only works while Google still lists the thread."
               onClick={async () => {
                 setRecapturing(true);
                 setRecaptureError(null);
@@ -121,8 +121,38 @@ export default function ChatReader({ chat, onChange }: Props) {
                 }
               }}
             >
-              {recapturing ? 'Re-capturing…' : 'Re-capture'}
+              {/* Named for its SOURCE, which is the only thing that
+                  distinguishes it from the button beside it. "Re-capture" and
+                  "Fetch from link" both mean "read this thread again"; what
+                  differs is where from, and that difference is the whole point
+                  of keeping two readings. */}
+              {recapturing ? 'Reading panel…' : 'Re-read: panel'}
             </button>
+            {/* Beside the panel re-read, not a row below it. They are the same
+                act from different sources — and they were on separate rows with
+                names that hid that, so which one to press was a guess. */}
+            {linkEntry !== null && (
+              <button
+                type="button"
+                disabled={fetching}
+                title="Re-reads this thread by loading the export's saved link. The only route once Google stops listing a thread, and it keeps second-precision dates and links the live page has since dropped. Refuses to store anything if the page does not match the export's own reading."
+                onClick={async () => {
+                  setFetching(true);
+                  setRecaptureError(null);
+                  try {
+                    const result = await window.notebook.captureFromEntryLink(linkEntry);
+                    if (result.rejected) setRecaptureError(`Not stored — ${result.rejected}`);
+                    else onChange();
+                  } catch (err) {
+                    setRecaptureError(err instanceof Error ? err.message : String(err));
+                  } finally {
+                    setFetching(false);
+                  }
+                }}
+              >
+                {fetching ? 'Reading link…' : 'Re-read: export link'}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -194,36 +224,6 @@ export default function ChatReader({ chat, onChange }: Props) {
             Open in panel
           </button>
         )}
-        {/* For the threads the sidebar no longer lists, which is most of them:
-            the export's link is the only way back to the real thread, with the
-            full text and the generated images. Offered only where there is no
-            panel reading already, since that reading is the better one. */}
-        {!chat.sources.split(',').includes('capture') && linkEntry !== null && (
-          <button
-            type="button"
-            className="provenance-open"
-            disabled={fetching}
-            title="Open this thread by its link in the export and capture what the page shows. Stores nothing if the page's answer does not match the export's."
-            onClick={async () => {
-              setFetching(true);
-              setRecaptureError(null);
-              try {
-                const result = await window.notebook.captureFromEntryLink(linkEntry);
-                if (result.rejected) {
-                  setRecaptureError(`Not stored — ${result.rejected}`);
-                } else {
-                  onChange();
-                }
-              } catch (err) {
-                setRecaptureError(err instanceof Error ? err.message : String(err));
-              } finally {
-                setFetching(false);
-              }
-            }}
-          >
-            {fetching ? 'Fetching…' : 'Fetch from link'}
-          </button>
-        )}
       </p>
 
       {recaptureError && (
@@ -289,9 +289,12 @@ export default function ChatReader({ chat, onChange }: Props) {
               }
             }}
           >
+            {/* Same vocabulary as the two buttons in the header: "re-read",
+                and the source named. Three controls that all re-read a thread
+                should not use three different words for it. */}
             {fetching
-              ? 'Fetching…'
-              : `Fetch this and ${candidates.length} similar`}
+              ? 'Reading panel…'
+              : `Re-read all ${candidates.length + 1} from panel`}
           </button>
         )}
 
