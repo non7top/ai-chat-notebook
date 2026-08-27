@@ -261,202 +261,21 @@ button:disabled {
   background: var(--selected);
 }
 
-/* Says how many are held and what to do with them. It appears only while
-   something is picked: the risk of a multi-select is filing rows you had
-   forgotten were held, so the count is never off screen while it matters. */
-.picked-bar {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.3rem 0.5rem;
-  margin-bottom: 0.2rem;
-  background: #dbeafe;
-  border: 1px solid #bfdbfe;
-  border-radius: 6px;
-  font-size: 0.75rem;
-  position: sticky;
-  /* Sticky, because the pick is made by scrolling: shift-clicking a row four
-     hundred down would otherwise leave the count somewhere above the window. */
-  top: 0;
-  z-index: 1;
-}
-
-.picked-bar button {
-  margin-left: auto;
-  font-size: 0.72rem;
-}
-
-/* Folder colours.
-
-   A fixed palette rather than a free colour, and defined once here so the
-   swatch, the folder's own mark and the chip on a thread are the same colour by
-   construction. db.ts validates against the same list of keys before storing —
-   an arbitrary string reaching a custom property would be both a styling escape
-   and a way to make a folder invisible against its own row. */
-.c-slate {
-  --folder: #64748b;
-}
-.c-red {
-  --folder: #dc2626;
-}
-.c-amber {
-  --folder: #d97706;
-}
-.c-green {
-  --folder: #16a34a;
-}
-.c-teal {
-  --folder: #0d9488;
-}
-.c-blue {
-  --folder: #2563eb;
-}
-.c-violet {
-  --folder: #7c3aed;
-}
-.c-pink {
-  --folder: #db2777;
-}
-
-/* The folder's mark on its own row. A dot when only a colour is set, the glyph
-   when there is one — so an unmarked folder is not a hole where a column should
-   be. */
-.folder-mark {
-  width: 0.85rem;
+/* The picked count, in the search row rather than a bar of its own — see the
+   note in ChatList. Styled as a chip so it reads as a live state you can dismiss
+   rather than as a label, and sized to fit beside the input without pushing it. */
+.picked-chip {
   flex: none;
-  font-size: 0.8rem;
-  line-height: 1;
-  text-align: center;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.35rem;
+  background: #dbeafe;
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+  white-space: nowrap;
 }
 
-.folder-mark.c-slate::before,
-.folder-mark.c-red::before,
-.folder-mark.c-amber::before,
-.folder-mark.c-green::before,
-.folder-mark.c-teal::before,
-.folder-mark.c-blue::before,
-.folder-mark.c-violet::before,
-.folder-mark.c-pink::before {
-  content: '';
-  display: inline-block;
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 50%;
-  background: var(--folder);
-}
-
-/* The glyph replaces the dot rather than sitting beside it: two marks for one
-   folder in a 14px row is one too many. */
-.folder-mark:not(:empty)::before {
-  display: none;
-}
-
-/* The folder's own name, in its colour. The dot alone was too small to answer
-   "did that do anything" — a colour set on a folder has to be visible ON the
-   folder, immediately, or the picker is a control with no feedback. */
-.tree-name.c-slate,
-.tree-name.c-red,
-.tree-name.c-amber,
-.tree-name.c-green,
-.tree-name.c-teal,
-.tree-name.c-blue,
-.tree-name.c-violet,
-.tree-name.c-pink {
-  color: var(--folder);
-  font-weight: 600;
-}
-
-/* Where a thread belongs, shown on the thread. Coloured by its folder, and
-   falling back to the row's own muted grey for a folder with no colour set —
-   the name is still the answer. */
-.chat-folder {
-  color: var(--folder, var(--muted));
-  font-weight: 500;
-}
-
-.style-picker {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.2rem;
-  padding: 0.3rem;
-  margin: 0.1rem 0;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
-
-/* Says what each group of controls is. Without them it was eight circles, a
-   smiley and a text box, and no indication that the box was the icon or that
-   anything in the row had been saved. */
-.picker-label {
-  font-size: 0.68rem;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-left: 0.2rem;
-}
-
-.picker-label:not(:first-child) {
-  margin-left: 0.5rem;
-}
-
-.icon-choice {
-  padding: 0.05rem 0.2rem;
-  font-size: 0.85rem;
-  line-height: 1.1;
-  border-color: transparent;
-  background: none;
-}
-
-.icon-choice:hover {
-  border-color: var(--border);
-  background: #ffffff;
-}
-
-.icon-choice.chosen {
-  border-color: var(--fg);
-  background: #ffffff;
-}
-
-/* Closes the picker; it does not save, because everything in here has saved
-   already. Named Done rather than OK for exactly that reason. */
-.picker-done {
-  margin-left: auto;
-  font-size: 0.72rem;
-}
-
-.swatch {
-  width: 1rem;
-  height: 1rem;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 50%;
-  background: var(--folder, transparent);
-  cursor: pointer;
-  font-size: 0.6rem;
-  line-height: 1;
-  color: var(--muted);
-}
-
-/* The chosen one is ringed rather than merely bigger: at 16px a size change is
-   not a state anyone can read. */
-.swatch.chosen {
-  outline: 2px solid var(--fg);
-  outline-offset: 1px;
-}
-
-.swatch.none {
-  border-color: var(--border);
-}
-
-.icon-input {
-  width: 2.4rem;
-  text-align: center;
-  font-size: 0.85rem;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0.1rem;
+.picked-chip:hover {
+  background: #bfdbfe;
 }
 
 /* ------------------------------------------------------------------- tree */

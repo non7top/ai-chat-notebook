@@ -10,6 +10,7 @@ import type {
   Folder,
   ScopeCounts,
 } from '../shared/types';
+import { loadLastPlace, saveLastPlace } from './lastPlace';
 import ChatList from './ChatList';
 import OrphanEntries from './OrphanEntries';
 import TakeoutReport, { type TakeoutReportData } from './TakeoutReport';
@@ -22,9 +23,12 @@ import PanelBar from './PanelBar';
 export default function App() {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [counts, setCounts] = useState<ScopeCounts | null>(null);
-  const [scope, setScope] = useState<ChatScope>({ kind: 'all' });
+  // Restored from the last session. Read once, lazily, so it happens before the
+  // first render rather than as an effect that would flash "All threads" first.
+  const [restored] = useState(loadLastPlace);
+  const [scope, setScope] = useState<ChatScope>(restored.scope);
   const [chats, setChats] = useState<ChatSummary[]>([]);
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [selectedId, setSelectedId] = useState<number | null>(restored.selectedId);
   // Threads picked for filing. Separate from selectedId, which is the one being
   // READ: gathering a dozen rows about one topic and reading one of them are
   // different acts, and a single piece of state cannot be both.
@@ -116,6 +120,13 @@ export default function App() {
       window.removeEventListener('error', onError);
     };
   }, []);
+
+  // Written on every change rather than on close: an app that is killed, or
+  // crashes, or is updated mid-session would otherwise remember nothing, and
+  // those are exactly the sessions where getting back matters.
+  useEffect(() => {
+    saveLastPlace({ scope, selectedId });
+  }, [scope, selectedId]);
 
   useEffect(() => window.notebook.onAiModeStatus(setStatus), []);
   // The main process reveals the panel when an operation needs it, so follow

@@ -37,6 +37,11 @@ export default function ChatList({
   onQueryChange,
 }: Props) {
   const box = useRef<HTMLInputElement>(null);
+  // Whether the restored selection has been scrolled to yet. Once only: doing it
+  // on every selection change would yank the view whenever anything selected
+  // programmatically, and doing it never leaves a restored entry open in the
+  // reader with its row somewhere in 2868 rows of list.
+  const broughtIntoView = useRef(false);
   // Where a shift-click measures from. Not the reader's selection: shift-click
   // must extend from the last row DELIBERATELY picked, and the reader's row
   // changes for reasons of its own.
@@ -68,6 +73,22 @@ export default function ChatList({
     () => (terms.length === 0 ? chats : chats.filter((c) => matchesTitle(c.title, terms))),
     [chats, terms],
   );
+
+  // Brings the restored selection on screen, once, after the rows exist.
+  //
+  // The reader opens the entry you were last on, and without this its row was
+  // wherever it happened to be in the list — usually nowhere visible. `center`
+  // rather than `nearest` because the point is to show what is around it.
+  // content-visibility does not interfere: the rows reserve their height, so the
+  // browser can compute where to scroll without painting what it skips.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs once, when the rows first arrive
+  useEffect(() => {
+    if (broughtIntoView.current || selectedId === null || shown.length === 0) return;
+    broughtIntoView.current = true;
+    document
+      .querySelector(`.chat-row[data-chat-id="${selectedId}"]`)
+      ?.scrollIntoView({ block: 'center' });
+  }, [shown.length]);
 
   /**
    * A click on a row, with the modifiers that turn one pick into many.
@@ -152,10 +173,34 @@ export default function ChatList({
           }
         }}
       />
-      {terms.length > 0 && (
-        <span className="find-count">
-          {shown.length} of {chats.length}
-        </span>
+      {/* The picked count lives in THIS row, which is always present, rather
+          than in a bar of its own.
+
+          A bar that appears when something is picked is a bar inserted into the
+          flow: every row below it moves down the moment you click, so the list
+          jumps under the pointer exactly when you are aiming at it — and again
+          when the pick is cleared. Reserving the space permanently would cost a
+          row of the scarce direction; overlaying it would cover the first entry.
+          Putting it where a row already exists costs nothing and moves nothing.
+
+          It replaces the filter count while a pick is held: both are "what is
+          this list showing right now", and the pick is the more urgent of the
+          two. */}
+      {picked.size > 0 ? (
+        <button
+          type="button"
+          className="picked-chip"
+          title="Drag any picked row onto a folder to file them all. Click here, or press Escape, to let go."
+          onClick={() => onPickedChange(new Set())}
+        >
+          {picked.size} picked ✕
+        </button>
+      ) : (
+        terms.length > 0 && (
+          <span className="find-count">
+            {shown.length} of {chats.length}
+          </span>
+        )
       )}
     </div>
   );
@@ -167,22 +212,6 @@ export default function ChatList({
   return (
     <div className="chat-list">
       {find}
-      {/* Only present while something is picked, and it says what to do with
-          them. A multi-select nobody can see the extent of is worse than none:
-          the whole risk of this feature is filing rows you did not know were
-          held. */}
-      {picked.size > 0 && (
-        <div className="picked-bar">
-          <span>
-            {picked.size} picked — drag onto a folder
-          </span>
-          <button type="button" onClick={() => onPickedChange(new Set())}>
-            Clear
-          </button>
-        </div>
-      )}
-      {/* Said explicitly. An empty list under a filled search box reads as "this
-          folder is empty", which is a different and more alarming claim. */}
       {shown.length === 0 && (
         <p className="hint empty">
           No title matches “{query}”. {chats.length} thread{chats.length === 1 ? '' : 's'} here.
@@ -197,6 +226,9 @@ export default function ChatList({
         return (
         <div
           key={chat.id}
+          // Addressable, so the restored selection can be found and scrolled to
+          // without keeping a ref per row for a list this long.
+          data-chat-id={chat.id}
           className={`chat-row${enriched ? ' enriched' : ''}${
             chat.id === selectedId ? ' selected' : ''
           }${picked.has(chat.id) ? ' picked' : ''}`}
