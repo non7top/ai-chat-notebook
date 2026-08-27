@@ -347,8 +347,8 @@ const createWindow = () => {
             {
               label:
                 queued > 0
-                  ? `Read threads from the panel (${queued})`
-                  : 'Read threads from the panel',
+                  ? `Read from threads (${queued})`
+                  : 'Read from threads',
               enabled: queued > 0,
               toolTip:
                 queued > 0
@@ -379,8 +379,8 @@ const createWindow = () => {
               // says that; "open" hid it.
               label:
                 links > 0
-                  ? `Read threads from the export's links (${links})`
-                  : "Read threads from the export's links",
+                  ? `Read from links (${links})`
+                  : 'Read from links',
               enabled: links > 0,
               toolTip:
                 'Loads each record by its Takeout link and stores the conversation — ' +

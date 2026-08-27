@@ -1126,11 +1126,11 @@ export async function syncArchive(mode: SyncMode): Promise<SyncSummary> {
   // be step 1 of 2 is worse than no step count.
   const steps =
     mode === 'new'
-      ? ['Refreshing the thread list', 'Reading new threads']
+      ? ['Refreshing the thread list', 'Reading from threads']
       : [
           'Refreshing the thread list',
-          'Reading threads from the panel',
-          "Reading threads from the export's links",
+          'Reading from threads',
+          'Reading from links',
           'Matching entries to threads',
         ];
   let index = 0;

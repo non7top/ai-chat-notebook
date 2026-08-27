@@ -126,7 +126,7 @@ export default function ChatReader({ chat, onChange }: Props) {
                   "Fetch from link" both mean "read this thread again"; what
                   differs is where from, and that difference is the whole point
                   of keeping two readings. */}
-              {recapturing ? 'Reading panel…' : 'Re-read: panel'}
+              {recapturing ? 'Reading threads…' : 'Re-read from threads'}
             </button>
             {/* Beside the panel re-read, not a row below it. They are the same
                 act from different sources — and they were on separate rows with
@@ -150,7 +150,7 @@ export default function ChatReader({ chat, onChange }: Props) {
                   }
                 }}
               >
-                {fetching ? 'Reading link…' : 'Re-read: export link'}
+                {fetching ? 'Reading link…' : 'Re-read from link'}
               </button>
             )}
             <button
@@ -293,8 +293,8 @@ export default function ChatReader({ chat, onChange }: Props) {
                 and the source named. Three controls that all re-read a thread
                 should not use three different words for it. */}
             {fetching
-              ? 'Reading panel…'
-              : `Re-read all ${candidates.length + 1} from panel`}
+              ? 'Reading threads…'
+              : `Re-read ${candidates.length + 1} from threads`}
           </button>
         )}
 
