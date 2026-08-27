@@ -31,6 +31,22 @@ have several: one export record per submission, so a conversation snapshotted
 three times as it grew is three entries. Measured: 1932 threads hold one entry,
 47 hold two.
 
+**An entry does hold a conversation** — its own copy of the turns, images, date
+and link, as that source recorded them. So "a captured conversation" is close,
+and the difference is worth keeping because the app uses `capture` for something
+else:
+
+|  | written by | stored in | shown as |
+|---|---|---|---|
+| **capture** | the app, reading Google's live panel | the thread's turns | `Re-read: panel` |
+| **entry** | a source — the Takeout export — describing what it saw | the entry's own payload | `Re-read: export link`, `e#1674` |
+
+Both are readings of the same conversation. A capture is the app's own; an entry
+is somebody else's, kept verbatim. That is why the reader can show you either and
+why it labels which one you are looking at — and why a thread with 13 turns from
+an entry and 4 from a capture is not a contradiction, just two accounts of
+different lengths.
+
 Entries are kept whole so a parser fix can be applied by re-reading them rather
 than by asking Google again.
 
