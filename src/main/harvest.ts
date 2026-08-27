@@ -7,6 +7,8 @@ import { rewriteImageSources } from '../shared/rewriteImages.ts';
 import {
   ensureHistorySidebarOpen,
   recycleHistorySidebar,
+  readPageKind,
+  PageNotAiModeError,
   getListGeometry,
   readRenderedThreads,
   scrollListBy,
@@ -679,6 +681,20 @@ export async function captureFromEntryLink(entryId: number): Promise<LinkCapture
   }
 
   await navigateAiMode(entry.href);
+  // Asked what the page IS before waiting for what it should contain. Google
+  // answers these links with its own error page often enough to matter, and that
+  // page has no turns — so the settle below waited 90 seconds and then 60 more
+  // for content that was never coming, and called the result "slow". Caught live
+  // on an mstk link: "internal server error ... try again later", no sidebar, no
+  // turns.
+  const kind = await readPageKind();
+  if (!kind.isAiMode) {
+    throw new PageNotAiModeError(
+      kind.looksLikeServerError
+        ? "Google's own error page — try again later"
+        : `no AI Mode page here, ${kind.chars} characters of something else`,
+    );
+  }
   // Longer than a sidebar click gets, because this is a whole page load against
   // Google rather than a render inside a page already open — and tried twice.
   // A page that has not finished is the ordinary case here, not a fault, and
@@ -924,6 +940,18 @@ export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
         // A page that was not ready is not evidence about the session. It stays
         // in the queue for a later run — nothing was stored and nothing was
         // marked — and it does not push the run toward giving up.
+        // Google served something that is not the conversation — its own error
+        // page, most often. Treated like a page that was not ready, because the
+        // handling is the same: nothing stored, nothing marked, stays in the
+        // queue, and it says nothing about the session so it must not push the
+        // run toward giving up. Counted apart so a run of them reads as "Google
+        // is having a bad day" rather than as an archive problem.
+        if (error instanceof PageNotAiModeError) {
+          summary.notReady += 1;
+          if (item.chatId) db.setLinkState(item.chatId, 'error', error.message.slice(0, 200));
+          await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS * 2));
+          continue;
+        }
         if (error instanceof PageNotReadyError) {
           summary.notReady += 1;
           db.setLinkState(

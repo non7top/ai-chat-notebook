@@ -514,8 +514,26 @@ export default function HarvestBar({
         const run = commands.current[name];
         // A menu item naming a command that does not exist is a wiring mistake,
         // and a silent no-op is exactly how it would go unnoticed.
-        if (!run) setTakeoutNote(`no such command: ${name}`);
-        else run();
+        if (!run) {
+          setTakeoutNote(`no such command: ${name}`);
+          return;
+        }
+        // Caught HERE as well as globally. Several of these handlers use
+        // try/finally with no catch, so a failure cleared the busy flag and said
+        // nothing — and the strip is where the person is looking, not a banner
+        // at the top of the window.
+        try {
+          const result = run() as unknown;
+          if (result instanceof Promise) {
+            result.catch((err: unknown) =>
+              setTakeoutNote(
+                `${name} failed — ${err instanceof Error ? err.message : String(err)}`,
+              ),
+            );
+          }
+        } catch (err) {
+          setTakeoutNote(`${name} failed — ${err instanceof Error ? err.message : String(err)}`);
+        }
       }),
     [],
   );

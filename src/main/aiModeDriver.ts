@@ -849,6 +849,69 @@ export class ThreadNotListedError extends Error {
   }
 }
 
+/**
+ * Is the panel on an AI Mode page at all?
+ *
+ * Google answers an export link with its own error page often enough to matter —
+ * "internal server error ... try again later", caught live on an mstk link. That
+ * page has no turns, so every caller waited out a 90-second settle and then a
+ * 60-second retry for content that was never coming, and reported it as "slow",
+ * which is what a page that IS merely loading also reports.
+ *
+ * Judged STRUCTURALLY rather than by the message. A real AI Mode page carries the
+ * history sidebar container whether or not it is open; an error page, a consent
+ * interstitial and a sign-in redirect all lack it. Keying on the English words
+ * would work today and fail on the first localised error page.
+ *
+ * The message is still read when it is there, because a reason a person can act
+ * on beats a category — but it is reported, not relied upon.
+ */
+const PAGE_KIND_SCRIPT = `
+(() => {
+  try {
+    const hasSidebar = !!document.querySelector(${JSON.stringify(THREAD_LIST_SCROLLER)});
+    const turns = document.querySelectorAll('div.CKgc1d').length;
+    const text = (document.body ? document.body.textContent || '' : '').replace(/\\s+/g, ' ');
+    return {
+      ok: true,
+      isAiMode: hasSidebar,
+      turns: turns,
+      // Reported for the message, not used for the verdict.
+      looksLikeServerError: /internal server error|try again later/i.test(text),
+      chars: text.length,
+    };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+})();
+`;
+
+export interface PageKind {
+  isAiMode: boolean;
+  turns: number;
+  looksLikeServerError: boolean;
+  chars: number;
+}
+
+export async function readPageKind(): Promise<PageKind> {
+  return run<PageKind>(PAGE_KIND_SCRIPT, 15_000);
+}
+
+/**
+ * Google served something that is not the conversation.
+ *
+ * Distinguished from a page that is still rendering, because the two need
+ * opposite handling: a slow page is worth waiting for, and this is worth
+ * abandoning immediately and trying again another day. Both leave the record in
+ * the queue — the fault is Google's and it is not permanent.
+ */
+export class PageNotAiModeError extends Error {
+  constructor(detail: string) {
+    super(`Google did not serve the conversation (${detail})`);
+    this.name = 'PageNotAiModeError';
+  }
+}
+
 export async function openThreadById(externalId: string): Promise<void> {
   // 90s against the script's own 60s budget, so the SCRIPT is what concludes,
   // not the timeout. The other way round — a 120s runner against a search that

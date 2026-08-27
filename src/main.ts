@@ -22,6 +22,43 @@ import { inlineImageLabel, inlineImagesWorthMoving } from './shared/inlineLabel'
 // Electron shows no right-click menu anywhere by default (unlike a normal
 // browser) — this adds the standard cut/copy/paste/inspect-element menu,
 // including inside the embedded AI Mode view.
+/**
+ * Nothing in the main process fails silently.
+ *
+ * Electron's default for an uncaught exception is to print it to a console
+ * nobody is looking at and, depending on where it happened, carry on in an
+ * unknown state. An unhandled rejection is quieter still: with no handler the
+ * process logs a warning and continues, so a broken long-running operation looks
+ * exactly like one that finished.
+ *
+ * This app spends most of its time in operations that take minutes against a
+ * live third-party page. "It stopped and said nothing" has been the report more
+ * than once today, and every time the first job was to work out whether anything
+ * had failed at all. Said out loud now, once, with the stack kept.
+ */
+function reportFatal(kind: string, error: unknown): void {
+  const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+  // eslint-disable-next-line no-console
+  console.error(`[Notebook] ${kind}:`, detail);
+  // A dialog rather than a silent log, because a log in a packaged app is a log
+  // nobody reads. Guarded: showErrorBox before the app is ready throws, and a
+  // failure in the reporter must not replace the failure being reported.
+  try {
+    if (app.isReady()) {
+      dialog.showErrorBox(
+        `AI Chat Notebook — ${kind}`,
+        `${detail.slice(0, 1800)}\n\nThe archive is not damaged by this: every write ` +
+          'goes through a transaction. Whatever was running has stopped, and can be run again.',
+      );
+    }
+  } catch {
+    /* Reporting must never be the thing that takes the app down. */
+  }
+}
+
+process.on('uncaughtException', (error) => reportFatal('unexpected error', error));
+process.on('unhandledRejection', (reason) => reportFatal('unhandled rejection', reason));
+
 contextMenu({
   showInspectElement: true,
 });

@@ -97,6 +97,26 @@ export default function App() {
     reloadChat();
   }, [reloadChat]);
 
+  // Anything that fails without being caught reaches the banner instead of the
+  // console. Several commands in the control strip used try/finally with no
+  // catch, so a failing operation cleared its own busy flag and said nothing —
+  // which is indistinguishable from one that did nothing because there was
+  // nothing to do. The banner is already here for errors; this is what makes the
+  // uncaught ones use it.
+  useEffect(() => {
+    const onRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      setError(reason instanceof Error ? reason.message : String(reason));
+    };
+    const onError = (event: ErrorEvent) => setError(event.message);
+    window.addEventListener('unhandledrejection', onRejection);
+    window.addEventListener('error', onError);
+    return () => {
+      window.removeEventListener('unhandledrejection', onRejection);
+      window.removeEventListener('error', onError);
+    };
+  }, []);
+
   useEffect(() => window.notebook.onAiModeStatus(setStatus), []);
   // The main process reveals the panel when an operation needs it, so follow
   // that rather than letting the toggle claim it is hidden while it is visible.
