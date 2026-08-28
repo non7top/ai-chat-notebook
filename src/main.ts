@@ -285,6 +285,9 @@ const createWindow = () => {
     const adopted = db.planAdoptedFold().length;
     // Every entry with a Google id, whatever it already holds.
     const rereadable = db.countEntriesForFullReread();
+    // Links the import left inside an entry's payload and never wrote down as a
+    // record. The link queue is record-based, so these are invisible to it.
+    const strandedLinks = db.planTakeoutLinkRecovery().entries;
     // Groups that are the same conversation stored twice, settled by the start
     // instant rather than by the prompt alone.
     const sameInstant = db.planPromptInstantFold().reduce((n, g) => n + g.foldIds.length, 0);
@@ -407,6 +410,24 @@ const createWindow = () => {
                 'that belong to no thread yet. Every page is checked against the ' +
                 "export's own reading before anything is stored.",
               click: command('fetchLinks'),
+            },
+            {
+              // Sits directly above "Read from links" because it is what makes
+              // that item's count true. Measured: 815 entries hold a Takeout link
+              // in their stored payload and no record carrying it, so the reader
+              // shows a link on the entry while the link queue reports nothing to
+              // do — both correct about different places.
+              label:
+                strandedLinks > 0
+                  ? `Recover ${strandedLinks} links from imported entries`
+                  : 'Recover links from imported entries',
+              enabled: strandedLinks > 0,
+              toolTip:
+                'Writes down links that the import left inside an entry and never ' +
+                'turned into a record, so Read from links can see them. Opens ' +
+                'nothing and stores nothing from Google — it only makes links ' +
+                'already in the archive reachable.',
+              click: command('recoverLinks'),
             },
             {
               label: 'Match entries to threads',

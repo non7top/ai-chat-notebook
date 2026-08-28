@@ -3506,6 +3506,137 @@ export function threadsWithLinksToFetch(limit: number): ThreadToFetch[] {
  * Per entry, which is the unit of work: one record, one link, one verdict.
  */
 /**
+ * Links that the import left on the entry and never turned into a record.
+ *
+ * MEASURED on the real archive: 2680 entries carry a Takeout link inside
+ * chats.raw_json — the payload is `{"takeout":{"href":"..."}}` — and 815 of them
+ * have no record holding that href. The link queue is entirely record-based, so
+ * those 815 are invisible to it: the reader shows the entry's link, "Read from
+ * links" says there is nothing to do, and both are telling the truth about
+ * different places.
+ *
+ * 780 of the 815 have never been read from threads either, which makes this the
+ * bulk of the population I had called unreachable. It is not unreachable; its
+ * links were simply never written down anywhere a query could find them.
+ *
+ * Recovered rather than re-derived: the href is already on the entry, so
+ * attaching it to that entry needs no judgement — the pairing is not a guess, it
+ * is what the import stored. That is the standard for doing this automatically.
+ */
+export interface TakeoutLinkRecovery {
+  /** Entries holding a payload link with no record to carry it. */
+  entries: number;
+}
+
+export function planTakeoutLinkRecovery(): TakeoutLinkRecovery {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM chats c
+        WHERE c.merged_into IS NULL
+          AND c.raw_json LIKE '%udm=50%'
+          AND NOT EXISTS (
+                SELECT 1 FROM chat_sources cs
+                  JOIN source_entries se ON se.id = cs.source_entry_id
+                 WHERE cs.chat_id = c.id AND se.href IS NOT NULL)`,
+    )
+    .get() as unknown as { n: number };
+  return { entries: row.n };
+}
+
+/**
+ * Writes those links down as records, so the existing link flow can see them.
+ *
+ * Deliberately NOT a new fetch path. Everything downstream — the queue, the
+ * per-record verdict, the rejection handling, the orphan model — already works on
+ * records, and a second parallel path for links-that-live-elsewhere would be the
+ * same divergence that has cost this codebase four bugs today.
+ *
+ * The record is written as what it is: kind 'takeout', because that payload came
+ * from an export, with the entry's own start instant and external id, linked by
+ * 'recovered' so these are identifiable afterwards. link_state stays NULL, which
+ * is what puts them in the queue.
+ *
+ * chats.url is filled in at the same time when empty — same href, and it is what
+ * the entry itself should have been carrying all along.
+ */
+export function recoverTakeoutLinks(): { records: number; urls: number; skipped: number } {
+  const rows = db
+    .prepare(
+      `SELECT c.id, c.raw_json, c.external_id, c.started_at, c.url,
+              ${CHAT_TITLE_SQL} AS title
+         FROM chats c
+        WHERE c.merged_into IS NULL
+          AND c.raw_json LIKE '%udm=50%'
+          AND NOT EXISTS (
+                SELECT 1 FROM chat_sources cs
+                  JOIN source_entries se ON se.id = cs.source_entry_id
+                 WHERE cs.chat_id = c.id AND se.href IS NOT NULL)`,
+    )
+    .all() as unknown as {
+    id: number;
+    raw_json: string;
+    external_id: string;
+    started_at: string | null;
+    url: string | null;
+    title: string;
+  }[];
+
+  const insertRecord = db.prepare(
+    `INSERT INTO source_entries (kind, external_ref, query, occurred_at, href, imported_at)
+     VALUES ('takeout', ?, ?, ?, ?, ?)`,
+  );
+  const link = db.prepare(
+    `INSERT INTO chat_sources (chat_id, source_entry_id, linked_by)
+     VALUES (?, ?, 'recovered')
+     ON CONFLICT (chat_id, source_entry_id) DO NOTHING`,
+  );
+  const setUrl = db.prepare('UPDATE chats SET url = ? WHERE id = ? AND url IS NULL');
+  const now = new Date().toISOString();
+
+  let records = 0;
+  let urls = 0;
+  let skipped = 0;
+  db.exec('BEGIN');
+  try {
+    for (const row of rows) {
+      let href: string | null = null;
+      try {
+        const parsed = JSON.parse(row.raw_json) as { takeout?: { href?: string } };
+        href = parsed.takeout?.href ?? null;
+      } catch {
+        href = null;
+      }
+      // A payload that does not parse, or holds no href, is left exactly as it
+      // is. The LIKE that found it matches the whole payload, so a udm=50 string
+      // somewhere else in it is not a link to this conversation.
+      if (!href || !href.startsWith('http')) {
+        skipped += 1;
+        continue;
+      }
+      const result = insertRecord.run(
+        row.external_id,
+        row.title,
+        row.started_at,
+        href,
+        now,
+      );
+      link.run(row.id, result.lastInsertRowid as number);
+      records += 1;
+      if (!row.url) {
+        setUrl.run(href, row.id);
+        urls += 1;
+      }
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  return { records, urls, skipped };
+}
+
+/**
  * Empty threads that share an opening prompt with a thread that has content.
  *
  * The one duplicate case that needs no judgement. Everywhere else in this app

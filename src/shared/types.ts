@@ -537,6 +537,12 @@ export interface NotebookApi {
    * that have nothing. Overwrites the stored reading.
    */
   rereadAllFromThreads(limit: number): Promise<CaptureSummary>;
+  /**
+   * Writes down links the import left inside an entry's payload and never turned
+   * into a record, so the link flow can see them. Stores nothing from Google —
+   * it only makes existing links reachable.
+   */
+  recoverTakeoutLinks(): Promise<{ records: number; urls: number; skipped: number }>;
   onCaptureProgress(callback: (progress: CaptureProgress) => void): () => void;
   countChatsWithoutTurns(): Promise<number>;
 

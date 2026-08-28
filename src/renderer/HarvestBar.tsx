@@ -483,6 +483,21 @@ export default function HarvestBar({
         }
       },
       fetchLinks,
+      recoverLinks: async () => {
+        setTakeoutBusy(true);
+        try {
+          const r = await window.notebook.recoverTakeoutLinks();
+          setTakeoutNote(
+            `${r.records} link${r.records === 1 ? '' : 's'} written down as records` +
+              (r.urls ? ` · ${r.urls} entries given their own url` : '') +
+              (r.skipped ? ` · ${r.skipped} payloads held no usable link` : '') +
+              ' — Read from links can see them now',
+          );
+          onFinished();
+        } finally {
+          setTakeoutBusy(false);
+        }
+      },
       scanTakeout,
       applyTakeout,
       undoImport,

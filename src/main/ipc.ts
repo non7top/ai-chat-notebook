@@ -207,6 +207,7 @@ export function registerIpcHandlers(): void {
     recaptureMany(chatIds),
   );
   ipcMain.handle('capture:rereadAll', (_event, limit: number) => rereadAllFromThreads(limit));
+  ipcMain.handle('links:recover', () => db.recoverTakeoutLinks());
   ipcMain.handle('capture:remaining', () => db.countChatsWithoutTurns());
   ipcMain.handle('capture:exhausted', () => db.countExhaustedCaptures());
   // The route to everything Google has rotated out of the sidebar. Drives the
