@@ -707,7 +707,7 @@ export async function recaptureMany(chatIds: number[]): Promise<CaptureSummary> 
       // Answered from the list rather than by sending the sidebar after it. Only
       // when the load succeeded — a list that would not load says nothing about
       // any particular thread.
-      if (listed && !listed.has(chat.externalId)) {
+      if (listed && !listed.ids.has(chat.externalId)) {
         summary.attempted += 1;
         summary.unlisted += 1;
         db.recordThreadNotListed(chat.id);
@@ -766,7 +766,18 @@ export async function recaptureMany(chatIds: number[]): Promise<CaptureSummary> 
       'recapture',
       captureCancelled ? 'stopped' : summary.errors > 0 ? 'failed' : 'finished',
       startedAt,
-      { ...summary, failures: summary.failures.slice(0, 20) },
+      {
+        ...summary,
+        failures: summary.failures.slice(0, 20),
+        // The walk that decided every "no longer listed" in this run, recorded
+        // WITH the verdicts it produced. Without it, "unlisted 172" cannot be
+        // told apart from "the list was short again" after the fact — and that
+        // is exactly the question the last two runs left open, because only the
+        // harvest recorded its geometry.
+        sidebar: listed
+          ? `saw ${listed.ids.size} of ~${listed.expected} · ${listed.note}`
+          : 'could not be read — every thread was attempted rather than written off',
+      },
     );
     broadcastCapture({
       phase: captureCancelled ? 'cancelled' : 'done',
@@ -1539,7 +1550,7 @@ export interface CaptureSummary {
  * sidebar would not load" and "the thread is gone" are opposite conclusions, and
  * confusing them would mark a whole queue as unrecoverable.
  */
-async function loadSidebarIds(): Promise<Set<string> | null> {
+async function loadSidebarIds(): Promise<SidebarWalk | null> {
   try {
     await ensureHistorySidebarOpen();
     const recycled = await recycleHistorySidebar();
@@ -1565,7 +1576,7 @@ async function loadSidebarIds(): Promise<Set<string> | null> {
       );
       return null;
     }
-    return walk.ids;
+    return walk;
   } catch {
     // Same reasoning as the null above: a failure here says nothing about any
     // individual thread.
@@ -1629,7 +1640,7 @@ export async function captureTurns(
       // on another fruitless walk. Only when the load succeeded: a list that
       // would not load says nothing about any particular thread, and treating
       // those two as the same would mark the whole queue as gone.
-      if (listed && !listed.has(chat.externalId)) {
+      if (listed && !listed.ids.has(chat.externalId)) {
         summary.attempted += 1;
         summary.unlisted += 1;
         db.recordThreadNotListed(chat.id);
@@ -1752,7 +1763,16 @@ export async function captureTurns(
       'capture',
       captureCancelled ? 'stopped' : summary.stoppedEarly ? 'failed' : 'finished',
       captureStartedAt,
-      { ...summary, failures: summary.failures.slice(0, 20) },
+      {
+        ...summary,
+        failures: summary.failures.slice(0, 20),
+        // Same reasoning as the recapture record: the walk that produced this
+        // run's "no longer listed" verdicts is recorded beside them, so a
+        // surprising count can be judged rather than argued about.
+        sidebar: listed
+          ? `saw ${listed.ids.size} of ~${listed.expected} · ${listed.note}`
+          : 'could not be read — every thread was attempted rather than written off',
+      },
     );
     broadcastCapture({
       phase: captureCancelled ? 'cancelled' : 'done',
