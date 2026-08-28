@@ -3582,9 +3582,24 @@ export function recoverTakeoutLinks(): { records: number; urls: number; skipped:
     title: string;
   }[];
 
+  // payload_json is NOT NULL and every consumer parses it for turns, images,
+  // timestampText and storedImages. A recovered record holds a LINK and nothing
+  // else — its conversation is still on Google — so the payload says exactly
+  // that: empty collections rather than a null nobody can parse.
+  //
+  // external_ref is 'recovered:<chat id>', NOT the entry's own external_id, and
+  // the reason is the UNIQUE(kind, external_ref) on this table. Using the entry's
+  // id would collide the moment a re-import mints the real record for the same
+  // ref — and collide silently, because the importer inserts with OR IGNORE, so
+  // its genuine record would be dropped in favour of this stub. A ref the
+  // importer can never produce cannot be in its way.
   const insertRecord = db.prepare(
-    `INSERT INTO source_entries (kind, external_ref, query, occurred_at, href, imported_at)
-     VALUES ('takeout', ?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO source_entries
+       (kind, external_ref, query, occurred_at, href, payload_json, imported_at)
+     VALUES ('takeout', ?, ?, ?, ?, ?, ?)`,
+  );
+  const findRecord = db.prepare(
+    "SELECT id FROM source_entries WHERE kind = 'takeout' AND external_ref = ?",
   );
   const link = db.prepare(
     `INSERT INTO chat_sources (chat_id, source_entry_id, linked_by)
@@ -3614,14 +3629,24 @@ export function recoverTakeoutLinks(): { records: number; urls: number; skipped:
         skipped += 1;
         continue;
       }
-      const result = insertRecord.run(
-        row.external_id,
+      const ref = `recovered:${row.id}`;
+      insertRecord.run(
+        ref,
         row.title,
         row.started_at,
         href,
+        JSON.stringify({ turns: [], images: [], recoveredFrom: 'chats.raw_json' }),
         now,
       );
-      link.run(row.id, result.lastInsertRowid as number);
+      // Looked up rather than taken from lastInsertRowid: with OR IGNORE a second
+      // run inserts nothing and lastInsertRowid then names whatever row was
+      // written last, which would attach an unrelated record to this entry.
+      const found = findRecord.get(ref) as { id: number } | undefined;
+      if (!found) {
+        skipped += 1;
+        continue;
+      }
+      link.run(row.id, found.id);
       records += 1;
       if (!row.url) {
         setUrl.run(href, row.id);

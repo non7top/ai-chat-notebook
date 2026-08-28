@@ -71,6 +71,10 @@ jobs:
       - name: Check the source-entry model
         run: docker compose run --rm dev npm run check:sources
 
+      - name: Check link recovery
+        run: |
+          docker compose run --rm dev npm run check:recover
+
       - name: Check the inline-image flag
         run: docker compose run --rm dev npm run check:inline
 
