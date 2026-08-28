@@ -3662,6 +3662,63 @@ export function recoverTakeoutLinks(): { records: number; urls: number; skipped:
 }
 
 /**
+ * Entries that hold a link's content NOWHERE, whatever the link's own verdict.
+ *
+ * link_state answers "has this link been opened". The question a person asks
+ * looking at an entry is "does THIS ENTRY hold what the link has", and the two
+ * come apart:
+ *
+ *  - a record glued to a second entry by hand arrives carrying the 'fetched' it
+ *    earned while attached to the first, and the content stayed on the first
+ *  - the migration that introduced link_state copied the CHAT's verdict onto
+ *    every record attached to it, and a chat can hold several records each with
+ *    its own link — the exact conflation the per-record queue was built to end
+ *
+ * Either way the record is excluded from the queue for work that never happened
+ * to this entry. Measured: 163 entries whose record says fetched while their
+ * sources show neither a link nor a threads reading, 81 of them holding four
+ * turns or fewer. Entry #51 is one of them — a link on screen, "nothing to do"
+ * in the menu, and both statements true about different things.
+ *
+ * Deliberately excludes entries that already carry a THREADS reading. Those hold
+ * the better account, and with one slot for a non-takeout reading a link pull
+ * would replace it with a worse one. This queue only ever adds.
+ */
+const UNUSED_LINK_WHERE = `se.href IS NOT NULL
+      AND c.merged_into IS NULL
+      AND ',' || COALESCE(c.sources, c.source) || ',' NOT LIKE '%,link,%'
+      AND ',' || COALESCE(c.sources, c.source) || ',' NOT LIKE '%,capture,%'`;
+
+export function entriesWithUnusedLinks(limit: number): ThreadToFetch[] {
+  return db
+    .prepare(
+      `SELECT c.id AS chatId,
+              se.id AS entryId,
+              COALESCE(NULLIF(se.query, ''), '(untitled record)') AS title
+         FROM source_entries se
+         JOIN chat_sources cs ON cs.source_entry_id = se.id
+         JOIN chats c ON c.id = cs.chat_id
+        WHERE ${UNUSED_LINK_WHERE}
+        ORDER BY CAST(strftime('%s', se.occurred_at) AS INTEGER) DESC, se.id DESC
+        LIMIT ?`,
+    )
+    .all(limit) as unknown as ThreadToFetch[];
+}
+
+export function countEntriesWithUnusedLinks(): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM source_entries se
+         JOIN chat_sources cs ON cs.source_entry_id = se.id
+         JOIN chats c ON c.id = cs.chat_id
+        WHERE ${UNUSED_LINK_WHERE}`,
+    )
+    .get() as unknown as { n: number };
+  return row.n;
+}
+
+/**
  * Empty threads that share an opening prompt with a thread that has content.
  *
  * The one duplicate case that needs no judgement. Everywhere else in this app

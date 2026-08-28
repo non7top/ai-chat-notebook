@@ -19,6 +19,7 @@ import {
   harvestThreadList,
   captureFromEntryLink,
   fetchFromLinks,
+  type LinkRunMode,
   openChatInPanel,
   repairInlineImages,
   recaptureChat,
@@ -208,12 +209,15 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle('capture:rereadAll', (_event, limit: number) => rereadAllFromThreads(limit));
   ipcMain.handle('links:recover', () => db.recoverTakeoutLinks());
+  ipcMain.handle('links:countUnused', () => db.countEntriesWithUnusedLinks());
   ipcMain.handle('capture:remaining', () => db.countChatsWithoutTurns());
   ipcMain.handle('capture:exhausted', () => db.countExhaustedCaptures());
   // The route to everything Google has rotated out of the sidebar. Drives the
   // live panel one page load at a time, and every page is checked against the
   // export's own reading before anything is stored.
-  ipcMain.handle('links:fetch', (_event, limit: number) => fetchFromLinks(limit));
+  ipcMain.handle('links:fetch', (_event, limit: number, mode: LinkRunMode = 'queue') =>
+    fetchFromLinks(limit, mode),
+  );
   // Both queues, because the run works through both: threads whose link has not
   // been opened, and export entries that belong to no thread at all. Reported as
   // one number, since to the person pressing the button it is one job.

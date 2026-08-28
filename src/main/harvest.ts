@@ -32,6 +32,12 @@ import type { CaptureProgress, HarvestProgress, SyncProgress } from '../shared/t
 // cancellation possible at all — an injected loop only reports once it is
 // finished, which for ~300 threads is half a minute of apparent hang.
 const SETTLE_MS = 700;
+// How long a single scroll step may wait for Google to re-render its rows, and
+// how often to look. The ceiling exists because the bottom of the list genuinely
+// stops changing — a step that waits forever there cannot tell the end of the
+// list from a slow page.
+const RENDER_WAIT_MS = 4000;
+const RENDER_POLL_MS = 150;
 const STEP_FRACTION = 0.8;
 /**
  * The furthest one step may jump, whatever the panel's height.
@@ -172,6 +178,11 @@ async function walkSidebarThreads(hooks: {
   }
 
   const ids = new Set<string>();
+  // What the DOM is showing right now, as a value that can be compared. Google
+  // keeps ~10 rows in the document and swaps their contents as the list moves,
+  // so "has the render caught up" is a question about WHICH rows are there, not
+  // how many.
+  const signature = (entries: ThreadListEntry[]) => entries.map((e) => e.externalId).join(',');
   const absorb = (entries: ThreadListEntry[]) => {
     for (const entry of entries) {
       if (ids.has(entry.externalId)) continue;
@@ -195,11 +206,27 @@ async function walkSidebarThreads(hooks: {
     steps += 1;
     const before = ids.size;
     // Capped, so the walk cannot outrun the rendering. See STEP_MAX_PX.
+    const shown = signature(await readRenderedThreads());
     const scrolled = await scrollListBy(
       Math.min(geometry.clientHeight * STEP_FRACTION, STEP_MAX_PX),
     );
-    await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
-    absorb(await readRenderedThreads());
+    // WAIT FOR THE RENDER, do not assume it. A flat 700ms was the whole bug:
+    // measured on a real list, 39 steps covering the full 12184px of scroll
+    // yielded 60 unique rows — about 1.5 per step, where a 320px step over 40px
+    // rows should expose eight. The walk was reading the same ten rows again and
+    // again because Google had not re-rendered yet, and then reporting 60 of 305
+    // as though it had looked everywhere.
+    //
+    // Polling until the rendered rows actually CHANGE costs nothing when the page
+    // is quick — the first read usually differs — and gives a slow one the time
+    // it needs instead of a number pulled out of the air.
+    let entries = await readRenderedThreads();
+    const renderDeadline = Date.now() + RENDER_WAIT_MS;
+    while (signature(entries) === shown && Date.now() < renderDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, RENDER_POLL_MS));
+      entries = await readRenderedThreads();
+    }
+    absorb(entries);
     hooks.onStep?.(ids.size, geometry.expectedTotal);
 
     // Growing scrollHeight means the list loaded more below: it was at its
@@ -1071,7 +1098,21 @@ const PER_THREAD_DEADLINE_MS = 240_000;
  */
 const CAPTURE_DEADLINE_MS = 120_000;
 
-export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
+/**
+ * Which links a run should take.
+ *
+ * 'queue' is the ordinary one: records whose link has never been opened.
+ * 'unused' is for records that WERE opened, into some other entry — see
+ * entriesWithUnusedLinks. Same loop, same verdicts, same ceiling; only the
+ * question of what is outstanding differs, and that question belongs in a query
+ * rather than in a second copy of this function.
+ */
+export type LinkRunMode = 'queue' | 'unused';
+
+export async function fetchFromLinks(
+  limit: number,
+  mode: LinkRunMode = 'queue',
+): Promise<LinkRunSummary> {
   const summary: LinkRunSummary = {
     attempted: 0,
     fetched: 0,
@@ -1092,7 +1133,8 @@ export async function fetchFromLinks(limit: number): Promise<LinkRunSummary> {
     // outstanding against 380: it could not see records attached to no thread, it
     // skipped any thread already read from the panel, and it counted one job per
     // thread where a thread can hold several records each with its own link.
-    const queue = db.entriesWithLinksToFetch(limit);
+    const queue =
+      mode === 'unused' ? db.entriesWithUnusedLinks(limit) : db.entriesWithLinksToFetch(limit);
     let consecutiveErrors = 0;
 
     for (const item of queue) {

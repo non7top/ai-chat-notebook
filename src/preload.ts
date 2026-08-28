@@ -36,6 +36,7 @@ const api: NotebookApi = {
   recaptureMany: (chatIds) => ipcRenderer.invoke('capture:recaptureMany', chatIds),
   rereadAllFromThreads: (limit) => ipcRenderer.invoke('capture:rereadAll', limit),
   recoverTakeoutLinks: () => ipcRenderer.invoke('links:recover'),
+  countUnusedLinks: () => ipcRenderer.invoke('links:countUnused'),
   countChatsWithoutTurns: () => ipcRenderer.invoke('capture:remaining'),
   onCaptureProgress: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, progress: CaptureProgress) =>
@@ -91,7 +92,7 @@ const api: NotebookApi = {
   adoptSourceEntry: (entryId, folderId) =>
     ipcRenderer.invoke('entries:adopt', entryId, folderId),
   captureFromEntryLink: (entryId) => ipcRenderer.invoke('entries:openLink', entryId),
-  fetchFromLinks: (limit) => ipcRenderer.invoke('links:fetch', limit),
+  fetchFromLinks: (limit, mode) => ipcRenderer.invoke('links:fetch', limit, mode),
   countLinksToFetch: () => ipcRenderer.invoke('links:remaining'),
   linkOutcomes: () => ipcRenderer.invoke('links:outcomes'),
   lastJobs: () => ipcRenderer.invoke('jobs:last'),

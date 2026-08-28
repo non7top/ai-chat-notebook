@@ -288,6 +288,10 @@ const createWindow = () => {
     // Links the import left inside an entry's payload and never wrote down as a
     // record. The link queue is record-based, so these are invisible to it.
     const strandedLinks = db.planTakeoutLinkRecovery().entries;
+    // Records whose link was opened into SOME OTHER entry, so this one holds
+    // nothing from it. The queue asks "has this link been opened", which is a
+    // different question from "does this entry hold what the link has".
+    const unusedLinks = db.countEntriesWithUnusedLinks();
     // Groups that are the same conversation stored twice, settled by the start
     // instant rather than by the prompt alone.
     const sameInstant = db.planPromptInstantFold().reduce((n, g) => n + g.foldIds.length, 0);
@@ -428,6 +432,24 @@ const createWindow = () => {
                 'nothing and stores nothing from Google — it only makes links ' +
                 'already in the archive reachable.',
               click: command('recoverLinks'),
+            },
+            {
+              // Entry #51 is why this exists: a link on screen, "nothing to do"
+              // in the menu, and both true. Its record carried the 'fetched' it
+              // earned while glued to another entry, and the content stayed
+              // there. Measured: 163 entries in that state, 81 holding four
+              // turns or fewer.
+              label:
+                unusedLinks > 0
+                  ? `Pull links for ${unusedLinks} entries that hold nothing from them`
+                  : 'Pull links for entries that hold nothing from them',
+              enabled: unusedLinks > 0,
+              toolTip:
+                'For records whose link was opened into a different entry — glued ' +
+                'across, or marked by the migration that copied one verdict onto ' +
+                'every record of a thread. Skips entries that already have a ' +
+                'threads reading, which is the better account and would be replaced.',
+              click: command('fetchUnusedLinks'),
             },
             {
               label: 'Match entries to threads',

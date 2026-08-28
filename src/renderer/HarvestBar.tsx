@@ -336,11 +336,11 @@ export default function HarvestBar({
    * reading before anything is stored, so a link that re-runs its prompt is
    * refused rather than written.
    */
-  const fetchLinks = async () => {
+  const fetchLinks = async (mode: 'queue' | 'unused' = 'queue') => {
     onNeedPanel();
     setCapturing(true);
     try {
-      const result = await window.notebook.fetchFromLinks(LINK_FETCH_LIMIT);
+      const result = await window.notebook.fetchFromLinks(LINK_FETCH_LIMIT, mode);
       setLinksToFetch(result.remaining);
       setTakeoutNote(
         `fetched ${result.fetched} · ${result.rejected} did not match · ` +
@@ -482,7 +482,10 @@ export default function HarvestBar({
           setCapturing(false);
         }
       },
-      fetchLinks,
+      fetchLinks: () => fetchLinks('queue'),
+      // The same run against a different question: records opened into another
+      // entry, so this one holds nothing from them.
+      fetchUnusedLinks: () => fetchLinks('unused'),
       recoverLinks: async () => {
         setTakeoutBusy(true);
         try {

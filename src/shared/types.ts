@@ -543,6 +543,8 @@ export interface NotebookApi {
    * it only makes existing links reachable.
    */
   recoverTakeoutLinks(): Promise<{ records: number; urls: number; skipped: number }>;
+  /** Entries whose link was opened into some other entry, so they hold nothing from it. */
+  countUnusedLinks(): Promise<number>;
   onCaptureProgress(callback: (progress: CaptureProgress) => void): () => void;
   countChatsWithoutTurns(): Promise<number>;
 
@@ -624,7 +626,14 @@ export interface NotebookApi {
    * own link. For most of the archive this is the only route to the real thread,
    * since the sidebar lists a few hundred while the export holds thousands.
    */
-  fetchFromLinks(limit: number): Promise<LinkRunSummary>;
+  /**
+   * Opens links and stores what comes back.
+   *
+   * 'queue' takes records whose link has never been opened. 'unused' takes
+   * records that WERE opened into some other entry, so this one holds nothing
+   * from them — a record glued across entries carries its verdict with it.
+   */
+  fetchFromLinks(limit: number, mode?: 'queue' | 'unused'): Promise<LinkRunSummary>;
   countLinksToFetch(): Promise<number>;
   /**
    * Every thread whose link has been tried and did not simply succeed, with the
