@@ -53,6 +53,17 @@ export function createAiModeView(mainWindow: BrowserWindow): WebContentsView {
       // Google session cookies.
       session: session.fromPartition('persist:google'),
       preload: path.join(__dirname, '../preload/aiModePreload.js'),
+      // Chromium throttles timers hard in a hidden page — a setTimeout can be
+      // clamped to once a minute. Every injected script here is a loop of small
+      // awaited waits, so throttling does not slow them down, it stops them:
+      // measured on a 365-thread run, 147 threads failed with "Injected script
+      // timed out after 90000ms" from a search that carries its own 60s budget
+      // and therefore always returns in time when it is actually running.
+      //
+      // This does not make a minimised run work — a view with no bounds still
+      // renders nothing, so the list cannot lazily load — but it removes one of
+      // the two ways a window that loses focus ruins a run of several hours.
+      backgroundThrottling: false,
       // Deliberately NOT enabling nodeIntegrationInSubFrames. PromptLoom
       // needed it because perchance runs its generator in a nested iframe;
       // whether AI Mode does the same is unknown, so this stays off until
@@ -113,6 +124,19 @@ export function showAiModePanel(): void {
   for (const window of BrowserWindow.getAllWindows()) {
     window.webContents.send('aiMode:visibility', true);
   }
+}
+
+/**
+ * Whether the panel can be read at all right now.
+ *
+ * A minimised window gives the view no bounds, so Google renders nothing into
+ * it, and — until backgroundThrottling was turned off — stalled every injected
+ * script as well. Both are states where work is not merely slower but impossible,
+ * and a long run needs to be able to ask, not just at the start.
+ */
+export function aiModeIsReadable(): boolean {
+  if (!view || !mainWindowRef) return false;
+  return !mainWindowRef.isMinimized() && mainWindowRef.getContentSize()[1] > 0;
 }
 
 export function isAiModeViewHidden(): boolean {

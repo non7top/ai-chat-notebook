@@ -1,7 +1,12 @@
 import { BrowserWindow } from 'electron';
 import * as db from './db';
 import { hammingDistance, promptFingerprint } from '../shared/fingerprint.ts';
-import { ensureOnAiMode, navigateAiMode, reloadAiMode } from './aiModeView';
+import {
+  aiModeIsReadable,
+  ensureOnAiMode,
+  navigateAiMode,
+  reloadAiMode,
+} from './aiModeView';
 import { assetHref, storeImage } from './assets';
 import { rewriteImageSources } from '../shared/rewriteImages.ts';
 import {
@@ -601,6 +606,41 @@ export async function recaptureChat(chatId: number): Promise<{ turns: number; im
 }
 
 /**
+ * Holds a run while the window is minimised, instead of failing thread by thread.
+ *
+ * Measured on a 365-thread run that took nearly eight hours: 46 captured, 147
+ * failed, every failure "Injected script timed out after 90000ms" — from a search
+ * that carries its own 60s budget and so always returns in time when it is
+ * actually running. It was not running: a hidden window's timers are throttled to
+ * a crawl, and the panel has no bounds to render into either.
+ *
+ * Both are states where the next thread cannot possibly work, so trying it costs
+ * ninety seconds to learn nothing. Waiting is the honest response — a run of this
+ * length WILL meet a minimised window, and the person doing it has every reason to
+ * put the window away and come back.
+ *
+ * Bounded, because an unattended wait that never ends is its own failure: past the
+ * ceiling the run stops and says why, with everything captured so far already
+ * stored.
+ */
+const MINIMISED_WAIT_CEILING_MS = 30 * 60_000;
+
+async function waitWhileUnreadable(
+  report: (message: string) => void,
+  cancelled: () => boolean,
+): Promise<boolean> {
+  if (aiModeIsReadable()) return true;
+  const until = Date.now() + MINIMISED_WAIT_CEILING_MS;
+  while (!aiModeIsReadable()) {
+    if (cancelled()) return false;
+    if (Date.now() > until) return false;
+    report('waiting for the window to be restored — nothing can be read while it is minimised');
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+  return true;
+}
+
+/**
  * Re-captures a named list of threads, one after another.
  *
  * Exists because re-capture worked on any thread picked by hand while the bulk
@@ -639,6 +679,27 @@ export async function recaptureMany(chatIds: number[]): Promise<CaptureSummary> 
     const listed = chatIds.length > 1 ? await loadSidebarIds() : null;
     for (const id of chatIds) {
       if (captureCancelled) break;
+      // Asked before every thread, not once at the start: a run of hours meets a
+      // minimised window in the middle, which is exactly when it costs the most.
+      const readable = await waitWhileUnreadable(
+        (message) =>
+          broadcastCapture({
+            phase: 'capturing',
+            done: summary.captured,
+            attempted: summary.attempted,
+            total: chatIds.length,
+            errors: summary.errors,
+            unlisted: summary.unlisted,
+            current: message,
+          }),
+        () => captureCancelled,
+      );
+      if (!readable) {
+        summary.stoppedEarly =
+          'The window stayed minimised, so nothing could be read. Everything captured ' +
+          'up to that point is stored; run it again with the window restored.';
+        break;
+      }
       const chat = db.getChatForCapture(id);
       // A thread that has gone — merged away, deleted — is skipped rather than
       // counted as a failure. The caller's list can be a moment out of date.
