@@ -38,7 +38,30 @@ const SETTLE_MS = 700;
 // list from a slow page.
 const RENDER_WAIT_MS = 4000;
 const RENDER_POLL_MS = 150;
-const STEP_FRACTION = 0.8;
+
+/**
+ * How much of the rendered window a single step may consume.
+ *
+ * The step used to be capped at STEP_MAX_PX = 320, chosen when Google kept about
+ * TEN rows in the document: ten rows of 40px is a 400px window, and a step larger
+ * than that would scroll past rows that were never rendered, losing them silently.
+ *
+ * Google's panel has since been rebuilt and now renders about 110 rows at once —
+ * measured on a fresh load: scrollHeight 12224, 110 rows in the document. Against
+ * a 4400px window, a 320px step is 39 steps where five would do, which is most of
+ * why refreshing the list takes over a minute.
+ *
+ * So the step is derived from what is ACTUALLY rendered, each step, rather than
+ * from a constant that encodes one version of someone else's UI. 60% of the
+ * window, so consecutive reads always overlap. If Google goes back to ten rows
+ * this shrinks by itself, and if it renders the whole list the walk becomes two
+ * steps — neither needs a code change.
+ */
+const STEP_WINDOW_FRACTION = 0.6;
+/** Never smaller than this, or a page that renders one row would never move. */
+const STEP_MIN_PX = 200;
+// STEP_FRACTION and STEP_MAX_PX are gone: the step is measured per step from the
+// rendered window instead. See STEP_WINDOW_FRACTION.
 /**
  * The furthest one step may jump, whatever the panel's height.
  *
@@ -57,7 +80,6 @@ const STEP_FRACTION = 0.8;
  * is comfortably inside the ~400px Google renders per step, with margin for a
  * chunk that turns out smaller.
  */
-const STEP_MAX_PX = 320;
 const MAX_STEPS = 200;
 // The end condition is deliberately not "no new ids": a virtualised list
 // produces nothing new for several steps in the middle of a run whenever the
@@ -192,8 +214,8 @@ async function walkSidebarThreads(hooks: {
   // all while the UI showed it as visible.
   //
   // Nothing about that state is detectable from the row count — ten rows render
-  // and read perfectly well — but the step is clientHeight * STEP_FRACTION, so a
-  // height of zero is a step of zero: two hundred scrolls that move nothing,
+  // and read perfectly well — but a step is a fraction of the rendered window and
+  // a zero-height list renders nothing: two hundred scrolls that move nothing,
   // absorbing the same ten rows, and a walk that reports what it saw as though it
   // had looked. The old loadSidebarIds checked this and I dropped the check when I
   // merged the two walks into one. Restored here, where both callers get it.
@@ -250,11 +272,22 @@ async function walkSidebarThreads(hooks: {
     }
     steps += 1;
     const before = ids.size;
-    // Capped, so the walk cannot outrun the rendering. See STEP_MAX_PX.
-    const shown = signature(await readRenderedThreads());
-    const scrolled = await scrollListBy(
-      Math.min(geometry.clientHeight * STEP_FRACTION, STEP_MAX_PX),
+    const before_entries = await readRenderedThreads();
+    const shown = signature(before_entries);
+    // Measured from this step's own render window, not from a constant. pitch is
+    // the row-to-row distance measured on the live list, so rendered * pitch is
+    // the height of what is currently in the document.
+    const window = before_entries.length * (geometry.pitch || geometry.rowHeight || 40);
+    const stepPx = Math.max(
+      STEP_MIN_PX,
+      Math.min(
+        Math.round(window * STEP_WINDOW_FRACTION),
+        // Never past the end in one go: a step longer than what is left would
+        // land at the bottom and skip whatever was between.
+        Math.max(geometry.scrollHeight - geometry.clientHeight, STEP_MIN_PX),
+      ),
     );
+    const scrolled = await scrollListBy(stepPx);
     // WAIT FOR THE RENDER, do not assume it. A flat 700ms was the whole bug:
     // measured on a real list, 39 steps covering the full 12184px of scroll
     // yielded 60 unique rows — about 1.5 per step, where a 320px step over 40px
@@ -309,9 +342,7 @@ async function walkSidebarThreads(hooks: {
   const note =
     `scrollHeight ${geometry.scrollHeight}px / pitch ${geometry.pitch}px ` +
     `(row ${geometry.rowHeight}px, ${geometry.rendered} rendered) = ~${geometry.expectedTotal}` +
-    ` · panel ${geometry.clientHeight}px, step ${Math.round(
-      Math.min(geometry.clientHeight * STEP_FRACTION, STEP_MAX_PX),
-    )}px, ${steps} steps` +
+    ` · panel ${geometry.clientHeight}px, step from the render window, ${steps} steps` +
     ` · ${
       stoppedAtKnown
         ? `stopped on ${knownStreak} known rows in a row — everything below is older`
@@ -320,7 +351,7 @@ async function walkSidebarThreads(hooks: {
           : 'stopped at the step ceiling'
     }`;
 
-  return {
+  const walk: SidebarWalk = {
     ids,
     // NOT complete when it stopped on known rows, and that is not a failure: the
     // rows below were never looked at, so the set cannot answer "is this thread
@@ -334,6 +365,10 @@ async function walkSidebarThreads(hooks: {
     steps,
     note,
   };
+  // Kept only when it is the whole list. A short or early-stopped walk cannot
+  // answer "is this thread still listed" for the rows it never saw.
+  if (walk.complete) lastCompleteWalk = { walk, at: Date.now() };
+  return walk;
 }
 
 /**
@@ -432,6 +467,28 @@ const KNOWN_ROWS_TO_STOP = 20;
  * new" spent minutes on the list before reading two threads.
  */
 const QUEUE_WORTH_A_LIST_LOAD = 8;
+
+/**
+ * The last COMPLETE walk of the sidebar, kept so one run does not walk it twice.
+ *
+ * Catch up walks the whole list in step one to refresh it, and then step two asks
+ * "which of these threads is still listed" and walks the whole list AGAIN.
+ * Measured, each walk is 50-75 seconds — so the most common flow in the app spent
+ * two minutes doing the same thing twice before reading anything.
+ *
+ * Only complete walks are stored, because only they can answer the question a
+ * cached set is used for. The window is short: presence in a 300-row list does not
+ * change in ten minutes, but a run of hours must not keep deciding on an old
+ * reading, and a thread newly created during a run should not be declared missing
+ * by a set from before it existed.
+ */
+const WALK_CACHE_MS = 10 * 60_000;
+let lastCompleteWalk: { walk: SidebarWalk; at: number } | null = null;
+
+/** Dropped when the panel is reloaded or the archive changes under it. */
+export function forgetSidebarWalk(): void {
+  lastCompleteWalk = null;
+}
 
 export async function harvestThreadList(
   mode: HarvestMode = 'full',
@@ -1726,13 +1783,23 @@ export interface CaptureSummary {
  */
 async function loadSidebarIds(): Promise<SidebarWalk | null> {
   try {
+    // Answered BEFORE touching the page. This is the change that halves Catch up:
+    // the harvest one step earlier walked the whole list, and its result is the
+    // answer to this question — so there is no sidebar to open, recycle or read.
+    if (lastCompleteWalk && Date.now() - lastCompleteWalk.at < WALK_CACHE_MS) {
+      const age = Math.round((Date.now() - lastCompleteWalk.at) / 1000);
+      return {
+        ...lastCompleteWalk.walk,
+        note: `${lastCompleteWalk.walk.note} · reused, ${age}s old`,
+      };
+    }
+
     await ensureHistorySidebarOpen();
     const recycled = await recycleHistorySidebar();
     // No rows means no list. Null sends the caller down the "cannot tell" path
     // rather than declaring every thread in the queue missing — the sidebar
     // being shut says nothing about any particular thread.
     if (recycled.rows === 0) return null;
-
     const walk = await walkSidebarWithSecondChance({ cancelled: () => captureCancelled });
     // The verdict this whole function exists to support is "Google no longer
     // lists this thread", and an incomplete walk cannot support it. Measured on
