@@ -536,7 +536,16 @@ export interface NotebookApi {
    * each already holds. The counterpart to captureTurns, which only fills entries
    * that have nothing. Overwrites the stored reading.
    */
-  rereadAllFromThreads(limit: number): Promise<CaptureSummary>;
+  /**
+   * 'all' every entry with a Google id · 'never-read' those whose conversation
+   * came from the export or a link only · 'climbed' those that moved up Google's
+   * list since their turns were stored, which is the cheap answer to "what
+   * changed".
+   */
+  rereadAllFromThreads(
+    limit: number,
+    scope?: 'all' | 'never-read' | 'climbed',
+  ): Promise<CaptureSummary>;
   /**
    * Writes down links the import left inside an entry's payload and never turned
    * into a record, so the link flow can see them. Stores nothing from Google —

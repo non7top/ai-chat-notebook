@@ -461,6 +461,42 @@ export default function HarvestBar({
       harvest: start,
       capture: () => startCapture(CAPTURE_ALL_LIMIT),
       retryStuck: () => startCapture(CAPTURE_ALL_LIMIT, true),
+      // The narrow half of rereadAll, and the same reporting path. Only the
+      // queue differs, so it is one line rather than a second handler.
+      readClimbed: async () => {
+        setCapturing(true);
+        setCapture(null);
+        onNeedPanel();
+        try {
+          await window.notebook.rereadAllFromThreads(CAPTURE_ALL_LIMIT, 'climbed');
+        } catch (err) {
+          setCapture({
+            phase: 'error',
+            done: 0,
+            total: 0,
+            errors: 1,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          setCapturing(false);
+        }
+      },
+      readNeverRead: async () => {
+        setCapturing(true);
+        setCapture(null);
+        onNeedPanel();
+        try {
+          await window.notebook.rereadAllFromThreads(CAPTURE_ALL_LIMIT, 'never-read');
+        } catch (err) {
+          setCapture({
+            phase: 'error',
+            done: 0,
+            total: 0,
+            errors: 1,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          setCapturing(false);
+        }
+      },
       // Reports through the capture strip like every other capture, rather
       // than into the status note. It broadcasts the same progress events, so a
       // hand-written summary here was a second account of one run — and the one
@@ -470,7 +506,7 @@ export default function HarvestBar({
         setCapture(null);
         onNeedPanel();
         try {
-          await window.notebook.rereadAllFromThreads(CAPTURE_ALL_LIMIT);
+          await window.notebook.rereadAllFromThreads(CAPTURE_ALL_LIMIT, 'all');
         } catch (err) {
           setCapture({
             phase: 'error',

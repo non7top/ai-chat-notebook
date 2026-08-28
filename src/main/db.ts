@@ -276,6 +276,19 @@ export function initDb(userDataPath: string): void {
             AND c.link_state IN ('fetched', 'rejected'));
   `);
   db.exec('CREATE INDEX IF NOT EXISTS entries_link_state ON source_entries(link_state);');
+  // A thread climbing Google's list is the only signal this archive gets that a
+  // conversation GREW. The sidebar is ordered by last activity, so an old thread
+  // that gained a turn appears above threads that have not changed — which means
+  // "what needs re-reading" is answerable without opening anything.
+  //
+  // moved_up_at is set when a harvest sees a thread at a better position than it
+  // held before, and cleared when its turns are next stored. So it means exactly
+  // "climbed since the last time we read it", which is the queue. prev_list_rank
+  // is kept beside it to say how far, because a jump from 280 to 3 and a nudge
+  // from 6 to 5 are not the same news.
+  ensureColumn('chats', 'prev_list_rank', 'prev_list_rank INTEGER');
+  ensureColumn('chats', 'moved_up_at', 'moved_up_at TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS chats_moved_up ON chats(moved_up_at) WHERE moved_up_at IS NOT NULL;');
   ensureColumn('folders', 'color', 'color TEXT');
   // One character, an emoji in practice. Not a fixed icon set — this archive is
   // one person's topics, and any set chosen here would be the wrong set.
@@ -1127,8 +1140,10 @@ export function upsertThreadFromList(
 ): UpsertResult {
   const now = new Date().toISOString();
   const existing = db
-    .prepare('SELECT id, title FROM chats WHERE external_id = ?')
-    .get(externalId) as unknown as { id: number; title: string | null } | undefined;
+    .prepare('SELECT id, title, list_rank FROM chats WHERE external_id = ?')
+    .get(externalId) as unknown as
+    | { id: number; title: string | null; list_rank: number | null }
+    | undefined;
 
   if (existing) {
     // last_seen_at moves on every sighting; title is refreshed in case Google
@@ -1136,9 +1151,26 @@ export function upsertThreadFromList(
     // must survive re-harvesting.
     // list_rank is refreshed too: a thread that gained a turn moves to the top
     // of Google's list, and that reordering is the whole change signal.
-    db.prepare(
-      'UPDATE chats SET title = ?, url = ?, last_seen_at = ?, list_rank = ? WHERE id = ?',
-    ).run(title, url, now, listRank, existing.id);
+    // A better position than last time means activity since last time. Recorded
+    // rather than acted on here: what to do about it is the caller's business,
+    // and a harvest must stay a harvest.
+    //
+    // Only a strict improvement counts. Equal is no news, and worse is just other
+    // threads moving above it — every thread below an active one drifts down
+    // without anything happening to it, so treating that as a change would flag
+    // most of the list every time.
+    const climbed = existing.list_rank !== null && listRank < existing.list_rank;
+    if (climbed) {
+      db.prepare(
+        `UPDATE chats SET title = ?, url = ?, last_seen_at = ?, list_rank = ?,
+                          prev_list_rank = ?, moved_up_at = ?
+          WHERE id = ?`,
+      ).run(title, url, now, listRank, existing.list_rank, now, existing.id);
+    } else {
+      db.prepare(
+        'UPDATE chats SET title = ?, url = ?, last_seen_at = ?, list_rank = ? WHERE id = ?',
+      ).run(title, url, now, listRank, existing.id);
+    }
     return { created: false, titleChanged: (existing.title ?? '') !== title };
   }
 
@@ -1233,6 +1265,11 @@ export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetT
       openingFingerprint(turns.map((t) => ({ role: t.role, text: t.text }))),
       chatId,
     );
+    // The climb has been answered: whatever the thread gained is now stored, so
+    // it is no longer outstanding. Cleared HERE rather than in the capture flow
+    // because this is the moment the turns actually land — a run that failed
+    // half way must leave the flag up, and it does.
+    db.prepare('UPDATE chats SET moved_up_at = NULL WHERE id = ?').run(chatId);
     db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
     const insertMessage = db.prepare(
       'INSERT INTO messages (chat_id, seq, role, text, html) VALUES (?, ?, ?, ?, ?)',
@@ -1364,6 +1401,114 @@ export const MAX_CAPTURE_ATTEMPTS = 4;
  * most likely to have been rotated out, so the run gets the reachable ones done
  * before it meets the wall.
  */
+/**
+ * Threads that climbed Google's list since their turns were last stored.
+ *
+ * The cheapest possible answer to "what actually needs re-reading". The sidebar
+ * is ordered by last activity, so a thread appearing above where it used to sit
+ * has had something happen to it — a follow-up turn, most often. Nothing needs to
+ * be opened to learn that; the list already said it.
+ *
+ * This is what makes a check for changes affordable: a fast walk of the top rows
+ * finds the climbers, and only they are read. Re-reading all 375 to find the
+ * handful that changed is hours; this is minutes.
+ *
+ * moved_up_at is set by upsertThreadFromList when it sees a better position and
+ * cleared by replaceTurns when the turns land, so the flag means exactly
+ * "climbed, and not read since".
+ */
+export function entriesThatClimbed(limit: number): ChatToCapture[] {
+  const rows = db
+    .prepare(
+      `SELECT id, external_id, capture_attempts, ${CHAT_TITLE_SQL} AS title
+         FROM chats
+        WHERE merged_into IS NULL
+          AND moved_up_at IS NOT NULL
+          AND external_id NOT LIKE 'takeout:%'
+          AND external_id NOT LIKE 'entry:%'
+        ORDER BY list_rank ASC, id ASC
+        LIMIT ?`,
+    )
+    .all(limit) as unknown as {
+    id: number;
+    external_id: string;
+    title: string;
+    capture_attempts: number;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    externalId: r.external_id,
+    title: r.title,
+    attempts: r.capture_attempts,
+  }));
+}
+
+export function countEntriesThatClimbed(): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM chats
+        WHERE merged_into IS NULL
+          AND moved_up_at IS NOT NULL
+          AND external_id NOT LIKE 'takeout:%'
+          AND external_id NOT LIKE 'entry:%'`,
+    )
+    .get() as unknown as { n: number };
+  return row.n;
+}
+
+/**
+ * Entries Google could still hold that have never been read from it.
+ *
+ * The narrow half of the full re-read, and worth its own action because of the
+ * cost: measured, 375 entries carry a Google id and only 80 have no threads
+ * reading. Re-reading all 375 takes hours and re-reads 295 entries that already
+ * hold the better account; these 80 are where a read adds something that is not
+ * there.
+ *
+ * Both entries the user pointed at — #51 at list position 113 and #72 at 144 —
+ * were in this group: content from the export only, a link whose verdict was
+ * earned on another entry, and a given-up mark from a walk that could not see
+ * past row 60. Nothing bulk would take them, and one manual press read each.
+ *
+ * 'capture' is the stored word for the threads source; see the note on the source
+ * vocabulary. Attempt marks are deliberately not consulted — a mark means an
+ * earlier run gave up, which is a fact about that run.
+ */
+const NEVER_READ_FROM_THREADS = `merged_into IS NULL
+      AND external_id NOT LIKE 'takeout:%'
+      AND external_id NOT LIKE 'entry:%'
+      AND ',' || COALESCE(sources, source) || ',' NOT LIKE '%,capture,%'`;
+
+export function entriesNeverReadFromThreads(limit: number): ChatToCapture[] {
+  const rows = db
+    .prepare(
+      `SELECT id, external_id, capture_attempts, ${CHAT_TITLE_SQL} AS title
+         FROM chats
+        WHERE ${NEVER_READ_FROM_THREADS}
+        ORDER BY CASE WHEN list_rank IS NULL THEN 1 ELSE 0 END, list_rank ASC, id ASC
+        LIMIT ?`,
+    )
+    .all(limit) as unknown as {
+    id: number;
+    external_id: string;
+    title: string;
+    capture_attempts: number;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    externalId: r.external_id,
+    title: r.title,
+    attempts: r.capture_attempts,
+  }));
+}
+
+export function countEntriesNeverReadFromThreads(): number {
+  const row = db
+    .prepare(`SELECT COUNT(*) AS n FROM chats WHERE ${NEVER_READ_FROM_THREADS}`)
+    .get() as unknown as { n: number };
+  return row.n;
+}
+
 export function entriesForFullReread(limit: number): ChatToCapture[] {
   const rows = db
     .prepare(

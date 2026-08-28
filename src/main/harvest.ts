@@ -123,6 +123,12 @@ export interface HarvestSummary {
  */
 interface SidebarWalk {
   ids: Set<string>;
+  /**
+   * Stopped deliberately on a run of already-known rows, rather than falling
+   * short. A success for "what is new" and useless for anything else: it says
+   * nothing about the rows it never looked at, so no absence in it is evidence.
+   */
+  stoppedAtKnown: boolean;
   /** Reached the bottom, stopped growing, AND matched the expected total. */
   complete: boolean;
   /** Exited by stagnation at the bottom rather than by the step ceiling. */
@@ -150,6 +156,28 @@ async function walkSidebarThreads(hooks: {
   onNew?: (entry: ThreadListEntry, rank: number) => void;
   onStep?: (found: number, expected: number) => void;
   cancelled?: () => boolean;
+  /**
+   * Stop once this many rows in a row are already in the archive.
+   *
+   * Google orders the sidebar by LAST ACTIVITY. That is not the same as "newest
+   * threads first", and the difference is the reason this takes a run of rows
+   * rather than one: an OLD thread that just gained a turn climbs to the top, so
+   * the first rows are a mix of new threads and old ones that moved. What holds is
+   * that nothing whose last activity is older can sit above something newer — so
+   * once a solid run of rows the archive already knows has gone by, everything
+   * below it is older still.
+   *
+   * The run is what tolerates the moved-up threads. A handful of them at the top
+   * does not stop the walk, because any unknown row resets the count.
+   *
+   * Measured, the full walk is 39 steps of up to four seconds each; this reaches
+   * its answer in two or three when nothing has changed. That is the difference
+   * between a check worth running often and one that is put off.
+   *
+   * A walk that stops this way is NOT complete, and must never be used to
+   * conclude a thread is gone — see SidebarWalk.stoppedAtKnown.
+   */
+  stopAfterKnown?: { known: Set<string>; rows: number };
 } = {}): Promise<SidebarWalk> {
   await scrollListToTop();
   const geometry = await getListGeometry();
@@ -183,8 +211,16 @@ async function walkSidebarThreads(hooks: {
   // so "has the render caught up" is a question about WHICH rows are there, not
   // how many.
   const signature = (entries: ThreadListEntry[]) => entries.map((e) => e.externalId).join(',');
+  // Rows in a row that the archive already holds. Counted over rendered rows in
+  // their own order, which is Google's order, and reset by any unknown row —
+  // a new thread anywhere in the run means the run is not over.
+  let knownStreak = 0;
   const absorb = (entries: ThreadListEntry[]) => {
     for (const entry of entries) {
+      if (hooks.stopAfterKnown) {
+        if (hooks.stopAfterKnown.known.has(entry.externalId)) knownStreak += 1;
+        else knownStreak = 0;
+      }
       if (ids.has(entry.externalId)) continue;
       // The size before insertion is this thread's position in Google's own
       // ordering, because the walk starts at the top and never goes back.
@@ -200,9 +236,18 @@ async function walkSidebarThreads(hooks: {
   let steps = 0;
   let stagnantAtBottom = 0;
   let reachedBottom = false;
+  let stoppedAtKnown = false;
+  const enoughKnown = () =>
+    hooks.stopAfterKnown !== undefined && knownStreak >= hooks.stopAfterKnown.rows;
   let lastScrollHeight = geometry.scrollHeight;
   for (let step = 0; step < MAX_STEPS; step += 1) {
     if (hooks.cancelled?.()) break;
+    // Checked before scrolling as well as after absorbing, so a list whose very
+    // first screen is all known costs one read rather than a step.
+    if (enoughKnown()) {
+      stoppedAtKnown = true;
+      break;
+    }
     steps += 1;
     const before = ids.size;
     // Capped, so the walk cannot outrun the rendering. See STEP_MAX_PX.
@@ -234,6 +279,10 @@ async function walkSidebarThreads(hooks: {
     // stop" is how a lazy-loading list gets abandoned halfway.
     const grew = scrolled.scrollHeight > lastScrollHeight;
     lastScrollHeight = Math.max(lastScrollHeight, scrolled.scrollHeight);
+    if (enoughKnown()) {
+      stoppedAtKnown = true;
+      break;
+    }
     if (scrolled.atBottom && ids.size === before && !grew) {
       stagnantAtBottom += 1;
       if (stagnantAtBottom >= STAGNANT_AT_BOTTOM_LIMIT) {
@@ -263,11 +312,23 @@ async function walkSidebarThreads(hooks: {
     ` · panel ${geometry.clientHeight}px, step ${Math.round(
       Math.min(geometry.clientHeight * STEP_FRACTION, STEP_MAX_PX),
     )}px, ${steps} steps` +
-    ` · ${reachedBottom ? 'reached the bottom' : 'stopped at the step ceiling'}`;
+    ` · ${
+      stoppedAtKnown
+        ? `stopped on ${knownStreak} known rows in a row — everything below is older`
+        : reachedBottom
+          ? 'reached the bottom'
+          : 'stopped at the step ceiling'
+    }`;
 
   return {
     ids,
+    // NOT complete when it stopped on known rows, and that is not a failure: the
+    // rows below were never looked at, so the set cannot answer "is this thread
+    // still listed" for anything outside it. Every caller that writes a verdict
+    // keys off `complete`, so this one flag keeps a fast check from being read as
+    // evidence of absence.
     complete: reachedBottom && enough,
+    stoppedAtKnown,
     reachedBottom,
     expected: geometry.expectedTotal,
     steps,
@@ -297,7 +358,10 @@ async function walkSidebarWithSecondChance(
   hooks: Parameters<typeof walkSidebarThreads>[0] = {},
 ): Promise<SidebarWalk> {
   const first = await walkSidebarThreads(hooks);
-  if (first.complete || hooks.cancelled?.()) return first;
+  // A walk that stopped on known rows did what it was asked. Reloading the page
+  // and walking it again to "improve" that would throw away the entire point of
+  // the fast check.
+  if (first.complete || first.stoppedAtKnown || hooks.cancelled?.()) return first;
 
   console.warn(
     `[sidebar] short walk (${first.ids.size} of ~${first.expected}) — reloading the page ` +
@@ -305,8 +369,8 @@ async function walkSidebarWithSecondChance(
   );
   try {
     await reloadAiMode();
-    // Google sorts by recent activity on load and never re-sorts live, so a
-    // freshly loaded list is also a correctly ordered one.
+    // A freshly loaded list is a correctly ordered one: Google sorts by LAST
+    // ACTIVITY, so the order reflects the moment of loading.
     await new Promise((resolve) => setTimeout(resolve, 2000));
     await ensureHistorySidebarOpen();
     const recycled = await recycleHistorySidebar();
@@ -339,7 +403,39 @@ async function walkSidebarWithSecondChance(
  * it turns an unnavigable wall of unnamed chats into something filed and
  * searchable, without waiting on per-thread capture.
  */
-export async function harvestThreadList(): Promise<HarvestSummary> {
+/**
+ * How much of the list to walk.
+ *
+ * 'full' reaches the bottom and is the only mode whose result can support "this
+ * thread is no longer listed". 'new' stops on a run of rows the archive already
+ * holds — 39 steps down to two or three, because Google orders by last activity
+ * and nothing older can sit above something newer.
+ */
+export type HarvestMode = 'full' | 'new';
+
+/** Rows in a row that must be known before a 'new' walk stops. Two screens. */
+const KNOWN_ROWS_TO_STOP = 20;
+
+/**
+ * Above this many threads, load the sidebar list once instead of searching for
+ * each thread in it.
+ *
+ * The list load exists because per-thread searching does not scale: four threads
+ * meant four full sweeps of up to a minute each, all finding nothing, which read
+ * as a loop. But it is not free either — and it got dearer when the walk started
+ * waiting for Google to render, which is up to four seconds per step across 39
+ * steps.
+ *
+ * So it is a threshold rather than a rule. For a couple of threads just seen at
+ * the top of the list, a targeted search finds each in seconds and the load would
+ * be most of the run. The old code drew this line at 1, which is why "check for
+ * new" spent minutes on the list before reading two threads.
+ */
+const QUEUE_WORTH_A_LIST_LOAD = 8;
+
+export async function harvestThreadList(
+  mode: HarvestMode = 'full',
+): Promise<HarvestSummary> {
   if (running) {
     throw new Error('A harvest is already running');
   }
@@ -352,8 +448,8 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
     // anywhere else. Go to AI Mode rather than failing with instructions.
     const navigated = await ensureOnAiMode();
     if (navigated) {
-      // A freshly loaded list is also a correctly ordered one — Google sorts by
-      // recent activity on load and never re-sorts live.
+      // A freshly loaded list is a correctly ordered one — Google sorts by LAST
+      // ACTIVITY, so the order reflects the moment it loaded.
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }
     await ensureHistorySidebarOpen();
@@ -387,6 +483,8 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
     const updatedIds = new Set<string>();
     const walk = await walkSidebarWithSecondChance({
       cancelled: () => cancelRequested,
+      stopAfterKnown:
+        mode === 'new' ? { known, rows: KNOWN_ROWS_TO_STOP } : undefined,
       onNew: (entry, rank) => {
         const result = db.upsertThreadFromList(
           entry.externalId,
@@ -417,12 +515,19 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
       expected: walk.expected,
       created,
       updated,
-      complete: walk.complete,
+      complete: walk.complete || walk.stoppedAtKnown,
       cancelled: cancelRequested,
     };
     db.recordJob(
       'harvest',
-      cancelRequested ? 'stopped' : walk.complete ? 'finished' : 'failed',
+      cancelRequested
+        ? 'stopped'
+        : // A 'new' walk that stopped on known rows finished its job. Recording it
+          // as failed — which the completeness test alone would do — trains the
+          // person reading the strip to ignore the word.
+          walk.complete || walk.stoppedAtKnown
+          ? 'finished'
+          : 'failed',
       // The real start, not the moment the record is written. Passing
       // new Date() here made startedAt and endedAt identical — 09:07:17.951Z for
       // both on a walk that took minutes — so the record could not answer "did
@@ -703,7 +808,8 @@ export async function recaptureMany(chatIds: number[]): Promise<CaptureSummary> 
     // to a minute each, all of them finding nothing, and reported as "0 captured
     // · 3 no longer listed" after four minutes of the panel scrolling. From the
     // outside that is a loop, and it was reported as one.
-    const listed = chatIds.length > 1 ? await loadSidebarIds() : null;
+    const listed =
+      chatIds.length > QUEUE_WORTH_A_LIST_LOAD ? await loadSidebarIds() : null;
     for (const id of chatIds) {
       if (captureCancelled) break;
       // Asked before every thread, not once at the start: a run of hours meets a
@@ -839,8 +945,19 @@ export async function recaptureMany(chatIds: number[]): Promise<CaptureSummary> 
  * entry's stored reading came from a link, this replaces it, and until
  * conversations become rows per source there is nowhere for both to live.
  */
-export async function rereadAllFromThreads(limit: number): Promise<CaptureSummary> {
-  const queue = db.entriesForFullReread(limit);
+export async function rereadAllFromThreads(
+  limit: number,
+  scope: 'all' | 'never-read' | 'climbed' = 'all',
+): Promise<CaptureSummary> {
+  // 'never-read' is the same run against the entries where it adds something:
+  // 80 of 375 on the real archive. Which entries to take is a question for a
+  // query, not a reason for a second function.
+  const queue =
+    scope === 'climbed'
+      ? db.entriesThatClimbed(limit)
+      : scope === 'never-read'
+        ? db.entriesNeverReadFromThreads(limit)
+        : db.entriesForFullReread(limit);
   return recaptureMany(queue.map((c) => c.id));
 }
 
@@ -1400,7 +1517,7 @@ export async function syncArchive(mode: SyncMode): Promise<SyncSummary> {
     // and a run that gave up on step one would leave the long work undone for a
     // reason that has nothing to do with it.
     try {
-      const listed = await harvestThreadList();
+      const listed = await harvestThreadList(mode === 'new' ? 'new' : 'full');
       summary.listed = listed.created;
     } catch (error) {
       summary.errors += 1;
@@ -1418,6 +1535,21 @@ export async function syncArchive(mode: SyncMode): Promise<SyncSummary> {
       const captured = await captureTurns(NO_LIMIT, mode === 'all');
       summary.captured = captured.captured;
       summary.errors += captured.errors;
+
+      // AND the threads that climbed the list, which captureTurns cannot see:
+      // it queues on "holds no turns", and a thread that gained a turn holds
+      // plenty — just fewer than Google does now.
+      //
+      // This is the half of "what is new" that had no route at all. A brand new
+      // thread arrives empty and gets read; an OLD thread that gained a turn is
+      // indistinguishable from an unchanged one by anything in the archive except
+      // its position in the list, and nothing was reading that.
+      const climbed = db.entriesThatClimbed(NO_LIMIT);
+      if (climbed.length > 0 && !syncCancelled) {
+        const reread = await recaptureMany(climbed.map((c) => c.id));
+        summary.captured += reread.captured;
+        summary.errors += reread.errors;
+      }
     }
 
     if (mode === 'all' && !syncCancelled) {
@@ -1662,7 +1794,8 @@ export async function captureTurns(
     // The sidebar list, once, instead of once per thread — see loadSidebarIds.
     // Only worth the twenty seconds when there is more than one thread to place;
     // a single re-capture can just go and look.
-    const listed = queue.length > 1 ? await loadSidebarIds() : null;
+    const listed =
+      queue.length > QUEUE_WORTH_A_LIST_LOAD ? await loadSidebarIds() : null;
     // Said out loud rather than silently skipped. A queue that quietly shrinks
     // from 18 to 0 with nothing captured looks exactly like finishing the work.
     const exhausted = includeExhausted ? 0 : db.countExhaustedCaptures();

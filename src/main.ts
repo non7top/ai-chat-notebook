@@ -288,6 +288,14 @@ const createWindow = () => {
     // Links the import left inside an entry's payload and never wrote down as a
     // record. The link queue is record-based, so these are invisible to it.
     const strandedLinks = db.planTakeoutLinkRecovery().entries;
+    // The narrow half: entries Google could hold that have never been read from
+    // it. 80 of 375 measured, and the two entries pointed at by hand were both
+    // in this group.
+    const neverRead = db.countEntriesNeverReadFromThreads();
+    // Threads that moved up Google's list since their turns were stored. The
+    // sidebar is ordered by last activity, so this is "gained a turn" without
+    // opening anything.
+    const climbed = db.countEntriesThatClimbed();
     // Records whose link was opened into SOME OTHER entry, so this one holds
     // nothing from it. The queue asks "has this link been opened", which is a
     // different question from "does this entry hold what the link has".
@@ -383,6 +391,38 @@ const createWindow = () => {
                 'Stop works at any point. Entries Google no longer lists are skipped ' +
                 'from a single sweep of the sidebar rather than searched for one by one.',
               click: command('rereadAll'),
+            },
+            {
+              // First, because it is the cheapest and the most often right. An old
+              // thread that climbed the list has gained a turn — the list says so
+              // — and nothing else in the archive can tell.
+              label:
+                climbed > 0
+                  ? `Read the ${climbed} that changed`
+                  : 'Read the ones that changed',
+              enabled: climbed > 0,
+              toolTip:
+                "Threads that moved up Google's list since their turns were " +
+                'stored, which means they gained something. Get new does this too; ' +
+                'this is the same work on its own.',
+              click: command('readClimbed'),
+            },
+            {
+              // Above the read-everything item because it is almost always the
+              // one wanted: same work, on the entries where it adds something.
+              // Measured, 80 of 375 — so this is 45 minutes against eight hours,
+              // and the other 295 already hold a threads reading.
+              label:
+                neverRead > 0
+                  ? `Read the ${neverRead} never read from threads`
+                  : 'Read the ones never read from threads',
+              enabled: neverRead > 0,
+              toolTip:
+                'Entries with a Google id whose stored conversation came from the ' +
+                'export or a link and never from Google itself. Ignores the ' +
+                'given-up marks, which record what an earlier run concluded rather ' +
+                'than whether the thread is there.',
+              click: command('readNeverRead'),
             },
             {
               // The way back to the threads the flows have stopped taking. A

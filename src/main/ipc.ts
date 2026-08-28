@@ -207,7 +207,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('capture:recaptureMany', (_event, chatIds: number[]) =>
     recaptureMany(chatIds),
   );
-  ipcMain.handle('capture:rereadAll', (_event, limit: number) => rereadAllFromThreads(limit));
+  ipcMain.handle(
+    'capture:rereadAll',
+    (_event, limit: number, scope: 'all' | 'never-read' | 'climbed' = 'all') =>
+      rereadAllFromThreads(limit, scope),
+  );
   ipcMain.handle('links:recover', () => db.recoverTakeoutLinks());
   ipcMain.handle('links:countUnused', () => db.countEntriesWithUnusedLinks());
   ipcMain.handle('capture:remaining', () => db.countChatsWithoutTurns());
