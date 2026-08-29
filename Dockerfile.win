@@ -1,0 +1,40 @@
+# Windows installers, built here rather than on a runner.
+#
+# NSIS needs Windows tooling; wine supplies it. electron-builder's own image
+# carries a wine that is known to work with its rcedit and makensis calls, which
+# is worth more than a hand-rolled apt install of wine — the failure mode there is
+# a build that packages but produces an exe with no icon and no version metadata.
+#
+# This exists because GitHub Actions stopped running: every job on the account
+# began failing in two seconds with zero steps, having passed hours earlier, with
+# the artifact store simultaneously refusing uploads for lack of quota. A project
+# whose only route to a binary is someone else's runner has one point of failure
+# too many.
+FROM electronuserland/builder:wine
+
+# The same non-root scaffolding as Dockerfile.dev, and for the same reason: a root
+# container writing into the bind mount leaves root-owned files on the host, which
+# has already broken committing here once.
+#
+# Mode 1777 is load-bearing. A named volume takes its ownership from the image's
+# contents at that path, so these must be world-writable in the image or the
+# volumes come up root-owned and every non-root build fails on first write.
+RUN mkdir -p /app /app/node_modules \
+      /cache/npm /cache/electron /cache/electron-builder /cache/home /cache/wine \
+    && chmod -R 1777 /app /cache
+
+# Every cache electron-builder reaches for, pointed at the named volume:
+#   npm            packages
+#   electron       the ~100MB per-platform Electron zip
+#   electron-builder  nsis, winCodeSign, app-builder — another ~200MB, and the
+#                  download it does silently on first run
+#   wine           the prefix, which wine otherwise rebuilds from scratch every
+#                  container: about 40 seconds of nothing on each build
+ENV HOME=/cache/home \
+    npm_config_cache=/cache/npm \
+    ELECTRON_CACHE=/cache/electron \
+    ELECTRON_BUILDER_CACHE=/cache/electron-builder \
+    WINEPREFIX=/cache/wine \
+    WINEDEBUG=-all
+
+WORKDIR /app
