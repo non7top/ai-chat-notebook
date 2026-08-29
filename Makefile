@@ -9,8 +9,9 @@ export DOCKER_UID := $(shell id -u)
 export DOCKER_GID := $(shell id -g)
 
 COMPOSE := docker compose
-# Where a finished installer is dropped. Overridable: make win DEST=/somewhere
-DEST ?= /mnt/d/tmp
+# Where the app is deployed. Overridable: make deploy DEST=/somewhere
+DEST ?= /mnt/d
+APP_DIR := $(DEST)/ai-chat-notebook
 
 .PHONY: help image install build lint typecheck check win win-dir deploy clean destroy
 
@@ -55,11 +56,32 @@ win-dir: build ## Unpacked win32 folder — no wine, no installer, quickest
 	$(COMPOSE) run --rm dev npx electron-builder --win --dir --publish never \
 		--config.win.signAndEditExecutable=false
 
-deploy: ## Copy the newest installer to DEST (default D:\tmp)
-	@exe=$$(ls -t dist/*.exe 2>/dev/null | head -1); \
-	if [ -z "$$exe" ]; then echo "no installer in dist/ — run make win first"; exit 1; fi; \
-	cp "$$exe" "$(DEST)/"; \
-	echo "$(DEST)/$$(basename $$exe)  $$(stat -c%s "$$exe") bytes  md5 $$(md5sum < "$$exe" | cut -d' ' -f1)"
+deploy: win-dir ## Build and put the app at $(APP_DIR) — close the app first
+	@# The staging directory is keyed on this process's pid, and that is not
+	@# fussiness: two deploys running at once both used "$(APP_DIR).new", so one
+	@# deleted the folder the other was still filling. The result passed every
+	@# check the target made and left 27 of 74 files on the disk — an app that
+	@# would start and then fail on a missing library. Concurrent runs now cannot
+	@# see each other's staging.
+	@stage="$(APP_DIR).stage-$$$$"; \
+	rm -rf "$$stage" || exit 1; \
+	cp -r dist/win-unpacked "$$stage" || { rm -rf "$$stage"; exit 1; }; \
+	src=$$(find dist/win-unpacked -type f | wc -l); \
+	dst=$$(find "$$stage" -type f | wc -l); \
+	if [ "$$src" != "$$dst" ]; then \
+		echo "copy came out $$dst of $$src files — leaving $(APP_DIR) as it was"; \
+		rm -rf "$$stage"; exit 1; \
+	fi; \
+	if [ -d "$(APP_DIR)" ]; then \
+		rm -rf "$$stage.old"; \
+		mv "$(APP_DIR)" "$$stage.old" || { \
+			echo "could not replace $(APP_DIR) — is the app still running?"; \
+			rm -rf "$$stage"; exit 1; }; \
+	fi; \
+	mv "$$stage" "$(APP_DIR)" || { \
+		echo "could not move the new build into place"; exit 1; }; \
+	rm -rf "$$stage.old"; \
+	echo "$(APP_DIR)  $$dst files  $$(du -sh "$(APP_DIR)" | cut -f1)  built $$(date +%H:%M)"
 
 clean: ## Remove build output, keep the caches
 	rm -rf dist out
