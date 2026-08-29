@@ -93,7 +93,14 @@ export default function ChatReader({ chat, onChange }: Props) {
           />
         ) : (
           <>
-            <h2 className={chat.title === '(untitled)' ? 'untitled' : undefined}>{chat.title}</h2>
+            {/* title= carries the whole thing, because the heading is clamped to
+                two lines and a prompt can run to a paragraph. */}
+            <h2
+              className={chat.title === '(untitled)' ? 'untitled' : undefined}
+              title={chat.title}
+            >
+              {chat.title}
+            </h2>
             {/* Quotable, and the same number the list shows. */}
             <span className="chat-id" title="This thread's internal id">
               #{chat.id}

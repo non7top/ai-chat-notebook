@@ -719,9 +719,23 @@ button:disabled {
   height: 100%;
 }
 
+/* The header must not be able to eat the pane.
+   MEASURED on the real app: an entry whose title runs to a sentence rendered as
+   a 99px-wide column of one word per line, 430px tall, above a reader pane only
+   332px wide. The whole conversation was pushed off screen by its own heading.
+
+   The cause is `flex: 1` on the title, whose basis is 0: the id and the two
+   buttons are laid out first at their natural widths, and the title gets what is
+   left over — 99px of 332. It is the same shape as the folder names that came out
+   four characters wide, and the same fix applies: bound the thing that grows,
+   rather than trusting that there will be room. */
 .reader-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
+  /* So the actions drop to their own line rather than squeezing the title into a
+     column. Below about 380px there is genuinely not room for both, and a title
+     on its own line is worth more than a title beside a button. */
+  flex-wrap: wrap;
   gap: 0.5rem;
   padding: 0.5rem 0.8rem;
   border-bottom: 1px solid var(--border);
@@ -731,7 +745,20 @@ button:disabled {
 .reader-head h2 {
   font-size: 1rem;
   margin: 0;
-  flex: 1;
+  /* min-width overrides the flex default of `auto`, which refuses to shrink a
+     box below its content — that default is why the browser chose to make this
+     tall instead of narrow. */
+  flex: 1 1 12rem;
+  min-width: 0;
+  /* Two lines, then an ellipsis. A title IS the conversation's opening prompt
+     here, so a single line loses too much of it, and no title is worth thirty
+     lines of header. The full text stays available on hover. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 .reader-body {
