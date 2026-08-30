@@ -88,4 +88,22 @@ const cleaned = sanitizeHtml(nasty);
 console.log(`sanitised: ${cleaned}`);
 if (/onerror|script|alert/i.test(cleaned)) throw new Error('sanitising regressed');
 
+// COMMENTS, which are 60% of this archive's stored html and hold every one of
+// its inline base64 images. Google leaves its serialised page data in them, and
+// the reader must drop them: they render nothing, and a turn carrying 300KB of
+// them is parsed on every open.
+//
+// The second assertion is the one that matters. A comment cannot be removed by
+// anything that treats "<!--" and "-->" as a pair without checking, because an
+// unterminated one would swallow the rest of the answer.
+const commented =
+  '<p>before</p><!--TgQPHd|[[null,null,["data:image/png;base64,AAAA"]]]-->' +
+  '<img src="assets/ab/cd.png"><!-- another --><p>after</p>';
+const stripped = sanitizeHtml(commented);
+console.log(`comments: ${stripped}`);
+if (/<!--|TgQPHd|base64/.test(stripped)) throw new Error('comments survived sanitising');
+if (!/before/.test(stripped) || !/after/.test(stripped) || !/<img/.test(stripped)) {
+  throw new Error('stripping comments took content with it');
+}
+
 console.log('OK');

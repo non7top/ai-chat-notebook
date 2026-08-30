@@ -994,9 +994,21 @@ export function getChat(id: number): ChatDetail | null {
   // of them was mostly a column of giant YouTube buttons with the answer
   // squeezed between them. The kinds are known here, so the reader is told which
   // paths to render small.
+  //
+  // BOUNDED BY SIZE as well as kind, and only as a fallback — the reader now
+  // decides from Google's own markup (img.IpiY3d) and consults this list only for
+  // images the markup said nothing about.
+  //
+  // 'other' is where everything unrecognised lands: 43,682 of 46,814 assets, with
+  // a median of 2,172 bytes. Handing that whole bucket to the reader as "page
+  // furniture" shrank 93% of the archive's pictures to the size of a letter. The
+  // 4KB bound keeps the favicons it was meant for — 35,430 of them are under it —
+  // and stops it claiming the 2,359 images above 12KB that are plainly content.
   const previewPaths = (
     db
-      .prepare("SELECT local_path FROM assets WHERE chat_id = ? AND kind = 'other'")
+      .prepare(
+        "SELECT local_path FROM assets WHERE chat_id = ? AND kind = 'other' AND bytes < 4096",
+      )
       .all(id) as unknown as { local_path: string }[]
   )
     .map((a) => assetHrefFor(a.local_path))

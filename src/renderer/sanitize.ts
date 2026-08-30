@@ -153,8 +153,48 @@ export function sanitizeHtml(
   // alt, and clean() strips both off an <img> — the allowlist keeps only src,
   // alt, width and height. Run afterwards it could only see identical src, which
   // catches the generated-image case and misses the re-encoded one entirely.
+  // The same comments the capture now drops, removed here as well so the 3,504
+  // turns already stored render without them. Retroactive by construction, like
+  // dropRepeatedImages: nothing is rewritten, they simply never reach the DOM.
+  //
+  // This does NOT shrink the database — the bytes stay in the html column until
+  // something rewrites the rows. It stops them being parsed into a live document
+  // on every open, which for a turn carrying 300KB of comments is the difference
+  // between a reader that opens instantly and one that stalls.
+  // Walked by nodeType rather than with a TreeWalker: this function also runs
+  // outside a browser, in check:sanitize, against a DOM shim that has no
+  // NodeFilter. Node.COMMENT_NODE is 8 everywhere.
+  const dropComments = (node: Node): void => {
+    for (const child of Array.from(node.childNodes)) {
+      if (child.nodeType === 8) child.parentNode?.removeChild(child);
+      else if (child.childNodes.length) dropComments(child);
+    }
+  };
+  dropComments(doc.body);
+
   dropRepeatedImages(doc.body);
+  // WHICH IMAGES ARE ICONS, decided from Google's own markup while it is still
+  // here. clean() strips class off every element, so this has to happen first —
+  // the same reason dropRepeatedImages runs above.
+  //
+  // The alternative, and what this replaces, was to ask the database: every asset
+  // recorded as kind 'other' was rendered at 1.25em. Measured, that is 43,682 of
+  // 46,814 assets — 93% of every picture in the archive shrunk to the size of a
+  // letter, which is what "valid images scaled down to nonexistence" was.
+  //
+  // Nothing about the FILE can tell an icon from a picture. Favicons ship at
+  // 256px now, so pixel size cannot; a generated image's median is 5,348 bytes
+  // against a favicon's 2,172, so bytes cannot either. What can is where the
+  // image sat: img.IpiY3d is a source-citation favicon, and Google says so.
+  //
+  // Retroactive by construction, like dropRepeatedImages: it reads stored HTML at
+  // render time, and the classes are still in there — measured, IpiY3d appears in
+  // 186 of 600 sampled turns holding an image.
+  const icons = new Set(
+    Array.from(doc.body.querySelectorAll('img.IpiY3d, div.S9OuHf img, img.RKMwI')),
+  );
   clean(doc.body);
+  for (const img of icons) img.setAttribute('class', 'preview-image');
 
   // Relative "assets/..." paths are stored rather than absolute file:// URLs so
   // the archive can be moved between machines. Resolve them now, against the
@@ -163,10 +203,14 @@ export function sanitizeHtml(
   if (assetsBaseUrl) {
     for (const img of Array.from(doc.body.querySelectorAll('img[src^="assets/"]'))) {
       const src = img.getAttribute('src') ?? '';
-      // Marked before the path is rewritten, while it still matches what the
-      // database recorded. Page furniture is kept — it is part of what the
-      // answer looked like — but it must not out-shout the answer.
-      if (previewPaths?.includes(src)) img.setAttribute('class', 'preview-image');
+      // The database's opinion, now a FALLBACK rather than the rule: it only
+      // applies to an image Google's markup said nothing about. Where both speak,
+      // the markup wins, because "this is the favicon of a cited source" is a
+      // fact about the page and "kind = other" is a bucket everything unrecognised
+      // fell into.
+      if (!icons.has(img) && previewPaths?.includes(src)) {
+        img.setAttribute('class', 'preview-image');
+      }
       img.setAttribute('src', assetsBaseUrl + src.slice('assets/'.length));
     }
   }

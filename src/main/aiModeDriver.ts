@@ -1099,6 +1099,25 @@ const READ_TURNS_SCRIPT = `
       const keep = new Set(imagesIn(el).map((i) => i.src));
 
       const copy = el.cloneNode(true);
+
+      // COMMENTS, which are not markup anyone reads and are most of what gets
+      // stored. Google leaves its own serialised page data in them —
+      // <!--TgQPHd|[[null,null,["data:image/png;base64,...  — up to about 5KB
+      // apiece, and a single answer can carry dozens.
+      //
+      // Measured on the real archive: 3,504 stored turns hold a data: image, all
+      // of them inside comments and none inside an <img>, which is why "Move
+      // inline images" ran repeatedly and moved nothing. It looks for
+      // <img src="data:" and there has never been one to find; it counted them as
+      // "a carrier the patterns do not know about" and said so, and I read that
+      // as a failure to convert rather than as the answer.
+      //
+      // Nothing renders from a comment, so this loses no picture and no text.
+      const comments = document.createTreeWalker(copy, NodeFilter.SHOW_COMMENT);
+      const doomed = [];
+      for (let c = comments.nextNode(); c; c = comments.nextNode()) doomed.push(c);
+      for (const c of doomed) c.remove();
+
       for (const junk of Array.from(copy.querySelectorAll(chromeSel))) {
         // Controls are stripped for their labels, but Google puts real images
         // inside them — an uploaded reference image lives in a clickable
