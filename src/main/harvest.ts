@@ -27,6 +27,14 @@ const MAX_STEPS = 200;
 // produces nothing new for several steps in the middle of a run whenever the
 // render window lags the scroll. Only a bottom that stays put counts.
 const STAGNANT_AT_BOTTOM_LIMIT = 3;
+// Between conversations. Not a rate limit so much as breathing room: this
+// drives a real browser session, and hammering it back-to-back for hours is
+// both more likely to be throttled and harder to interrupt.
+const BETWEEN_CAPTURES_MS = 800;
+// A run that fails this many times in a row has hit something systemic — signed
+// out, offline, page restructured — and grinding through 300 conversations to
+// fail at every one wastes hours and buries the cause.
+const CONSECUTIVE_FAILURE_LIMIT = 10;
 
 let cancelRequested = false;
 let running = false;
@@ -301,7 +309,14 @@ export async function recaptureChat(chatId: number): Promise<{ turns: number; im
   const chat = db.getChatForCapture(chatId);
   if (!chat) throw new Error(`No chat with id ${chatId}`);
   await ensureOnAiMode();
-  db.clearTurns(chatId);
+  // NOT cleared first. An earlier version deleted the stored turns before
+  // reading, so a re-capture that then failed — a slow load, a page that never
+  // settled — left the conversation with nothing at all. It destroyed the copy
+  // it was meant to improve.
+  //
+  // captureOneChat ends in replaceTurns, which deletes and inserts inside one
+  // transaction, so the old turns survive right up to the moment new ones exist
+  // to take their place.
   const result = await captureOneChat(chat);
   return { turns: result.turns, images: result.images };
 }
@@ -315,6 +330,7 @@ export interface CaptureSummary {
   remaining: number;
   cancelled: boolean;
   failures: { title: string; reason: string }[];
+  stoppedEarly?: string;
 }
 
 /**
@@ -343,20 +359,34 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
 
   try {
     await ensureOnAiMode();
+    // The queue is taken ONCE, so each conversation gets one attempt per run.
+    // Re-reading it in a loop would retry the same failure forever in an
+    // unattended run; a fresh run picks failures up again, ordered behind
+    // anything never tried.
     const queue = db.chatsWithoutTurns(limit);
-    for (const chat of queue) {
+    let consecutiveFailures = 0;
+    // Conversations that failed this pass, retried once at the end. Most
+    // failures here are transient — a page that took longer than 60s to settle
+    // — so without a retry "Capture all" reliably leaves a tail behind and the
+    // name is misleading. One extra pass, not a loop: retrying until success
+    // would spin forever on a conversation that genuinely cannot be read.
+    const retryable: db.ChatToCapture[] = [];
+    let isRetry = false;
+    const runPass = async (chats: db.ChatToCapture[]) => {
+    for (const chat of chats) {
       if (captureCancelled) break;
       summary.attempted += 1;
       broadcastCapture({
         phase: 'capturing',
         done: summary.captured,
-        total: queue.length,
+        total: queue.length + retryable.length,
         errors: summary.errors,
-        current: chat.title.slice(0, 60),
+        current: `${isRetry ? 'retry: ' : ''}${chat.title.slice(0, 60)}`,
       });
       try {
         const result = await captureOneChat(chat);
         summary.captured += 1;
+        consecutiveFailures = 0;
         summary.turns += result.turns;
         summary.images += result.images;
       } catch (error) {
@@ -366,11 +396,35 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
         // whereas knowing they were all load timeouts points straight at the
         // fix.
         summary.errors += 1;
+        consecutiveFailures += 1;
+        db.recordCaptureFailure(chat.id);
         summary.failures.push({
           title: chat.title.slice(0, 60),
           reason: error instanceof Error ? error.message : String(error),
         });
+        if (!isRetry) retryable.push(chat);
+        if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
+          summary.stoppedEarly =
+            `Stopped after ${consecutiveFailures} consecutive failures — ` +
+            'something systemic (signed out, offline, or the page changed) ' +
+            'rather than awkward conversations.';
+          break;
+        }
       }
+      await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS));
+    }
+    };
+
+    await runPass(queue);
+    // Second and final pass over this run's failures. Their earlier failure
+    // already counted, so the totals reflect attempts rather than pretending
+    // the first try never happened.
+    if (!captureCancelled && retryable.length > 0) {
+      isRetry = true;
+      consecutiveFailures = 0;
+      const toRetry = [...retryable];
+      retryable.length = 0;
+      await runPass(toRetry);
     }
 
     summary.cancelled = captureCancelled;
@@ -383,6 +437,7 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
       turns: summary.turns,
       images: summary.images,
       remaining: summary.remaining,
+      stoppedEarly: summary.stoppedEarly,
     });
     return summary;
   } catch (error) {

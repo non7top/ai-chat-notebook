@@ -108,6 +108,7 @@ export function initDb(userDataPath: string): void {
   // CREATE TABLE above is IF NOT EXISTS, so it does nothing to a database that
   // already holds harvested rows.
   ensureColumn('chats', 'list_rank', 'list_rank INTEGER');
+  ensureColumn('chats', 'capture_attempts', 'capture_attempts INTEGER NOT NULL DEFAULT 0');
   db.exec('CREATE INDEX IF NOT EXISTS chats_list_rank ON chats(list_rank);');
 
   fts5Available = probeFts5(db);
@@ -199,6 +200,8 @@ interface ChatSummaryRow {
   started_at: string | null;
   last_seen_at: string;
   message_count: number;
+  image_count: number;
+  capture_attempts: number;
 }
 
 // COALESCE order is the display rule in one place: a title typed by hand wins
@@ -208,7 +211,11 @@ const CHAT_TITLE_SQL = "COALESCE(NULLIF(user_title, ''), NULLIF(title, ''), '(un
 
 const CHAT_SUMMARY_SQL = `
   SELECT c.id, c.folder_id, ${CHAT_TITLE_SQL} AS title, c.started_at, c.last_seen_at,
-         (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count
+         c.capture_attempts,
+         (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count,
+         -- DISTINCT sha256, not row count: every image is rendered twice by the
+         -- page, so counting asset rows would report double.
+         (SELECT COUNT(DISTINCT a.sha256) FROM assets a WHERE a.chat_id = c.id) AS image_count
   FROM chats c
 `;
 
@@ -220,6 +227,8 @@ function toSummary(row: ChatSummaryRow): ChatSummary {
     startedAt: row.started_at,
     lastSeenAt: row.last_seen_at,
     messageCount: row.message_count,
+    imageCount: row.image_count,
+    captureAttempts: row.capture_attempts,
   };
 }
 
@@ -439,14 +448,11 @@ export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetT
   }
 }
 
-/**
- * Drops a conversation's stored turns so it can be captured again. Assets
- * cascade with the messages; the files on disk are content-addressed and shared,
- * so they stay.
- */
-export function clearTurns(chatId: number): void {
-  db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
-}
+// There is deliberately no clearTurns(). Clearing before a re-capture is what
+// let a failed re-read wipe a conversation it was supposed to refresh —
+// replaceTurns already swaps old for new inside one transaction, so nothing
+// needs to delete first, and having the function around invites the same
+// mistake again.
 
 export function getChatForCapture(chatId: number): ChatToCapture | null {
   const row = db
@@ -473,11 +479,22 @@ export function chatsWithoutTurns(limit: number): ChatToCapture[] {
        FROM chats c
        WHERE c.merged_into IS NULL
          AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
-       ORDER BY CASE WHEN c.list_rank IS NULL THEN 1 ELSE 0 END, c.list_rank ASC
+       -- Never-attempted conversations first, then by Google's recency order.
+       -- Without this, a long unattended run re-tries the same early failures
+       -- ahead of hundreds of conversations it has never even looked at, and
+       -- successive runs make no progress.
+       ORDER BY c.capture_attempts ASC,
+                CASE WHEN c.list_rank IS NULL THEN 1 ELSE 0 END,
+                c.list_rank ASC
        LIMIT ?`,
     )
     .all(limit) as unknown as { id: number; external_id: string; title: string }[];
   return rows.map((r) => ({ id: r.id, externalId: r.external_id, title: r.title }));
+}
+
+/** Counted, so a conversation that keeps failing sinks in the queue. */
+export function recordCaptureFailure(chatId: number): void {
+  db.prepare('UPDATE chats SET capture_attempts = capture_attempts + 1 WHERE id = ?').run(chatId);
 }
 
 export function countChatsWithoutTurns(): number {

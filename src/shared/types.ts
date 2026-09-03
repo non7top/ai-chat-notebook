@@ -20,6 +20,10 @@ export interface ChatSummary {
   startedAt: string | null;
   lastSeenAt: string;
   messageCount: number;
+  /** Distinct images archived, so an image-heavy conversation is findable. */
+  imageCount: number;
+  /** Failed capture attempts — distinguishes "failed" from "never tried". */
+  captureAttempts: number;
 }
 
 export interface Message {
@@ -71,6 +75,7 @@ export interface CaptureProgress {
   total: number;
   errors: number;
   current?: string;
+  stoppedEarly?: string;
   turns?: number;
   images?: number;
   remaining?: number;
@@ -87,6 +92,8 @@ export interface CaptureSummary {
   cancelled: boolean;
   /** Kept rather than only counted — a bare error count is unactionable. */
   failures: { title: string; reason: string }[];
+  /** Set when a run gave up early, e.g. on a run of consecutive failures. */
+  stoppedEarly?: string;
 }
 
 export interface NotebookApi {
@@ -129,4 +136,6 @@ export interface NotebookApi {
   aiModeReload(): Promise<void>;
   setAiModeHidden(hidden: boolean): Promise<void>;
   onAiModeStatus(callback: (status: AiModeStatus) => void): () => void;
+  /** Fires when the main process reveals the panel because it needed it. */
+  onAiModeVisibility(callback: (visible: boolean) => void): () => void;
 }

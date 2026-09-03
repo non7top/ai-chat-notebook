@@ -5,16 +5,24 @@ interface Props {
   /** Harvesting scrapes the live sidebar, so the panel has to be on screen. */
   onNeedPanel: () => void;
   onFinished: () => void;
+  /**
+   * How many conversations have no turns yet, owned by the parent so it tracks
+   * the archive. It was previously read once on mount and then only updated by
+   * capture progress, so a harvest that added 8 conversations — or a re-capture
+   * from the reader — left it silently stale.
+   */
+  uncaptured: number;
 }
 
 const CAPTURE_BATCH = 25;
+// Far above any plausible history, so "all" means all.
+const CAPTURE_ALL_LIMIT = 100_000;
 
-export default function HarvestBar({ onNeedPanel, onFinished }: Props) {
+export default function HarvestBar({ onNeedPanel, onFinished, uncaptured }: Props) {
   const [progress, setProgress] = useState<HarvestProgress | null>(null);
   const [busy, setBusy] = useState(false);
   const [capture, setCapture] = useState<CaptureProgress | null>(null);
   const [capturing, setCapturing] = useState(false);
-  const [remaining, setRemaining] = useState<number | null>(null);
 
   useEffect(
     () =>
@@ -34,25 +42,22 @@ export default function HarvestBar({ onNeedPanel, onFinished }: Props) {
         setCapture(next);
         if (next.phase !== 'capturing') {
           setCapturing(false);
-          if (typeof next.remaining === 'number') setRemaining(next.remaining);
+          // onFinished reloads the archive, which refreshes the count via props
+          // rather than keeping a second copy of it here.
           onFinished();
         }
       }),
     [onFinished],
   );
 
-  useEffect(() => {
-    window.notebook.countChatsWithoutTurns().then(setRemaining);
-  }, []);
-
-  const startCapture = async () => {
+  const startCapture = async (limit: number) => {
     setCapturing(true);
     setCapture(null);
     // Capture drives the real sidebar, so the panel has to be on screen for the
     // same reason harvesting does.
     onNeedPanel();
     try {
-      await window.notebook.captureTurns(CAPTURE_BATCH);
+      await window.notebook.captureTurns(limit);
     } catch (err) {
       setCapture({
         phase: 'error',
@@ -127,9 +132,26 @@ export default function HarvestBar({ onNeedPanel, onFinished }: Props) {
 
       <span className="harvest-sep" />
 
-      <button type="button" onClick={startCapture} disabled={busy || capturing}>
-        {capturing ? 'Capturing…' : `Capture ${CAPTURE_BATCH} conversations`}
+      <button type="button" onClick={() => startCapture(CAPTURE_BATCH)} disabled={busy || capturing}>
+        {capturing ? 'Capturing…' : `Capture ${CAPTURE_BATCH}`}
       </button>
+      {/* The backlog is hours long at ~30-60s per conversation, almost all of it
+          Google's own load time. Clicking a 25-batch a dozen times is not a
+          workflow, so this exists to be started and left. */}
+      {uncaptured > 0 && (
+        <button
+          type="button"
+          // NOT bounded by the displayed count. That number is a label, and a
+          // stale one would silently stop the run short — "Capture all (296)"
+          // leaving 7 conversations behind. The main process takes whatever is
+          // actually uncaptured, up to this ceiling.
+          onClick={() => startCapture(CAPTURE_ALL_LIMIT)}
+          disabled={busy || capturing}
+          title="Works through everything not yet captured. Safe to leave running; Stop works at any point."
+        >
+          Capture all ({uncaptured})
+        </button>
+      )}
       {capturing && (
         <button type="button" onClick={() => window.notebook.cancelCapture()}>
           Stop
@@ -145,11 +167,10 @@ export default function HarvestBar({ onNeedPanel, onFinished }: Props) {
                   capture.images ?? 0
                 } images${capture.errors ? ` · ${capture.errors} failed` : ''}${
                   capture.remaining ? ` · ${capture.remaining} left` : ''
-                }`}
+                }${capture.stoppedEarly ? ` — ${capture.stoppedEarly}` : ''}`}
         </span>
       ) : (
-        remaining !== null &&
-        remaining > 0 && <span className="harvest-status">{remaining} not captured</span>
+        uncaptured > 0 && <span className="harvest-status">{uncaptured} not captured</span>
       )}
 
       {busy && progress?.expected ? (

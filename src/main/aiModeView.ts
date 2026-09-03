@@ -102,6 +102,19 @@ export function setAiModeViewHidden(nextHidden: boolean): void {
   view.setBounds(hidden ? { x: 0, y: 0, width: 0, height: 0 } : computeBounds(mainWindowRef));
 }
 
+/**
+ * Reveals the panel and tells the renderer, so its own toggle does not end up
+ * claiming the panel is hidden while it is plainly on screen.
+ */
+export function showAiModePanel(): void {
+  if (!view || !mainWindowRef) return;
+  if (!hidden) return;
+  setAiModeViewHidden(false);
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send('aiMode:visibility', true);
+  }
+}
+
 export function isAiModeViewHidden(): boolean {
   return hidden;
 }
@@ -147,6 +160,13 @@ export function navigateAiMode(input: string): void {
  */
 export function ensureOnAiMode(timeoutMs = 25000): Promise<boolean> {
   if (!view) return Promise.reject(new Error('AI Mode view has not been created yet'));
+  // Anything that reads the page needs the panel laid out: while hidden it has
+  // zero bounds, so clientHeight is 0 and the thread list has no geometry to
+  // scroll. Re-capture failed with "Thread list never laid out" for exactly
+  // this reason — it had no equivalent of the capture buttons' "show the panel
+  // first" step. Arranging it here covers every caller instead of each one
+  // remembering.
+  showAiModePanel();
   const webContents = view.webContents;
   if (AI_MODE_URL_PATTERN.test(webContents.getURL())) return Promise.resolve(false);
 
