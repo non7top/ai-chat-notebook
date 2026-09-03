@@ -4,7 +4,13 @@
 //   docker compose run --rm recon node scripts/cdp-eval.mjs --file=/tmp/q.js
 //   docker compose run --rm recon node scripts/cdp-eval.mjs 'document.title'
 //
-// Options: --target=127.0.0.1:9222  --match=google  --file=<path>
+// Options: --target=127.0.0.1:9222  --match=google  --file=<path>  --auth=user:pass
+//
+// --auth is needed against a debug build, whose debugging port sits behind a
+// Basic-auth proxy (default ai:ai — see src/main/cdpProxy.ts). The credentials
+// go into the WebSocket URL's userinfo rather than a header, because the global
+// WebSocket takes no headers; the runtime turns userinfo into the Authorization
+// header the proxy is looking for.
 //
 // Evaluates in the matched target's default context (main frame, main world).
 // Read-only by convention: this drives a live logged-in session, so anything
@@ -20,6 +26,7 @@ const arg = (name, fallback) => {
 const target = arg('target', '127.0.0.1:9222');
 const match = arg('match', 'google');
 const file = arg('file', null);
+const auth = arg('auth', process.env.NOTEBOOK_DEVTOOLS_AUTH ?? null);
 const base = target.startsWith('http') ? target : `http://${target}`;
 
 const positional = process.argv.slice(2).filter((a) => !a.startsWith('--'));
@@ -29,7 +36,17 @@ if (!expression) {
   process.exit(1);
 }
 
-const res = await fetch(`${base}/json/list`);
+const headers = auth
+  ? { authorization: `Basic ${Buffer.from(auth).toString('base64')}` }
+  : undefined;
+const res = await fetch(`${base}/json/list`, { headers });
+if (!res.ok) {
+  console.error(
+    `${base}/json/list returned ${res.status}` +
+      (res.status === 401 ? ' — pass --auth=user:pass (a debug build defaults to ai:ai).' : ''),
+  );
+  process.exit(1);
+}
 const pages = (await res.json()).filter((t) => t.type === 'page');
 const chosen = pages.find((t) => (t.url + ' ' + t.title).toLowerCase().includes(match.toLowerCase()));
 if (!chosen) {
@@ -38,6 +55,10 @@ if (!chosen) {
   process.exit(1);
 }
 
+// Used as handed back. Against a debug build the proxy has already put the
+// credential in this URL: the WebSocket API takes no headers and the URL spec
+// forbids userinfo on ws://, so there is no other way for this client to
+// authenticate the upgrade.
 const ws = new WebSocket(chosen.webSocketDebuggerUrl);
 let nextId = 1;
 const pending = new Map();

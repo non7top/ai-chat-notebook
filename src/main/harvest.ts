@@ -1,27 +1,85 @@
 import { BrowserWindow } from 'electron';
 import * as db from './db';
-import { ensureOnAiMode } from './aiModeView';
+import { hammingDistance, promptFingerprint } from '../shared/fingerprint.ts';
+import {
+  aiModeIsReadable,
+  ensureOnAiMode,
+  navigateAiMode,
+  reloadAiMode,
+} from './aiModeView';
 import { assetHref, storeImage } from './assets';
+import { rewriteImageSources } from '../shared/rewriteImages.ts';
 import {
   ensureHistorySidebarOpen,
+  recycleHistorySidebar,
+  readPageKind,
+  PageNotAiModeError,
   getListGeometry,
   readRenderedThreads,
   scrollListBy,
   scrollListToTop,
   openThreadById,
+  ThreadNotListedError,
   readTurns,
   waitForTurnsToSettle,
   type CapturedTurn,
   type ThreadListEntry,
 } from './aiModeDriver';
-import type { CaptureProgress, HarvestProgress } from '../shared/types';
+import type { CaptureProgress, HarvestProgress, SyncProgress } from '../shared/types';
 
 // Driven from the main process, one scroll step per round trip, rather than as
 // a single long injected script. That is what makes progress reporting and
 // cancellation possible at all — an injected loop only reports once it is
 // finished, which for ~300 threads is half a minute of apparent hang.
 const SETTLE_MS = 700;
-const STEP_FRACTION = 0.8;
+// How long a single scroll step may wait for Google to re-render its rows, and
+// how often to look. The ceiling exists because the bottom of the list genuinely
+// stops changing — a step that waits forever there cannot tell the end of the
+// list from a slow page.
+const RENDER_WAIT_MS = 4000;
+const RENDER_POLL_MS = 150;
+
+/**
+ * How much of the rendered window a single step may consume.
+ *
+ * The step used to be capped at STEP_MAX_PX = 320, chosen when Google kept about
+ * TEN rows in the document: ten rows of 40px is a 400px window, and a step larger
+ * than that would scroll past rows that were never rendered, losing them silently.
+ *
+ * Google's panel has since been rebuilt and now renders about 110 rows at once —
+ * measured on a fresh load: scrollHeight 12224, 110 rows in the document. Against
+ * a 4400px window, a 320px step is 39 steps where five would do, which is most of
+ * why refreshing the list takes over a minute.
+ *
+ * So the step is derived from what is ACTUALLY rendered, each step, rather than
+ * from a constant that encodes one version of someone else's UI. 60% of the
+ * window, so consecutive reads always overlap. If Google goes back to ten rows
+ * this shrinks by itself, and if it renders the whole list the walk becomes two
+ * steps — neither needs a code change.
+ */
+const STEP_WINDOW_FRACTION = 0.6;
+/** Never smaller than this, or a page that renders one row would never move. */
+const STEP_MIN_PX = 200;
+// STEP_FRACTION and STEP_MAX_PX are gone: the step is measured per step from the
+// rendered window instead. See STEP_WINDOW_FRACTION.
+/**
+ * The furthest one step may jump, whatever the panel's height.
+ *
+ * This is the fix for a harvest that reported "150 / ~301 threads · INCOMPLETE".
+ * Measured live, walking the real sidebar step by step: the scroll never stalls,
+ * but Google renders about TEN ROWS per step regardless of how far the step
+ * went. Rows obtained is therefore ~10 x steps taken, and steps taken is
+ * scrollHeight / step — so a bigger step means FEWER rows, not the same rows
+ * sooner.
+ *
+ *   panel 459px -> step 367px -> 33 steps -> ~330 rows -> complete
+ *   panel 1000px -> step 800px -> 15 steps -> ~150 rows -> exactly the shortfall
+ *
+ * The old step was 0.8 x clientHeight with no ceiling, so how much of the
+ * history a harvest found depended on how tall the window happened to be. 320px
+ * is comfortably inside the ~400px Google renders per step, with margin for a
+ * chunk that turns out smaller.
+ */
 const MAX_STEPS = 200;
 // The end condition is deliberately not "no new ids": a virtualised list
 // produces nothing new for several steps in the middle of a run whenever the
@@ -78,51 +136,413 @@ export interface HarvestSummary {
 }
 
 /**
+ * What one walk of Google's history sidebar saw.
+ *
+ * `complete` is the only field safe to draw a conclusion FROM. A virtualised
+ * list that yields 50 of 305 looks identical from the inside to one that holds
+ * 50, so every caller that would act on an absence has to know whether the walk
+ * finished — see the verdict below.
+ */
+interface SidebarWalk {
+  ids: Set<string>;
+  /**
+   * Stopped deliberately on a run of already-known rows, rather than falling
+   * short. A success for "what is new" and useless for anything else: it says
+   * nothing about the rows it never looked at, so no absence in it is evidence.
+   */
+  stoppedAtKnown: boolean;
+  /** Reached the bottom, stopped growing, AND matched the expected total. */
+  complete: boolean;
+  /** Exited by stagnation at the bottom rather than by the step ceiling. */
+  reachedBottom: boolean;
+  expected: number;
+  steps: number;
+  /** The measurements behind the verdict, for the job record. */
+  note: string;
+}
+
+/**
+ * Walks the history sidebar top to bottom and reports what it saw.
+ *
+ * ONE implementation, used by the harvest and by the capture flows' listed-or-not
+ * check. There were two, and they had drifted: this one carries the `grew` guard
+ * that keeps a lazy-loading list from being abandoned at its first quiet moment,
+ * and the copy inside loadSidebarIds did not. The consequence was measured on the
+ * real archive — a walk that saw a handful of rows, and 358 entries marked
+ * "no longer listed" on the strength of it.
+ *
+ * Assumes the sidebar is already open and verified. Reads and scrolls only;
+ * every write is the caller's, through onNew.
+ */
+async function walkSidebarThreads(hooks: {
+  onNew?: (entry: ThreadListEntry, rank: number) => void;
+  onStep?: (found: number, expected: number) => void;
+  cancelled?: () => boolean;
+  /**
+   * Stop once this many rows in a row are already in the archive.
+   *
+   * Google orders the sidebar by LAST ACTIVITY. That is not the same as "newest
+   * threads first", and the difference is the reason this takes a run of rows
+   * rather than one: an OLD thread that just gained a turn climbs to the top, so
+   * the first rows are a mix of new threads and old ones that moved. What holds is
+   * that nothing whose last activity is older can sit above something newer — so
+   * once a solid run of rows the archive already knows has gone by, everything
+   * below it is older still.
+   *
+   * The run is what tolerates the moved-up threads. A handful of them at the top
+   * does not stop the walk, because any unknown row resets the count.
+   *
+   * Measured, the full walk is 39 steps of up to four seconds each; this reaches
+   * its answer in two or three when nothing has changed. That is the difference
+   * between a check worth running often and one that is put off.
+   *
+   * A walk that stops this way is NOT complete, and must never be used to
+   * conclude a thread is gone — see SidebarWalk.stoppedAtKnown.
+   */
+  stopAfterKnown?: { known: Set<string>; rows: number };
+} = {}): Promise<SidebarWalk> {
+  await scrollListToTop();
+  const geometry = await getListGeometry();
+  if (geometry.expectedTotal === 0) {
+    throw new Error(
+      'The thread list has no measurable height yet — the sidebar may still be opening',
+    );
+  }
+  // MEASURED on the live app, and it explains a walk that sees a handful of rows
+  // of a list that is plainly there: clientHeight 0 with scrollHeight 12184, and
+  // the page's own innerHeight and innerWidth both 0. The panel had no bounds at
+  // all while the UI showed it as visible.
+  //
+  // Nothing about that state is detectable from the row count — ten rows render
+  // and read perfectly well — but a step is a fraction of the rendered window and
+  // a zero-height list renders nothing: two hundred scrolls that move nothing,
+  // absorbing the same ten rows, and a walk that reports what it saw as though it
+  // had looked. The old loadSidebarIds checked this and I dropped the check when I
+  // merged the two walks into one. Restored here, where both callers get it.
+  if (geometry.clientHeight === 0) {
+    throw new Error(
+      'The thread list has zero height, so scrolling it cannot move: the panel has ' +
+        'no bounds. The window may be minimised, or the panel hidden — show it and ' +
+        'try again.',
+    );
+  }
+
+  const ids = new Set<string>();
+  // What the DOM is showing right now, as a value that can be compared. Google
+  // keeps ~10 rows in the document and swaps their contents as the list moves,
+  // so "has the render caught up" is a question about WHICH rows are there, not
+  // how many.
+  const signature = (entries: ThreadListEntry[]) => entries.map((e) => e.externalId).join(',');
+  // Rows in a row that the archive already holds. Counted over rendered rows in
+  // their own order, which is Google's order, and reset by any unknown row —
+  // a new thread anywhere in the run means the run is not over.
+  let knownStreak = 0;
+  const absorb = (entries: ThreadListEntry[]) => {
+    for (const entry of entries) {
+      if (hooks.stopAfterKnown) {
+        if (hooks.stopAfterKnown.known.has(entry.externalId)) knownStreak += 1;
+        else knownStreak = 0;
+      }
+      if (ids.has(entry.externalId)) continue;
+      // The size before insertion is this thread's position in Google's own
+      // ordering, because the walk starts at the top and never goes back.
+      const rank = ids.size;
+      ids.add(entry.externalId);
+      hooks.onNew?.(entry, rank);
+    }
+  };
+
+  absorb(await readRenderedThreads());
+  hooks.onStep?.(ids.size, geometry.expectedTotal);
+
+  let steps = 0;
+  let stagnantAtBottom = 0;
+  let reachedBottom = false;
+  let stoppedAtKnown = false;
+  const enoughKnown = () =>
+    hooks.stopAfterKnown !== undefined && knownStreak >= hooks.stopAfterKnown.rows;
+  let lastScrollHeight = geometry.scrollHeight;
+  for (let step = 0; step < MAX_STEPS; step += 1) {
+    if (hooks.cancelled?.()) break;
+    // Checked before scrolling as well as after absorbing, so a list whose very
+    // first screen is all known costs one read rather than a step.
+    if (enoughKnown()) {
+      stoppedAtKnown = true;
+      break;
+    }
+    steps += 1;
+    const before = ids.size;
+    const before_entries = await readRenderedThreads();
+    const shown = signature(before_entries);
+    // Measured from this step's own render window, not from a constant. pitch is
+    // the row-to-row distance measured on the live list, so rendered * pitch is
+    // the height of what is currently in the document.
+    const window = before_entries.length * (geometry.pitch || geometry.rowHeight || 40);
+    const stepPx = Math.max(
+      STEP_MIN_PX,
+      Math.min(
+        Math.round(window * STEP_WINDOW_FRACTION),
+        // Never past the end in one go: a step longer than what is left would
+        // land at the bottom and skip whatever was between.
+        Math.max(geometry.scrollHeight - geometry.clientHeight, STEP_MIN_PX),
+      ),
+    );
+    const scrolled = await scrollListBy(stepPx);
+    // WAIT FOR THE RENDER, do not assume it. A flat 700ms was the whole bug:
+    // measured on a real list, 39 steps covering the full 12184px of scroll
+    // yielded 60 unique rows — about 1.5 per step, where a 320px step over 40px
+    // rows should expose eight. The walk was reading the same ten rows again and
+    // again because Google had not re-rendered yet, and then reporting 60 of 305
+    // as though it had looked everywhere.
+    //
+    // Polling until the rendered rows actually CHANGE costs nothing when the page
+    // is quick — the first read usually differs — and gives a slow one the time
+    // it needs instead of a number pulled out of the air.
+    let entries = await readRenderedThreads();
+    const renderDeadline = Date.now() + RENDER_WAIT_MS;
+    while (signature(entries) === shown && Date.now() < renderDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, RENDER_POLL_MS));
+      entries = await readRenderedThreads();
+    }
+    absorb(entries);
+    hooks.onStep?.(ids.size, geometry.expectedTotal);
+
+    // Growing scrollHeight means the list loaded more below: it was at its
+    // bottom, and its bottom moved. Treating that as "no new rows three times,
+    // stop" is how a lazy-loading list gets abandoned halfway.
+    const grew = scrolled.scrollHeight > lastScrollHeight;
+    lastScrollHeight = Math.max(lastScrollHeight, scrolled.scrollHeight);
+    if (enoughKnown()) {
+      stoppedAtKnown = true;
+      break;
+    }
+    if (scrolled.atBottom && ids.size === before && !grew) {
+      stagnantAtBottom += 1;
+      if (stagnantAtBottom >= STAGNANT_AT_BOTTOM_LIMIT) {
+        reachedBottom = true;
+        break;
+      }
+    } else {
+      stagnantAtBottom = 0;
+    }
+  }
+
+  // One last read. Rendering lags the scroll by a step — measured: eleven steps
+  // passed before the first new rows appeared — so the final step's rows are
+  // still arriving when the loop's own read happens.
+  await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+  absorb(await readRenderedThreads());
+  hooks.onStep?.(ids.size, geometry.expectedTotal);
+
+  // Deliberately fuzzy. expectedTotal is scrollHeight divided by a rounded row
+  // height, so it lands near the truth but not on it: measured live, 12052 / 40
+  // gives 301 for a list that really holds 300. An exact `>=` would have called
+  // every complete harvest incomplete.
+  const enough = ids.size >= Math.floor(geometry.expectedTotal * 0.95);
+  const note =
+    `scrollHeight ${geometry.scrollHeight}px / pitch ${geometry.pitch}px ` +
+    `(row ${geometry.rowHeight}px, ${geometry.rendered} rendered) = ~${geometry.expectedTotal}` +
+    ` · panel ${geometry.clientHeight}px, step from the render window, ${steps} steps` +
+    ` · ${
+      stoppedAtKnown
+        ? `stopped on ${knownStreak} known rows in a row — everything below is older`
+        : reachedBottom
+          ? 'reached the bottom'
+          : 'stopped at the step ceiling'
+    }`;
+
+  const walk: SidebarWalk = {
+    ids,
+    // NOT complete when it stopped on known rows, and that is not a failure: the
+    // rows below were never looked at, so the set cannot answer "is this thread
+    // still listed" for anything outside it. Every caller that writes a verdict
+    // keys off `complete`, so this one flag keeps a fast check from being read as
+    // evidence of absence.
+    complete: reachedBottom && enough,
+    stoppedAtKnown,
+    reachedBottom,
+    expected: geometry.expectedTotal,
+    steps,
+    note,
+  };
+  // Kept only when it is the whole list. A short or early-stopped walk cannot
+  // answer "is this thread still listed" for the rows it never saw.
+  if (walk.complete) lastCompleteWalk = { walk, at: Date.now() };
+  return walk;
+}
+
+/**
+ * Walks the sidebar, and gives a short walk one second chance from a fresh page.
+ *
+ * A HYPOTHESIS, stated as one rather than presented as a fix: the app's own
+ * record shows a harvest finding 50 rows of a list whose geometry says 305,
+ * minutes after a run that had clicked through hundreds of threads, and the
+ * comment on recycleHistorySidebar describes the same shape from an earlier
+ * session — a list stuck at a fraction of its length, scrollHeight already sized
+ * for all of it, no amount of scrolling growing it. Reopening the sidebar was
+ * the fix that time and evidently is not always.
+ *
+ * So: if the first walk falls short, load the page again and walk once more,
+ * keeping whichever saw more. What makes this worth shipping unmeasured is that
+ * BOTH walks' measurements go into the job record — the next short run says
+ * whether a fresh page helped, which is the thing I cannot find out from here.
+ * The cost of being wrong is one wasted walk; the cost of guessing silently
+ * would be never learning.
+ */
+async function walkSidebarWithSecondChance(
+  hooks: Parameters<typeof walkSidebarThreads>[0] = {},
+): Promise<SidebarWalk> {
+  const first = await walkSidebarThreads(hooks);
+  // A walk that stopped on known rows did what it was asked. Reloading the page
+  // and walking it again to "improve" that would throw away the entire point of
+  // the fast check.
+  if (first.complete || first.stoppedAtKnown || hooks.cancelled?.()) return first;
+
+  console.warn(
+    `[sidebar] short walk (${first.ids.size} of ~${first.expected}) — reloading the page ` +
+      `and walking again · ${first.note}`,
+  );
+  try {
+    await reloadAiMode();
+    // A freshly loaded list is a correctly ordered one: Google sorts by LAST
+    // ACTIVITY, so the order reflects the moment of loading.
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await ensureHistorySidebarOpen();
+    const recycled = await recycleHistorySidebar();
+    if (recycled.rows === 0) return first;
+  } catch (error) {
+    console.warn(
+      `[sidebar] the reload itself failed — keeping the first walk · ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return first;
+  }
+
+  const second = await walkSidebarThreads(hooks);
+  const better = second.ids.size > first.ids.size ? second : first;
+  return {
+    ...better,
+    // Both, always, and in order. A note carrying only the winner cannot answer
+    // "did the reload help", which is the entire reason this exists.
+    note: `first ${first.ids.size}/~${first.expected} [${first.note}] · after reload ${
+      second.ids.size
+    }/~${second.expected} [${second.note}]`,
+  };
+}
+
+/**
  * Walks the history sidebar top to bottom and records every thread it finds.
  *
  * Only the list: titles and ids, no turns. That is a deliberate first slice —
  * it turns an unnavigable wall of unnamed chats into something filed and
  * searchable, without waiting on per-thread capture.
  */
-export async function harvestThreadList(): Promise<HarvestSummary> {
+/**
+ * How much of the list to walk.
+ *
+ * 'full' reaches the bottom and is the only mode whose result can support "this
+ * thread is no longer listed". 'new' stops on a run of rows the archive already
+ * holds — 39 steps down to two or three, because Google orders by last activity
+ * and nothing older can sit above something newer.
+ */
+export type HarvestMode = 'full' | 'new';
+
+/** Rows in a row that must be known before a 'new' walk stops. Two screens. */
+const KNOWN_ROWS_TO_STOP = 20;
+
+/**
+ * Above this many threads, load the sidebar list once instead of searching for
+ * each thread in it.
+ *
+ * The list load exists because per-thread searching does not scale: four threads
+ * meant four full sweeps of up to a minute each, all finding nothing, which read
+ * as a loop. But it is not free either — and it got dearer when the walk started
+ * waiting for Google to render, which is up to four seconds per step across 39
+ * steps.
+ *
+ * So it is a threshold rather than a rule. For a couple of threads just seen at
+ * the top of the list, a targeted search finds each in seconds and the load would
+ * be most of the run. The old code drew this line at 1, which is why "check for
+ * new" spent minutes on the list before reading two threads.
+ */
+const QUEUE_WORTH_A_LIST_LOAD = 8;
+
+/**
+ * The last COMPLETE walk of the sidebar, kept so one run does not walk it twice.
+ *
+ * Catch up walks the whole list in step one to refresh it, and then step two asks
+ * "which of these threads is still listed" and walks the whole list AGAIN.
+ * Measured, each walk is 50-75 seconds — so the most common flow in the app spent
+ * two minutes doing the same thing twice before reading anything.
+ *
+ * Only complete walks are stored, because only they can answer the question a
+ * cached set is used for. The window is short: presence in a 300-row list does not
+ * change in ten minutes, but a run of hours must not keep deciding on an old
+ * reading, and a thread newly created during a run should not be declared missing
+ * by a set from before it existed.
+ */
+const WALK_CACHE_MS = 10 * 60_000;
+let lastCompleteWalk: { walk: SidebarWalk; at: number } | null = null;
+
+/** Dropped when the panel is reloaded or the archive changes under it. */
+export function forgetSidebarWalk(): void {
+  lastCompleteWalk = null;
+}
+
+export async function harvestThreadList(
+  mode: HarvestMode = 'full',
+): Promise<HarvestSummary> {
   if (running) {
     throw new Error('A harvest is already running');
   }
   running = true;
   cancelRequested = false;
+  const harvestStartedAt = new Date().toISOString();
 
   try {
     // The panel doubles as a browser, so it may well be parked on myactivity or
     // anywhere else. Go to AI Mode rather than failing with instructions.
     const navigated = await ensureOnAiMode();
     if (navigated) {
-      // A freshly loaded list is also a correctly ordered one — Google sorts by
-      // recent activity on load and never re-sorts live.
+      // A freshly loaded list is a correctly ordered one — Google sorts by LAST
+      // ACTIVITY, so the order reflects the moment it loaded.
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }
     await ensureHistorySidebarOpen();
-    await scrollListToTop();
-
-    const geometry = await getListGeometry();
-    if (geometry.expectedTotal === 0) {
+    // Closed and reopened before reading, because "open" cannot be tested for:
+    // the scroller's display stays 'flex' either way, so ensureHistorySidebarOpen
+    // reports alreadyOpen every time and never clicks anything. Measured live, a
+    // list can sit at 10 rows of 300 — laid out, scrollHeight already sized for
+    // all 300 — and no way of scrolling grows it. Two clicks on the history
+    // toggle made the same list start yielding rows again.
+    //
+    // Done unconditionally: looking fine is precisely what the broken state
+    // does, and a second and a half is nothing against a walk of minutes.
+    // Recycled, and the result is CHECKED. A recycle that ended with the sidebar
+    // shut used to be indistinguishable from one that worked: every read then
+    // returns zero, and the run reported "10 / ~301 · INCOMPLETE" while walking
+    // a list that was not on screen. Better to fail here naming the reason than
+    // to publish a number that looks like a shortfall in the data.
+    const recycled = await recycleHistorySidebar();
+    if (recycled.rows === 0) {
       throw new Error(
-        'The thread list has no measurable height yet — the sidebar may still be opening',
+        'The history sidebar holds no threads after being reopened — nothing to ' +
+          'harvest. The panel may not be signed in, or the list may still be loading.',
       );
     }
-
-    const seen = new Map<string, string>();
     const known = db.knownExternalIds();
-    let created = 0;
-    let updated = 0;
-    let stagnantAtBottom = 0;
-
-    const absorb = (entries: ThreadListEntry[]) => {
-      for (const entry of entries) {
-        if (seen.has(entry.externalId)) continue;
-        // seen.size before insertion is this thread's position in Google's
-        // own ordering, because the scroll walks the list from the top.
-        const rank = seen.size;
-        seen.set(entry.externalId, entry.title);
+    // Sets, not counters. A short walk gets a second pass over the same list, so
+    // a thread can be reported twice — and "created 3 · updated 100" for a
+    // fifty-row list would be a report of the retry, not of Google. Counting ids
+    // makes the second pass idempotent, which is what re-walking a list is.
+    const createdIds = new Set<string>();
+    const updatedIds = new Set<string>();
+    const walk = await walkSidebarWithSecondChance({
+      cancelled: () => cancelRequested,
+      stopAfterKnown:
+        mode === 'new' ? { known, rows: KNOWN_ROWS_TO_STOP } : undefined,
+      onNew: (entry, rank) => {
         const result = db.upsertThreadFromList(
           entry.externalId,
           entry.title,
@@ -130,66 +550,49 @@ export async function harvestThreadList(): Promise<HarvestSummary> {
           rank,
         );
         if (result.created) {
-          created += 1;
+          createdIds.add(entry.externalId);
         } else if (known.has(entry.externalId)) {
-          updated += 1;
+          updatedIds.add(entry.externalId);
         }
-      }
-    };
-
-    absorb(await readRenderedThreads());
-    broadcast({
-      phase: 'scanning',
-      found: seen.size,
-      expected: geometry.expectedTotal,
-      created,
-      updated,
+      },
+      onStep: (found, expected) =>
+        broadcast({
+          phase: 'scanning',
+          found,
+          expected,
+          created: createdIds.size,
+          updated: updatedIds.size,
+        }),
     });
+    const created = createdIds.size;
+    const updated = updatedIds.size;
 
-    for (let step = 0; step < MAX_STEPS; step += 1) {
-      if (cancelRequested) break;
-
-      const before = seen.size;
-      const scrolled = await scrollListBy(geometry.clientHeight * STEP_FRACTION);
-      await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
-      absorb(await readRenderedThreads());
-
-      broadcast({
-        phase: 'scanning',
-        found: seen.size,
-        expected: geometry.expectedTotal,
-        created,
-        updated,
-      });
-
-      if (scrolled.atBottom && seen.size === before) {
-        stagnantAtBottom += 1;
-        if (stagnantAtBottom >= STAGNANT_AT_BOTTOM_LIMIT) break;
-      } else {
-        stagnantAtBottom = 0;
-      }
-    }
-
-    // Compared against the pre-measured expectation rather than just reported.
-    // A virtualised list that yields 40 of 300 looks exactly like a finished one
-    // from the inside, so a short result has to be visible as a shortfall.
-    //
-    // The comparison is deliberately fuzzy. expectedTotal is scrollHeight
-    // divided by a rounded row height, so it lands near the truth but not on
-    // it: measured live, 12052 / 40 gives 301 for a list that really holds 300.
-    // An exact `>=` would therefore have reported every single complete harvest
-    // as incomplete — caught only by running the real numbers. Padding on the
-    // container or a fractional row height can push it either way, so allow a
-    // small margin and reserve the warning for a genuine shortfall.
-    const complete = seen.size >= Math.floor(geometry.expectedTotal * 0.95);
     const summary: HarvestSummary = {
-      found: seen.size,
-      expected: geometry.expectedTotal,
+      found: walk.ids.size,
+      expected: walk.expected,
       created,
       updated,
-      complete,
+      complete: walk.complete || walk.stoppedAtKnown,
       cancelled: cancelRequested,
     };
+    db.recordJob(
+      'harvest',
+      cancelRequested
+        ? 'stopped'
+        : // A 'new' walk that stopped on known rows finished its job. Recording it
+          // as failed — which the completeness test alone would do — trains the
+          // person reading the strip to ignore the word.
+          walk.complete || walk.stoppedAtKnown
+          ? 'finished'
+          : 'failed',
+      // The real start, not the moment the record is written. Passing
+      // new Date() here made startedAt and endedAt identical — 09:07:17.951Z for
+      // both on a walk that took minutes — so the record could not answer "did
+      // it stop early or grind to the end", which is the first thing to ask of
+      // an incomplete run.
+      harvestStartedAt,
+      { ...summary, geometry: walk.note },
+    );
     broadcast({ phase: cancelRequested ? 'cancelled' : 'done', ...summary });
     return summary;
   } catch (error) {
@@ -228,14 +631,6 @@ function broadcastCapture(progress: CaptureProgress): void {
 // replacement on the exact original src rather than by parsing: the main process
 // has no DOM, and the src values came from that same HTML moments earlier so
 // they match verbatim.
-function rewriteImageSources(html: string, replacements: Map<string, string>): string {
-  let out = html;
-  for (const [original, href] of replacements) {
-    out = out.split(original).join(href);
-  }
-  return out;
-}
-
 async function captureOneChat(chat: { id: number; externalId: string; title: string }): Promise<{
   turns: number;
   images: number;
@@ -244,8 +639,43 @@ async function captureOneChat(chat: { id: number; externalId: string; title: str
 }> {
   await ensureHistorySidebarOpen();
   await openThreadById(chat.externalId);
-  await waitForTurnsToSettle();
-  const { turns } = await readTurns();
+  return storeRenderedThread(chat.id);
+}
+
+/**
+ * Reads whatever thread the panel is currently showing and stores it.
+ *
+ * Split out so the Takeout-link route uses the same code as the sidebar route
+ * rather than a second copy of it: the image pipeline, the settle check, the
+ * date, and the refusal to store a half-rendered thread all have to behave
+ * identically, and a parallel implementation would drift on the first one of
+ * them that changed.
+ */
+async function storeRenderedThread(
+  chatId: number,
+  /**
+   * Turns already read from the page, when the caller has them.
+   *
+   * The link route verifies a reading against the export before storing
+   * anything, and without this it verified one reading and then took a SECOND
+   * one to store — two reads of a live page with a check in between, so what was
+   * approved and what was written were not guaranteed to be the same text. On a
+   * page still settling, or one midway through re-running a prompt, they would
+   * differ precisely when it matters. The reading that passed the check is the
+   * reading that gets stored.
+   */
+  alreadyRead?: CapturedTurn[],
+): Promise<{
+  turns: number;
+  images: number;
+  skipped: number;
+  failed: number;
+}> {
+  let turns = alreadyRead;
+  if (!turns) {
+    await waitForTurnsToSettle();
+    turns = (await readTurns()).turns;
+  }
 
   // A conversation that shows user turns but no answer is still rendering, not a
   // conversation without answers. Refusing it leaves it in the queue for the
@@ -257,6 +687,19 @@ async function captureOneChat(chat: { id: number; externalId: string; title: str
       `Conversation had no answer turns yet (${turns.length} turn(s) seen) — still loading`,
     );
   }
+
+  // The earliest date the panel shows for this thread. Turns arrive in order, so
+  // the first one that carries a date is the thread's start. Anything that is not
+  // a full date is skipped rather than guessed at: the element shows a bare time
+  // for a turn from today, and today is exactly the value a placeholder already
+  // means.
+  const panelDate = (() => {
+    for (const turn of turns) {
+      const parsed = parsePanelStamp(turn.stamp);
+      if (parsed) return parsed;
+    }
+    return null;
+  })();
 
   const toSave: db.TurnToSave[] = [];
   const assets: db.AssetToSave[] = [];
@@ -273,6 +716,7 @@ async function captureOneChat(chat: { id: number; externalId: string; title: str
         replacements.set(image.src, assetHref(outcome.asset));
         assets.push({
           messageSeq: index,
+          kind: image.kind,
           // A data: URI is the payload itself, so recording it as the "original
           // URL" would duplicate the whole image into the database.
           originalUrl: image.src.startsWith('data:') ? null : image.src,
@@ -295,7 +739,11 @@ async function captureOneChat(chat: { id: number; externalId: string; title: str
     });
   }
 
-  db.replaceTurns(chat.id, toSave, assets);
+  db.replaceTurns(chatId, toSave, assets);
+  // After the turns, because replaceTurns writes the placeholder date for a
+  // thread that has none — and this is the better answer where the panel gave
+  // one.
+  if (panelDate) db.setPanelDate(chatId, panelDate);
   return { turns: toSave.length, images, skipped, failed };
 }
 
@@ -305,6 +753,31 @@ async function captureOneChat(chat: { id: number; externalId: string; title: str
  * does not help conversations already in the database, and chatsWithoutTurns
  * deliberately skips anything that has turns.
  */
+/**
+ * A panel timestamp as an ISO date, or null.
+ *
+ * Accepts only the full-date form Google renders for older turns — "August 22,
+ * 2026". The bare-time form ("17:05") is refused deliberately: it means today,
+ * and stamping today's date as though the panel had told us is exactly the false
+ * confidence the placeholder was introduced to avoid.
+ *
+ * Noon rather than midnight, so the day cannot slip backwards when a viewer in a
+ * western timezone reads it — the whole point of a date-only value is the day.
+ */
+function parsePanelStamp(stamp: string | null): string | null {
+  if (!stamp) return null;
+  const match = /^([A-Z][a-z]+) (\d{1,2}), (\d{4})$/.exec(stamp.trim());
+  if (!match) return null;
+  const months = [
+    'january', 'february', 'march', 'april', 'may', 'june',
+    'july', 'august', 'september', 'october', 'november', 'december',
+  ];
+  const month = months.indexOf(match[1].toLowerCase());
+  if (month < 0) return null;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${match[3]}-${pad(month + 1)}-${pad(Number(match[2]))}T12:00:00`;
+}
+
 export async function recaptureChat(chatId: number): Promise<{ turns: number; images: number }> {
   const chat = db.getChatForCapture(chatId);
   if (!chat) throw new Error(`No chat with id ${chatId}`);
@@ -321,13 +794,961 @@ export async function recaptureChat(chatId: number): Promise<{ turns: number; im
   return { turns: result.turns, images: result.images };
 }
 
+/**
+ * Holds a run while the window is minimised, instead of failing thread by thread.
+ *
+ * Measured on a 365-thread run that took nearly eight hours: 46 captured, 147
+ * failed, every failure "Injected script timed out after 90000ms" — from a search
+ * that carries its own 60s budget and so always returns in time when it is
+ * actually running. It was not running: a hidden window's timers are throttled to
+ * a crawl, and the panel has no bounds to render into either.
+ *
+ * Both are states where the next thread cannot possibly work, so trying it costs
+ * ninety seconds to learn nothing. Waiting is the honest response — a run of this
+ * length WILL meet a minimised window, and the person doing it has every reason to
+ * put the window away and come back.
+ *
+ * Bounded, because an unattended wait that never ends is its own failure: past the
+ * ceiling the run stops and says why, with everything captured so far already
+ * stored.
+ */
+const MINIMISED_WAIT_CEILING_MS = 30 * 60_000;
+
+async function waitWhileUnreadable(
+  report: (message: string) => void,
+  cancelled: () => boolean,
+): Promise<boolean> {
+  if (aiModeIsReadable()) return true;
+  const until = Date.now() + MINIMISED_WAIT_CEILING_MS;
+  while (!aiModeIsReadable()) {
+    if (cancelled()) return false;
+    if (Date.now() > until) return false;
+    report('waiting for the window to be restored — nothing can be read while it is minimised');
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+  return true;
+}
+
+/**
+ * Re-captures a named list of threads, one after another.
+ *
+ * Exists because re-capture worked on any thread picked by hand while the bulk
+ * paths attempted nothing — and the reason was always the QUEUE, never the
+ * capture. This takes ids straight from the caller, so nothing decides on its
+ * own what is worth reading: the reader offers a thread and everything it thinks
+ * is similar, and the answer to "fetch these" is these.
+ *
+ * Reports on the same channel as every other capture, so the control strip shows
+ * it and Stop works, rather than a second progress mechanism nobody watches.
+ */
+export async function recaptureMany(chatIds: number[]): Promise<CaptureSummary> {
+  const startedAt = new Date().toISOString();
+  if (capturing) throw new Error('A capture is already running');
+  capturing = true;
+  captureCancelled = false;
+  const summary: CaptureSummary = {
+    attempted: 0,
+    captured: 0,
+    unlisted: 0,
+    turns: 0,
+    images: 0,
+    errors: 0,
+    remaining: 0,
+    cancelled: false,
+    failures: [],
+  };
+  try {
+    await ensureOnAiMode();
+    // The same loaded list captureTurns uses, and for the same reason — which I
+    // failed to apply here when I added it there. Every thread did its own full
+    // walk of the sidebar hunting for its row: four threads, four sweeps of up
+    // to a minute each, all of them finding nothing, and reported as "0 captured
+    // · 3 no longer listed" after four minutes of the panel scrolling. From the
+    // outside that is a loop, and it was reported as one.
+    const listed =
+      chatIds.length > QUEUE_WORTH_A_LIST_LOAD ? await loadSidebarIds() : null;
+    for (const id of chatIds) {
+      if (captureCancelled) break;
+      // Asked before every thread, not once at the start: a run of hours meets a
+      // minimised window in the middle, which is exactly when it costs the most.
+      const readable = await waitWhileUnreadable(
+        (message) =>
+          broadcastCapture({
+            phase: 'capturing',
+            done: summary.captured,
+            attempted: summary.attempted,
+            total: chatIds.length,
+            errors: summary.errors,
+            unlisted: summary.unlisted,
+            current: message,
+          }),
+        () => captureCancelled,
+      );
+      if (!readable) {
+        summary.stoppedEarly =
+          'The window stayed minimised, so nothing could be read. Everything captured ' +
+          'up to that point is stored; run it again with the window restored.';
+        break;
+      }
+      const chat = db.getChatForCapture(id);
+      // A thread that has gone — merged away, deleted — is skipped rather than
+      // counted as a failure. The caller's list can be a moment out of date.
+      if (!chat) continue;
+      // Answered from the list rather than by sending the sidebar after it. Only
+      // when the load succeeded — a list that would not load says nothing about
+      // any particular thread.
+      if (listed && !listed.ids.has(chat.externalId)) {
+        summary.attempted += 1;
+        summary.unlisted += 1;
+        db.recordThreadNotListed(chat.id);
+        broadcastCapture({
+          phase: 'capturing',
+          done: summary.captured,
+          attempted: summary.attempted,
+          total: chatIds.length,
+          errors: summary.errors,
+          unlisted: summary.unlisted,
+          current: `not listed: ${chat.title.slice(0, 46)}`,
+        });
+        continue;
+      }
+      summary.attempted += 1;
+      broadcastCapture({
+        phase: 'capturing',
+        done: summary.captured,
+        attempted: summary.attempted,
+        total: chatIds.length,
+        errors: summary.errors,
+        unlisted: summary.unlisted,
+        current: chat.title.slice(0, 60),
+      });
+      try {
+        const result = await Promise.race([
+          captureOneChat(chat),
+          new Promise<never>((_resolve, reject) =>
+            setTimeout(
+              () => reject(new Error(`Gave up on this thread after ${CAPTURE_DEADLINE_MS / 1000}s`)),
+              CAPTURE_DEADLINE_MS,
+            ),
+          ),
+        ]);
+        summary.captured += 1;
+        summary.turns += result.turns;
+        summary.images += result.images;
+      } catch (error) {
+        if (error instanceof ThreadNotListedError) {
+          summary.unlisted += 1;
+          db.recordThreadNotListed(chat.id);
+        } else {
+          summary.errors += 1;
+          db.recordCaptureFailure(chat.id);
+          summary.failures.push({
+            title: chat.title.slice(0, 60),
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS));
+    }
+    summary.cancelled = captureCancelled;
+    summary.remaining = db.countChatsWithoutTurns();
+    db.recordJob(
+      'recapture',
+      captureCancelled ? 'stopped' : summary.errors > 0 ? 'failed' : 'finished',
+      startedAt,
+      {
+        ...summary,
+        failures: summary.failures.slice(0, 20),
+        // The walk that decided every "no longer listed" in this run, recorded
+        // WITH the verdicts it produced. Without it, "unlisted 172" cannot be
+        // told apart from "the list was short again" after the fact — and that
+        // is exactly the question the last two runs left open, because only the
+        // harvest recorded its geometry.
+        sidebar: listed
+          ? `saw ${listed.ids.size} of ~${listed.expected} · ${listed.note}`
+          : 'could not be read — every thread was attempted rather than written off',
+      },
+    );
+    broadcastCapture({
+      phase: captureCancelled ? 'cancelled' : 'done',
+      done: summary.captured,
+      total: summary.attempted,
+      errors: summary.errors,
+      unlisted: summary.unlisted,
+      turns: summary.turns,
+      images: summary.images,
+    });
+    return summary;
+  } finally {
+    capturing = false;
+    captureCancelled = false;
+  }
+}
+
+/**
+ * Re-reads every entry Google could still be holding, from threads.
+ *
+ * The single action that was asked for repeatedly and did not exist. captureTurns
+ * fills entries that have nothing; this improves entries that already have
+ * something, which is a different job and the one wanted: the threads reading has
+ * more turns than the export's on 229 entries, equal on 1592 and fewer on 16, and
+ * it carries the original images.
+ *
+ * Built on recaptureMany rather than beside it, so it inherits the sidebar list
+ * loaded once, the per-thread ceiling, the not-listed verdict and the progress
+ * reporting instead of a second copy of each.
+ *
+ * It OVERWRITES what is stored, which is the intent — and worth knowing: where an
+ * entry's stored reading came from a link, this replaces it, and until
+ * conversations become rows per source there is nowhere for both to live.
+ */
+export async function rereadAllFromThreads(
+  limit: number,
+  scope: 'all' | 'never-read' | 'climbed' = 'all',
+): Promise<CaptureSummary> {
+  // 'never-read' is the same run against the entries where it adds something:
+  // 80 of 375 on the real archive. Which entries to take is a question for a
+  // query, not a reason for a second function.
+  const queue =
+    scope === 'climbed'
+      ? db.entriesThatClimbed(limit)
+      : scope === 'never-read'
+        ? db.entriesNeverReadFromThreads(limit)
+        : db.entriesForFullReread(limit);
+  return recaptureMany(queue.map((c) => c.id));
+}
+
+/**
+ * Shows a conversation in the live panel.
+ *
+ * Uses the sidebar-click path, which is the only faithful way in: a Takeout
+ * link re-runs the prompt and loses the uploads, and a constructed mtid URL
+ * mints a new conversation. Reads nothing and stores nothing — this is "take me
+ * there", not a capture.
+ */
+/**
+ * The page had not rendered its turns in time.
+ *
+ * Its own type because it must not count toward the systemic-failure abort. Each
+ * of these is one slow page load, and a run of them means a slow network rather
+ * than a broken session — conflating the two stopped a 500-thread run after nine
+ * threads, which is what "it stops randomly" turned out to be.
+ */
+export class PageNotReadyError extends Error {
+  constructor(turnsSeen: number) {
+    super(`The page had not rendered its turns yet (${turnsSeen} seen)`);
+    this.name = 'PageNotReadyError';
+  }
+}
+
+export interface LinkCaptureResult {
+  /** How far the page's own opening is from the export's reading, 0 to 64. */
+  distance: number;
+  /** Set when the page did not show the thread the entry describes. */
+  rejected: string | null;
+  chatId: number | null;
+  turns: number;
+  images: number;
+}
+
+/**
+ * Opens an export entry by its own link and captures what the page shows.
+ *
+ * This route exists because the sidebar only lists a few hundred threads while
+ * the export holds 2026 records with a link — so most of the archive is reachable
+ * this way and no other. It is also the one route with a documented history of
+ * doing harm: navigating one of these links was reported to RE-RUN the prompt
+ * rather than open the thread, which costs a real query, produces a different
+ * answer, and once created a duplicate conversation in the owner's live history.
+ * The owner has since established that a properly authenticated session opens the
+ * thread intact, generated images included, and the panel is authenticated.
+ *
+ * Both accounts are treated as possible, because the cost of being wrong lands in
+ * someone's account rather than in a log. So the page is CHECKED against the
+ * export's own reading before anything is stored: if the prompt was re-run the
+ * answer differs, the opening fingerprints diverge, and the capture is rejected
+ * with the distance reported rather than written as though it were the thread.
+ *
+ * The threshold is deliberately generous. The export's text is rougher than the
+ * panel's, so a genuine match is not a small distance — measured on real
+ * material, the same thread across the two sources sat at 14 while unrelated
+ * threads sat at 24. Anything at or above 22 is treated as a different answer.
+ */
+/**
+ * How far apart two openings may be and still be the same thread.
+ *
+ * Applied to the PROMPT, not the whole opening exchange. Measured against a real
+ * archived thread: the page's answer ran to 6,689 characters where the export
+ * held 1,775, so comparing answers put a genuine match at 28 of 64 bits — beyond
+ * where unrelated threads sat — and the check refused a recovery it should have
+ * allowed. The export truncates; the prompt is what the person typed and neither
+ * source shortens it.
+ */
+const REJECT_AT_DISTANCE = 12;
+
+export async function captureFromEntryLink(entryId: number): Promise<LinkCaptureResult> {
+  const entry = db.getEntryToOpen(entryId);
+  if (!entry) throw new Error(`No source entry ${entryId}`);
+  if (!entry.href) {
+    throw new Error('This entry has no link — Lens searches and blank records carry none.');
+  }
+
+  await navigateAiMode(entry.href);
+  // Asked what the page IS before waiting for what it should contain. Google
+  // answers these links with its own error page often enough to matter, and that
+  // page has no turns — so the settle below waited 90 seconds and then 60 more
+  // for content that was never coming, and called the result "slow". Caught live
+  // on an mstk link: "internal server error ... try again later", no sidebar, no
+  // turns.
+  const kind = await readPageKind();
+  if (!kind.isAiMode) {
+    throw new PageNotAiModeError(
+      kind.looksLikeServerError
+        ? "Google's own error page — try again later"
+        : `no AI Mode page here, ${kind.chars} characters of something else`,
+    );
+  }
+  // Longer than a sidebar click gets, because this is a whole page load against
+  // Google rather than a render inside a page already open — and tried twice.
+  // A page that has not finished is the ordinary case here, not a fault, and
+  // treating it as one is what stopped runs after nine threads.
+  await waitForTurnsToSettle(90_000);
+  let { turns } = await readTurns();
+  if (turns.length === 0 || !turns.some((t) => t.role === 'ai')) {
+    await new Promise((resolve) => setTimeout(resolve, 4000));
+    await waitForTurnsToSettle(60_000);
+    turns = (await readTurns()).turns;
+  }
+  if (turns.length === 0 || !turns.some((t) => t.role === 'ai')) {
+    // Thrown as a distinguishable type so the runner can tell "this page was not
+    // ready" from "the session is broken". Ten slow pages in a row is a slow
+    // network; ten navigation failures is something else entirely.
+    throw new PageNotReadyError(turns.length);
+  }
+
+  const pageTurns = turns.map((t) => ({ role: t.role, text: t.text }));
+  const seen = promptFingerprint(pageTurns);
+  const distance = entry.promptFingerprint
+    ? hammingDistance(entry.promptFingerprint, seen)
+    : 64;
+
+  // The strongest evidence available, and it costs nothing: the page states the
+  // date of its own turns. An archived thread is dated when it happened; a page
+  // that re-ran the prompt is dated today. Opening thread #2660 showed
+  // "January 11, 2026", which is what settled the question of whether these links
+  // open or re-run — after the answer-length comparison had suggested the wrong
+  // answer. Where the page gives a date, it decides.
+  const pageDate = (() => {
+    for (const turn of turns) {
+      const parsed = parsePanelStamp(turn.stamp);
+      if (parsed) return parsed.slice(0, 10);
+    }
+    return null;
+  })();
+  const entryDate = entry.occurredAt ? entry.occurredAt.slice(0, 10) : null;
+  const datesAgree = pageDate !== null && entryDate !== null && pageDate === entryDate;
+  const datesDiffer = pageDate !== null && entryDate !== null && pageDate !== entryDate;
+
+  // An entry with no stored fingerprint predates it being recorded, and there is
+  // nothing to check against. Refused rather than trusted: the whole point of
+  // this route is that it is only safe when verifiable.
+  if (!entry.promptFingerprint) {
+    return {
+      distance,
+      rejected:
+        'This entry has no stored reading to check the page against, so there is no way ' +
+        'to tell an opened thread from a re-run prompt. Re-import the export first.',
+      chatId: null,
+      turns: 0,
+      images: 0,
+    };
+  }
+
+  // A page dated differently from the record is not that record, whatever its
+  // text resembles.
+  if (datesDiffer) {
+    return {
+      distance,
+      rejected:
+        `The page's turns are dated ${pageDate} while this record is dated ${entryDate}. ` +
+        'That is a different thread, or a prompt that has just been re-run, so nothing ' +
+        'was stored.',
+      chatId: null,
+      turns: 0,
+      images: 0,
+    };
+  }
+
+  // Dates agreeing is near-conclusive on its own — a re-run cannot be dated in
+  // the past — so a truncated or reworded answer no longer blocks a recovery.
+  if (!datesAgree && distance >= REJECT_AT_DISTANCE) {
+    // Recorded so the queue lets go of it. The verdict is about the link, not
+    // about today, and a thread that keeps its place in the queue after being
+    // rejected makes every subsequent run repeat the same work.
+    if (entry.chatId !== null) db.setLinkState(entry.chatId, 'rejected');
+    // On the entry too, because the entry is what the queue walks now. Without
+    // this a rejected record stays in the queue forever and every run re-walks it.
+    db.setEntryLinkState(entry.id, 'rejected');
+    return {
+      distance,
+      rejected:
+        `The page's answer differs too much from the export's (${distance} of 64 bits). ` +
+        'That is what a re-run prompt looks like, so nothing was stored.',
+      chatId: null,
+      turns: 0,
+      images: 0,
+    };
+  }
+
+  // Only now is there a thread worth writing to.
+  // Attach to the thread this record plainly belongs to, before considering a
+  // new one. Adopting unconditionally is what doubled the archive: a run over
+  // 383 records created 346 threads and every one of them was a duplicate of a
+  // thread already there. Only when exactly one live thread shares the record's
+  // opening prompt — with two or more it is genuinely ambiguous, and its own
+  // thread is the honest answer.
+  const sole = entry.chatId ?? db.soleThreadForEntry(entry.id);
+  if (sole !== null && entry.chatId === null) db.linkSourceEntry(sole, entry.id);
+  const chatId = sole ?? db.adoptSourceEntry(entry.id, null).chatId;
+  // The very turns that were checked, not a fresh read of the page.
+  const stored = await storeRenderedThread(chatId, turns);
+  db.noteChatSource(chatId, 'link');
+  db.setLinkState(chatId, 'fetched');
+  db.setEntryLinkState(entry.id, 'fetched');
+  return { distance, rejected: null, chatId, turns: stored.turns, images: stored.images };
+}
+
+export interface LinkRunSummary {
+  attempted: number;
+  fetched: number;
+  turns: number;
+  images: number;
+  /** Pages whose answer did not match the export's — a re-run, not the thread. */
+  rejected: number;
+  errors: number;
+  /** Pages that had not rendered in time. Left in the queue for a later run. */
+  notReady: number;
+  remaining: number;
+  cancelled: boolean;
+  failures: { title: string; reason: string }[];
+  stoppedEarly?: string;
+}
+
+/**
+ * Works through the threads only an export knows about, opening each by its link.
+ *
+ * The counterpart to captureTurns, and for most of the archive the only route
+ * there is: the sidebar lists a few hundred threads while the export holds 2026
+ * with a link. Every page is verified against the export's own reading before
+ * anything is stored, so a link that re-runs its prompt is refused rather than
+ * written — see captureFromEntryLink.
+ *
+ * Rejections are counted apart from errors and do NOT stop the run. A refusal is
+ * this working correctly, and if the links turn out to re-run rather than open,
+ * the whole run refuses and stores nothing, which is the outcome to want.
+ */
+/**
+ * The longest one thread may take before the run moves on.
+ *
+ * Two settle waits plus a page load plus its images, with room to spare. The run
+ * stopped dead at thread 413 on an image URL that never answered, so this exists
+ * to make that class of failure survivable rather than fatal, without needing to
+ * know in advance which await was the one that hung.
+ */
+const PER_THREAD_DEADLINE_MS = 240_000;
+
+/**
+ * The longest ONE thread may hold up a capture.
+ *
+ * PER_THREAD_DEADLINE_MS above says "one thread must never be able to stop the
+ * run", and it was wired into the link fetch and nowhere else. captureTurns had
+ * no ceiling at all: a thread sat there for as long as its internal waits
+ * allowed — a 60s settle, a page load, then its images — with nothing above to
+ * cut it off. Observed on a real run, a single thread holding the counter still
+ * for over a minute while eighteen more waited behind it.
+ *
+ * Shorter than the link fetch's, because this path has a bounded settle to begin
+ * with: past two minutes a thread is not slow, it is not coming.
+ */
+const CAPTURE_DEADLINE_MS = 120_000;
+
+/**
+ * Which links a run should take.
+ *
+ * 'queue' is the ordinary one: records whose link has never been opened.
+ * 'unused' is for records that WERE opened, into some other entry — see
+ * entriesWithUnusedLinks. Same loop, same verdicts, same ceiling; only the
+ * question of what is outstanding differs, and that question belongs in a query
+ * rather than in a second copy of this function.
+ */
+export type LinkRunMode = 'queue' | 'unused';
+
+export async function fetchFromLinks(
+  limit: number,
+  mode: LinkRunMode = 'queue',
+): Promise<LinkRunSummary> {
+  const summary: LinkRunSummary = {
+    attempted: 0,
+    fetched: 0,
+    turns: 0,
+    images: 0,
+    rejected: 0,
+    errors: 0,
+    notReady: 0,
+    remaining: 0,
+    cancelled: false,
+    failures: [],
+  };
+  captureCancelled = false;
+  const startedAt = new Date().toISOString();
+  try {
+    await ensureOnAiMode();
+    // One queue, per RECORD. The thread-based queue it replaces reported 1
+    // outstanding against 380: it could not see records attached to no thread, it
+    // skipped any thread already read from the panel, and it counted one job per
+    // thread where a thread can hold several records each with its own link.
+    const queue =
+      mode === 'unused' ? db.entriesWithUnusedLinks(limit) : db.entriesWithLinksToFetch(limit);
+    let consecutiveErrors = 0;
+
+    for (const item of queue) {
+      if (captureCancelled) break;
+      summary.attempted += 1;
+      broadcastCapture({
+        phase: 'capturing',
+        done: summary.fetched,
+        // The tallies travel as FIELDS, not as text inside `current`.
+        //
+        // They used to be formatted into current, which was the only way to get
+        // them on screen — and then the shared progress line grew counters of its
+        // own, so the strip read "3/35 · 2 failed · #6 of 35 · 3 ok · 0 no match ·
+        // 2 slow · 2 errors". The same run, reported twice, in two vocabularies.
+        // A field can be rendered once; a sentence cannot be un-formatted.
+        attempted: summary.attempted,
+        total: queue.length,
+        errors: summary.errors,
+        rejected: summary.rejected,
+        notReady: summary.notReady,
+        current: item.title.slice(0, 44),
+      });
+      try {
+        // A hard ceiling per thread, whatever the cause. The image fetch is
+        // bounded now, but the lesson generalises: one thread must never be able
+        // to stop the run, and the run must not depend on having predicted every
+        // way a page can fail to finish.
+        const result = await Promise.race([
+          captureFromEntryLink(item.entryId),
+          new Promise<never>((_resolve, reject) =>
+            setTimeout(
+              () => reject(new PageNotReadyError(-1)),
+              PER_THREAD_DEADLINE_MS,
+            ),
+          ),
+        ]);
+        if (result.rejected) {
+          summary.rejected += 1;
+          summary.failures.push({ title: item.title.slice(0, 60), reason: result.rejected });
+          // captureFromEntryLink records the rejection itself where it knows the
+          // thread; this covers the case where the entry had no thread yet.
+          db.setLinkState(item.chatId, 'rejected', result.rejected.slice(0, 200));
+        } else {
+          summary.fetched += 1;
+          summary.turns += result.turns;
+          summary.images += result.images;
+        }
+        // A rejection is a verdict, not a fault: the check did its job. Only a
+        // thrown error suggests the run itself is in trouble.
+        consecutiveErrors = 0;
+      } catch (error) {
+        summary.errors += 1;
+        summary.failures.push({
+          title: item.title.slice(0, 60),
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        // A page that was not ready is not evidence about the session. It stays
+        // in the queue for a later run — nothing was stored and nothing was
+        // marked — and it does not push the run toward giving up.
+        // Google served something that is not the conversation — its own error
+        // page, most often. Treated like a page that was not ready, because the
+        // handling is the same: nothing stored, nothing marked, stays in the
+        // queue, and it says nothing about the session so it must not push the
+        // run toward giving up. Counted apart so a run of them reads as "Google
+        // is having a bad day" rather than as an archive problem.
+        if (error instanceof PageNotAiModeError) {
+          summary.notReady += 1;
+          if (item.chatId) db.setLinkState(item.chatId, 'error', error.message.slice(0, 200));
+          await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS * 2));
+          continue;
+        }
+        if (error instanceof PageNotReadyError) {
+          summary.notReady += 1;
+          db.setLinkState(
+            item.chatId,
+            'error',
+            error.message.includes('(-1') ? 'Took too long; will be tried again' : error.message,
+          );
+          await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS * 2));
+          continue;
+        }
+        consecutiveErrors += 1;
+        db.setLinkState(
+          item.chatId,
+          'error',
+          error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
+        );
+        if (consecutiveErrors >= CONSECUTIVE_FAILURE_LIMIT) {
+          summary.stoppedEarly =
+            `Stopped after ${consecutiveErrors} consecutive errors — something systemic ` +
+            '(signed out, offline, or the page changed) rather than awkward threads.';
+          break;
+        }
+      }
+      // Slower than the sidebar route on purpose: each of these is a full page
+      // load against Google rather than a click within an app already open.
+      await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS * 2));
+    }
+
+    summary.cancelled = captureCancelled;
+    // The same count the button shows, or the run's own summary would disagree
+    // with the label that started it.
+    summary.remaining = db.countEntriesWithLinksToFetch();
+    // Written before the broadcast, so a record exists even if the window has
+    // gone away by the time the run ends — which for an hour-long job is not a
+    // remote possibility.
+    db.recordJob(
+      'links',
+      captureCancelled ? 'stopped' : summary.stoppedEarly ? 'failed' : 'finished',
+      startedAt,
+      { ...summary, failures: summary.failures.slice(0, 20) },
+    );
+    broadcastCapture({
+      phase: captureCancelled ? 'cancelled' : 'done',
+      done: summary.fetched,
+      total: summary.attempted,
+      errors: summary.errors + summary.rejected,
+      turns: summary.turns,
+      images: summary.images,
+      remaining: summary.remaining,
+      stoppedEarly: summary.stoppedEarly,
+    });
+    return summary;
+  } catch (error) {
+    db.recordJob('links', 'failed', startedAt, {
+      ...summary,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    broadcastCapture({
+      phase: 'error',
+      done: summary.fetched,
+      total: summary.attempted,
+      errors: summary.errors + 1,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
+export interface InlineRepairSummary {
+  turns: number;
+  images: number;
+  bytesFreed: number;
+  failed: number;
+  /** Turns that still hold base64 afterwards — a carrier not yet recognised. */
+  stubborn: number;
+}
+
+/**
+ * Moves inline base64 images out of stored HTML and into the asset store.
+ *
+ * The repair for a measured problem: 452 turns holding 63.9 MB of base64 in a
+ * 198 MB database, one of them 1.29 MB of HTML around 2,810 characters of text.
+ * Those images were never written to the store, so the markup was the only copy
+ * of them — which is why they are MOVED rather than dropped. Dropping would
+ * reclaim the same bytes and lose the pictures.
+ *
+ * Content-addressed on the way in, so the same image appearing in several turns
+ * collapses to one file, which the inline form could never do.
+ *
+ * Capture no longer produces this: an image that fails the size filter has its
+ * element removed rather than its base64 kept. This is for archives written
+ * before that.
+ */
+/* ------------------------------------------------------------------ sync */
+
+/**
+ * The two flows, in place of the six buttons that used to be the whole of it.
+ *
+ * There were three ways to pull conversations in — refresh the sidebar list,
+ * capture turns from the panel, open the export's links — plus a 25-at-a-time
+ * variant, plus matching afterwards, and every one of them was a separate button
+ * that had to be pressed in the right order to be any use. Nothing on screen said
+ * what that order was. In practice there are only two things anyone wants:
+ *
+ *   'new' — what arrived since last time. Refresh the list, read what has no
+ *           turns. Minutes, run often.
+ *   'all' — everything still outstanding, including the thousands of threads
+ *           Google has rotated out of the sidebar and only the export still
+ *           links to. Hours, run once and leave it.
+ *
+ * They are the same steps in the same order; 'all' simply does not stop early.
+ * That is the point — a repeated path and a catch-up path that differ in how far
+ * they go, not in what they do, so doing one does not undo the other.
+ */
+export type SyncMode = 'new' | 'all';
+
+export interface SyncSummary {
+  listed: number;
+  captured: number;
+  fetched: number;
+  matched: number;
+  errors: number;
+  cancelled: boolean;
+  stoppedEarly?: string;
+}
+
+/**
+ * Cancellation at the level of the WHOLE run, which the per-step flags cannot
+ * express: each step resets its own flag when it starts, so a Stop pressed
+ * between two steps would be forgotten by the next one and the run would carry
+ * on after being told not to.
+ */
+let syncCancelled = false;
+let syncRunning = false;
+
+export function cancelSync(): void {
+  syncCancelled = true;
+  cancelHarvest();
+  cancelCapture();
+}
+
+export function isSyncRunning(): boolean {
+  return syncRunning;
+}
+
+function broadcastSync(progress: SyncProgress): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send('sync:progress', progress);
+  }
+}
+
+// Far above any plausible history, so "all" means all. The steps below are
+// bounded by what is actually outstanding, not by this.
+const NO_LIMIT = 100_000;
+
+export async function syncArchive(mode: SyncMode): Promise<SyncSummary> {
+  if (syncRunning) throw new Error('A run is already going');
+  syncRunning = true;
+  syncCancelled = false;
+  const startedAt = new Date().toISOString();
+  const summary: SyncSummary = {
+    listed: 0,
+    captured: 0,
+    fetched: 0,
+    matched: 0,
+    errors: 0,
+    cancelled: false,
+  };
+
+  // Named here rather than inside each step so the count is right in the first
+  // progress message, before any step has run. "Step 1 of 4" that turns out to
+  // be step 1 of 2 is worse than no step count.
+  const steps =
+    mode === 'new'
+      ? ['Refreshing the thread list', 'Reading from threads']
+      : [
+          'Refreshing the thread list',
+          'Reading from threads',
+          'Reading from links',
+          'Matching entries to threads',
+        ];
+  let index = 0;
+  const step = (name: string) => {
+    index += 1;
+    broadcastSync({ running: true, step: name, index, steps: steps.length });
+  };
+
+  try {
+    step(steps[0]);
+    // A step that fails does not take the run down with it. The list refresh
+    // needs the sidebar and the panel on screen; the link fetch needs neither,
+    // and a run that gave up on step one would leave the long work undone for a
+    // reason that has nothing to do with it.
+    try {
+      const listed = await harvestThreadList(mode === 'new' ? 'new' : 'full');
+      summary.listed = listed.created;
+    } catch (error) {
+      summary.errors += 1;
+      summary.stoppedEarly = error instanceof Error ? error.message : String(error);
+    }
+
+    if (!syncCancelled) {
+      step(steps[1]);
+      // 'all' takes the threads that have been given up on too, and that is what
+      // the button means. The attempt cap exists to stop the REPEATED path
+      // grinding on the same doomed threads every time it runs — it was never
+      // meant to put them out of reach, and it did: with the queue empty and 18
+      // threads held back, "capture everything" attempted nothing at all while
+      // Re-capture on any one of them worked first time.
+      const captured = await captureTurns(NO_LIMIT, mode === 'all');
+      summary.captured = captured.captured;
+      summary.errors += captured.errors;
+
+      // AND the threads that climbed the list, which captureTurns cannot see:
+      // it queues on "holds no turns", and a thread that gained a turn holds
+      // plenty — just fewer than Google does now.
+      //
+      // This is the half of "what is new" that had no route at all. A brand new
+      // thread arrives empty and gets read; an OLD thread that gained a turn is
+      // indistinguishable from an unchanged one by anything in the archive except
+      // its position in the list, and nothing was reading that.
+      const climbed = db.entriesThatClimbed(NO_LIMIT);
+      if (climbed.length > 0 && !syncCancelled) {
+        const reread = await recaptureMany(climbed.map((c) => c.id));
+        summary.captured += reread.captured;
+        summary.errors += reread.errors;
+      }
+    }
+
+    if (mode === 'all' && !syncCancelled) {
+      step(steps[2]);
+      const links = await fetchFromLinks(NO_LIMIT);
+      summary.fetched = links.fetched;
+      summary.errors += links.errors;
+    }
+
+    // Last on purpose: matching can only see the threads that exist when it
+    // runs, so an entry whose thread was captured earlier in THIS run has
+    // nothing to match against until now. That ordering was the reason "Match
+    // entries" existed as a button at all.
+    if (mode === 'all' && !syncCancelled) {
+      step(steps[3]);
+      const matched = db.rematchEntriesToThreads();
+      summary.matched = matched.attached + matched.relinked;
+    }
+
+    summary.cancelled = syncCancelled;
+    db.recordJob(
+      `sync-${mode}`,
+      syncCancelled ? 'stopped' : summary.stoppedEarly ? 'failed' : 'finished',
+      startedAt,
+      { ...summary },
+    );
+    return summary;
+  } finally {
+    syncRunning = false;
+    syncCancelled = false;
+    broadcastSync({ running: false, step: '', index: 0, steps: steps.length });
+  }
+}
+
+export async function repairInlineImages(
+  onProgress?: (done: number, total: number, phase?: 'counting' | 'copying') => void,
+): Promise<InlineRepairSummary> {
+  const summary: InlineRepairSummary = {
+    turns: 0,
+    images: 0,
+    bytesFreed: 0,
+    failed: 0,
+    stubborn: 0,
+  };
+  // The flag backfill is drained first. It is one pass over every stored turn —
+  // the same pass that used to run on startup and froze the window for ten
+  // seconds — so it is done here, inside an operation that already takes minutes
+  // and shows progress, rather than on the way to painting a window.
+  //
+  // Reported as 'counting', not as the repair's own progress. Sharing the
+  // repair's counter would have put "Copying images — 0 of 23285" on screen for
+  // a minute while nothing was being copied and the number never moved.
+  const unexamined = db.countMessagesWithInlineImages().unexamined;
+  let examinedSoFar = 0;
+  while (examinedSoFar < unexamined) {
+    const { examined, remaining } = db.examineInlineImages(400);
+    examinedSoFar = unexamined - remaining;
+    onProgress?.(examinedSoFar, unexamined, 'counting');
+    // examined === 0 with rows still unexamined would be a loop that cannot
+    // finish. Break rather than spin — the same failure that once read
+    // "3200 of 480".
+    if (remaining === 0 || examined === 0) break;
+    // Yields to the event loop between slices, so the window keeps painting.
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const total = db.countMessagesWithInlineImages().inline;
+  // Taken in batches rather than all at once: the rows are megabytes each, and
+  // holding 452 of them in memory to save a query would be its own problem.
+  //
+  // Paged by id, so a row that cannot be fully cleaned is passed over rather than
+  // selected again next round. Re-querying the LIKE each time made this loop
+  // endless on a real archive — the counter read "3200 of 480".
+  let afterId = 0;
+  for (;;) {
+    const rows = db.messagesWithInlineImages(20, afterId);
+    if (rows.length === 0) break;
+    afterId = rows[rows.length - 1].id;
+
+    for (const row of rows) {
+      const before = row.html.length;
+      const replacements = new Map<string, string>();
+      // Only the src attributes, and only data: ones. A regex over the whole
+      // document would also match base64 that happens to sit in text.
+      for (const match of row.html.matchAll(/<img\b[^>]*\bsrc="(data:[^"]+)"/gi)) {
+        const src = match[1];
+        if (replacements.has(src)) continue;
+        const outcome = await storeImage(src);
+        if (outcome.kind === 'stored') {
+          replacements.set(src, assetHref(outcome.asset));
+          db.addAssetForMessage(row.chatId, row.id, outcome.asset, 'generated');
+          summary.images += 1;
+        } else {
+          summary.failed += 1;
+        }
+      }
+
+      const rewritten = rewriteImageSources(row.html, replacements);
+      db.replaceMessageHtml(row.id, rewritten);
+      summary.turns += 1;
+      summary.bytesFreed += before - rewritten.length;
+      // Counted rather than retried. A row still holding base64 after the rewrite
+      // is a carrier the patterns do not know about, and the useful response is a
+      // number to investigate — not another pass that will fail the same way.
+      if (rewritten.includes('data:image')) summary.stubborn += 1;
+      onProgress?.(summary.turns, total);
+    }
+
+    // Hand the thread back: this writes megabytes per row and would otherwise
+    // freeze every window for the duration, which is the mistake three earlier
+    // operations in this file already made.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  return summary;
+}
+
+export async function openChatInPanel(chatId: number): Promise<void> {
+  const chat = db.getChatForCapture(chatId);
+  if (!chat) throw new Error(`No chat with id ${chatId}`);
+  if (chat.externalId.startsWith('takeout:')) {
+    throw new Error(
+      'This entry came from a Takeout export and has no Google thread id, so it cannot be opened.',
+    );
+  }
+  await ensureOnAiMode();
+  await ensureHistorySidebarOpen();
+  await openThreadById(chat.externalId);
+}
+
 export interface CaptureSummary {
   attempted: number;
   captured: number;
+  /** Threads Google no longer lists; see the note in shared/types.ts. */
+  unlisted: number;
   turns: number;
   images: number;
   errors: number;
   remaining: number;
+  /**
+   * Threads deliberately left alone, having failed too many times already. See
+   * MAX_CAPTURE_ATTEMPTS — reported rather than silently dropped.
+   */
+  exhausted?: number;
   cancelled: boolean;
   failures: { title: string; reason: string }[];
   stoppedEarly?: string;
@@ -341,7 +1762,79 @@ export interface CaptureSummary {
  * so this is seconds per conversation, not milliseconds. A bounded, resumable
  * run beats one that has to be left alone for an hour.
  */
-export async function captureTurns(limit: number): Promise<CaptureSummary> {
+/**
+ * Loads the sidebar list once and returns every thread id it holds.
+ *
+ * The fix for a capture run that "just scrolls the panel". Each capture calls
+ * openThreadById, which walks the entire virtualised list hunting for its row —
+ * visibly, for up to its 60-second budget — and most of a Catch-up queue is
+ * threads Google no longer lists, so most of those walks were never going to
+ * find anything. Twenty-one threads, twenty-one full sweeps of the sidebar, and
+ * from the outside it is a loop that scrolls and never ends.
+ *
+ * One walk up front costs about twenty seconds and answers the question for the
+ * whole run: a thread whose id is not in a fully loaded list is not there, and
+ * saying so takes no scrolling at all.
+ *
+ * Returns null when the list could not be loaded, and the caller must then fall
+ * back to searching per thread rather than declaring everything missing. "The
+ * sidebar would not load" and "the thread is gone" are opposite conclusions, and
+ * confusing them would mark a whole queue as unrecoverable.
+ */
+async function loadSidebarIds(): Promise<SidebarWalk | null> {
+  try {
+    // Answered BEFORE touching the page. This is the change that halves Catch up:
+    // the harvest one step earlier walked the whole list, and its result is the
+    // answer to this question — so there is no sidebar to open, recycle or read.
+    if (lastCompleteWalk && Date.now() - lastCompleteWalk.at < WALK_CACHE_MS) {
+      const age = Math.round((Date.now() - lastCompleteWalk.at) / 1000);
+      return {
+        ...lastCompleteWalk.walk,
+        note: `${lastCompleteWalk.walk.note} · reused, ${age}s old`,
+      };
+    }
+
+    await ensureHistorySidebarOpen();
+    const recycled = await recycleHistorySidebar();
+    // No rows means no list. Null sends the caller down the "cannot tell" path
+    // rather than declaring every thread in the queue missing — the sidebar
+    // being shut says nothing about any particular thread.
+    if (recycled.rows === 0) return null;
+    const walk = await walkSidebarWithSecondChance({ cancelled: () => captureCancelled });
+    // The verdict this whole function exists to support is "Google no longer
+    // lists this thread", and an incomplete walk cannot support it. Measured on
+    // the real archive: a walk that fell far short of the list's own expected
+    // total led to 358 entries being marked as gone in one run, each of them
+    // still perfectly present in Google's sidebar.
+    //
+    // So a short walk returns null — "cannot tell" — exactly as a shut sidebar
+    // does. The caller then attempts each thread instead of writing off a queue
+    // on the strength of a list it never finished reading.
+    if (!walk.complete) {
+      console.warn(
+        `[capture] the sidebar walk fell short (${walk.ids.size} of ~${walk.expected}) ` +
+          `— every thread will be attempted rather than declared missing · ${walk.note}`,
+      );
+      return null;
+    }
+    return walk;
+  } catch {
+    // Same reasoning as the null above: a failure here says nothing about any
+    // individual thread.
+    return null;
+  }
+}
+
+export async function captureTurns(
+  limit: number,
+  /**
+   * Take the threads the automatic flows have given up on. Only ever set by the
+   * menu item that exists to do exactly that — a deliberate act, because these
+   * are threads with a measured history of costing two minutes each to fail.
+   */
+  includeExhausted = false,
+): Promise<CaptureSummary> {
+  const captureStartedAt = new Date().toISOString();
   if (capturing) throw new Error('A capture is already running');
   capturing = true;
   captureCancelled = false;
@@ -349,6 +1842,7 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
   const summary: CaptureSummary = {
     attempted: 0,
     captured: 0,
+    unlisted: 0,
     turns: 0,
     images: 0,
     errors: 0,
@@ -363,7 +1857,16 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
     // Re-reading it in a loop would retry the same failure forever in an
     // unattended run; a fresh run picks failures up again, ordered behind
     // anything never tried.
-    const queue = db.chatsWithoutTurns(limit);
+    const queue = db.chatsWithoutTurns(limit, includeExhausted);
+    // The sidebar list, once, instead of once per thread — see loadSidebarIds.
+    // Only worth the twenty seconds when there is more than one thread to place;
+    // a single re-capture can just go and look.
+    const listed =
+      queue.length > QUEUE_WORTH_A_LIST_LOAD ? await loadSidebarIds() : null;
+    // Said out loud rather than silently skipped. A queue that quietly shrinks
+    // from 18 to 0 with nothing captured looks exactly like finishing the work.
+    const exhausted = includeExhausted ? 0 : db.countExhaustedCaptures();
+    summary.exhausted = exhausted;
     let consecutiveFailures = 0;
     // Conversations that failed this pass, retried once at the end. Most
     // failures here are transient — a page that took longer than 60s to settle
@@ -375,16 +1878,50 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
     const runPass = async (chats: db.ChatToCapture[]) => {
     for (const chat of chats) {
       if (captureCancelled) break;
+      // Answered from the list already loaded rather than by sending the sidebar
+      // on another fruitless walk. Only when the load succeeded: a list that
+      // would not load says nothing about any particular thread, and treating
+      // those two as the same would mark the whole queue as gone.
+      if (listed && !listed.ids.has(chat.externalId)) {
+        summary.attempted += 1;
+        summary.unlisted += 1;
+        db.recordThreadNotListed(chat.id);
+        broadcastCapture({
+          phase: 'capturing',
+          done: summary.captured,
+          attempted: summary.attempted,
+          total: queue.length + retryable.length,
+          errors: summary.errors,
+          unlisted: summary.unlisted,
+          current: `not listed: ${chat.title.slice(0, 46)}`,
+        });
+        continue;
+      }
       summary.attempted += 1;
       broadcastCapture({
         phase: 'capturing',
+        // The number that MOVES. done is the captured count, and on a run where
+        // every thread fails it never changes — observed sitting at "3/21" while
+        // the run worked through thread after thread, which from the outside is
+        // indistinguishable from a loop. The attempt count is the honest measure
+        // of progress; captured and failed are reported beside it.
         done: summary.captured,
+        attempted: summary.attempted,
         total: queue.length + retryable.length,
         errors: summary.errors,
+        unlisted: summary.unlisted,
         current: `${isRetry ? 'retry: ' : ''}${chat.title.slice(0, 60)}`,
       });
       try {
-        const result = await captureOneChat(chat);
+        const result = await Promise.race([
+          captureOneChat(chat),
+          new Promise<never>((_resolve, reject) =>
+            setTimeout(
+              () => reject(new Error(`Gave up on this thread after ${CAPTURE_DEADLINE_MS / 1000}s`)),
+              CAPTURE_DEADLINE_MS,
+            ),
+          ),
+        ]);
         summary.captured += 1;
         consecutiveFailures = 0;
         summary.turns += result.turns;
@@ -395,14 +1932,49 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
         // The reason is kept, not just counted: "7 errors" is unactionable,
         // whereas knowing they were all load timeouts points straight at the
         // fix.
+        // A thread Google no longer lists is a permanent fact about that thread,
+        // not evidence that anything is broken — so it must not count toward the
+        // systemic-failure abort and must not be retried. These arrive in runs,
+        // because the queue is ordered by recency and the oldest threads are
+        // exactly the ones rotated out, so ten in a row is the NORMAL shape of
+        // reaching the end of what the sidebar still holds. Counting them
+        // stopped a run with 123 threads left, most of which were capturable.
+        //
+        // Checked FIRST, and that is the fix. The error tally and the failure
+        // list were both filled in before this branch, so an unlisted thread was
+        // counted twice — a real run reported "unlisted=16 errors=18" when there
+        // were exactly two errors, and listed all sixteen among the failures.
+        // "Counted apart from errors" was the stated intention and the code did
+        // the opposite.
+        if (error instanceof ThreadNotListedError) {
+          summary.unlisted += 1;
+          // Taken out of the queue now rather than after three more walks of the
+          // sidebar. The search reached the end of the list and the row was not
+          // in it, which is a fact about the thread, not a miss.
+          db.recordThreadNotListed(chat.id);
+          await new Promise((resolve) => setTimeout(resolve, BETWEEN_CAPTURES_MS));
+          continue;
+        }
+
+        // One unreadable conversation must not abort the run — with hundreds
+        // queued, stopping on the first oddity would make the feature useless.
+        // The reason is kept, not just counted: "7 errors" is unactionable,
+        // whereas knowing they were all load timeouts points straight at the
+        // fix.
         summary.errors += 1;
-        consecutiveFailures += 1;
         db.recordCaptureFailure(chat.id);
         summary.failures.push({
           title: chat.title.slice(0, 60),
           reason: error instanceof Error ? error.message : String(error),
         });
-        if (!isRetry) retryable.push(chat);
+
+        consecutiveFailures += 1;
+        // Retried only if this thread has not already failed several times on
+        // earlier runs. The retry pass is for a page that took longer than usual
+        // to settle; a thread on its seventh attempt is not being unlucky, and
+        // retrying it inside the run is what turned 18 doomed threads into 26
+        // attempts and the better part of an hour.
+        if (!isRetry && chat.attempts < 2) retryable.push(chat);
         if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
           summary.stoppedEarly =
             `Stopped after ${consecutiveFailures} consecutive failures — ` +
@@ -429,11 +2001,28 @@ export async function captureTurns(limit: number): Promise<CaptureSummary> {
 
     summary.cancelled = captureCancelled;
     summary.remaining = db.countChatsWithoutTurns();
+    db.recordJob(
+      'capture',
+      captureCancelled ? 'stopped' : summary.stoppedEarly ? 'failed' : 'finished',
+      captureStartedAt,
+      {
+        ...summary,
+        failures: summary.failures.slice(0, 20),
+        // Same reasoning as the recapture record: the walk that produced this
+        // run's "no longer listed" verdicts is recorded beside them, so a
+        // surprising count can be judged rather than argued about.
+        sidebar: listed
+          ? `saw ${listed.ids.size} of ~${listed.expected} · ${listed.note}`
+          : 'could not be read — every thread was attempted rather than written off',
+      },
+    );
     broadcastCapture({
       phase: captureCancelled ? 'cancelled' : 'done',
       done: summary.captured,
       total: summary.attempted,
       errors: summary.errors,
+      unlisted: summary.unlisted,
+      exhausted: summary.exhausted,
       turns: summary.turns,
       images: summary.images,
       remaining: summary.remaining,

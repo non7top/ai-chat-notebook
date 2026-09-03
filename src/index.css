@@ -6,6 +6,11 @@
 
   --border: #d5d5d5;
   --muted: #666;
+  /* Added when the source-entry styles moved into this sheet: they were
+     written against a stylesheet that was never imported, and referenced two
+     variables that only existed in their own heads. */
+  --fg: #111;
+  --panel: #f4f4f5;
   --selected: #dbeafe;
   --drop: #bbf7d0;
 }
@@ -45,21 +50,67 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* The anchor for .panel-tab, which sits on this pane's right edge. */
+  position: relative;
 }
 
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid var(--border);
+/* The pull-tab for the live panel, attached to the right edge of the app's own
+   pane — which is the boundary the native panel appears from.
+
+   Half-rounded on the left and flush on the right, so it reads as attached to
+   the edge rather than floating near it. Tall and narrow: it costs 14px of a
+   boundary that already exists, where the labelled button it replaces cost a
+   whole row of a scrolling strip. */
+.panel-tab {
+  position: absolute;
+  right: 0;
+  /* At the top corner rather than halfway down. Centred, it floated in the
+     middle of whatever pane happened to be behind it; in the corner it reads as
+     part of the frame, and it is where the eye already goes. */
+  top: 0;
+  z-index: 5;
+  width: 14px;
+  height: 52px;
+  padding: 0;
+  border: 1px solid var(--border);
+  /* No top or right edge: both coincide with the pane's own, and drawing them
+     twice is what makes a tab look stuck ON the frame instead of part of it. */
+  border-top: none;
+  border-right: none;
+  border-radius: 0 0 0 6px;
+  background: linear-gradient(to left, #ffffff, #ececec);
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1;
+  cursor: pointer;
+  /* A 14px target is small, so it earns its visibility on hover rather than by
+     being big. */
+  transition: background 0.12s, color 0.12s;
+}
+
+.panel-tab:hover {
+  background: linear-gradient(to left, #ffffff, #dbeafe);
+  color: #1d4ed8;
+}
+
+.panel-tab:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: -2px;
+}
+
+/* There is no horizontal toolbar any more. A row of chrome across the top of a
+   three-pane window spends the scarce direction — vertical — to hold four
+   buttons in a strip a thousand pixels wide. The controls live in the left pane
+   now, stacked, where the spare direction is the one they need. */
+
+/* The build label lived here and no longer does — it is in Help > About, which
+   is where a version belongs. In a toolbar it was permanent chrome answering a
+   question asked about once a day, in a window where vertical space is the
+   scarce thing. */
+
+/* Pushed to the right edge by the harvest bar's own flex: 1 between them. */
+.panel-toggle {
   flex: none;
-}
-
-.toolbar h1 {
-  font-size: 0.95rem;
-  margin: 0;
-  flex: 1;
 }
 
 button {
@@ -89,6 +140,14 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   flex: none;
+}
+
+/* A plain banner carries progress, so it needs a ground of its own — without one
+   it reads as part of the toolbar above it. */
+.banner:not(.error) {
+  background: #eff6ff;
+  color: #1e3a5f;
+  font-size: 0.8rem;
 }
 
 .banner.error {
@@ -124,12 +183,48 @@ button:disabled {
   min-height: 0;
 }
 
+/* The tree and the controls, stacked: the tree scrolls, the controls stay put at
+   the bottom so they are reachable whatever the tree is doing. */
 .pane-tree {
   width: 220px;
   flex: none;
   border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.tree-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   padding: 0.4rem 0;
 }
+
+/* The controls, one per line and full width. A button whose label changes with
+   the archive — "Catch up (21)" — cannot share a line with another and stay
+   readable in 220px. */
+.side-actions {
+  flex: none;
+  border-top: 1px solid var(--border);
+  padding: 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  /* Bounded and scrollable — but the panel toggle is no longer inside it (see
+     .side-pin). That combination is what hid the button: the toggle was the
+     last child, the strip scrolled, and showing the panel starts a run whose
+     status lines fill the space above it.
+
+     Run controls come first in the strip, so what scrolls out of reach under
+     pressure is the tail of a status message rather than a button. */
+  max-height: 60%;
+  overflow-y: auto;
+}
+
+/* The panel toggle is a tab on the pane boundary — see .panel-tab. It is not in
+   any pane's flow, so nothing can push it out of reach: a labelled button at the
+   foot of the scrolling control strip could be, and was. */
 
 .pane-list {
   width: 260px;
@@ -152,6 +247,210 @@ button:disabled {
   padding: 0.8rem;
 }
 
+/* Rows picked for filing. Deliberately NOT the same treatment as .selected —
+   that one means "this is what the reader is showing" and there is exactly one
+   of it, while this can be a hundred rows and has to read as a held set rather
+   than as a hundred things being read at once. A left rule and a wash, so a
+   picked row that is also the one being read still shows both. */
+.chat-row.picked {
+  background: #eff6ff;
+  box-shadow: inset 3px 0 0 #2563eb;
+}
+
+.chat-row.picked.selected {
+  background: var(--selected);
+}
+
+/* The picked count, in the search row rather than a bar of its own — see the
+   note in ChatList. Styled as a chip so it reads as a live state you can dismiss
+   rather than as a label, and sized to fit beside the input without pushing it. */
+.picked-chip {
+  flex: none;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.35rem;
+  background: #dbeafe;
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+  white-space: nowrap;
+}
+
+.picked-chip:hover {
+  background: #bfdbfe;
+}
+
+/* Folder colours.
+
+   A fixed palette rather than a free colour, and defined once here so the
+   swatch, the folder's own mark and the chip on a thread are the same colour by
+   construction. db.ts validates against the same list of keys before storing —
+   an arbitrary string reaching a custom property would be both a styling escape
+   and a way to make a folder invisible against its own row. */
+.c-slate {
+  --folder: #64748b;
+}
+.c-red {
+  --folder: #dc2626;
+}
+.c-amber {
+  --folder: #d97706;
+}
+.c-green {
+  --folder: #16a34a;
+}
+.c-teal {
+  --folder: #0d9488;
+}
+.c-blue {
+  --folder: #2563eb;
+}
+.c-violet {
+  --folder: #7c3aed;
+}
+.c-pink {
+  --folder: #db2777;
+}
+
+/* The folder's mark on its own row. A dot when only a colour is set, the glyph
+   when there is one — so an unmarked folder is not a hole where a column should
+   be. */
+.folder-mark {
+  width: 0.85rem;
+  flex: none;
+  font-size: 0.8rem;
+  line-height: 1;
+  text-align: center;
+}
+
+.folder-mark.c-slate::before,
+.folder-mark.c-red::before,
+.folder-mark.c-amber::before,
+.folder-mark.c-green::before,
+.folder-mark.c-teal::before,
+.folder-mark.c-blue::before,
+.folder-mark.c-violet::before,
+.folder-mark.c-pink::before {
+  content: '';
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--folder);
+}
+
+/* The glyph replaces the dot rather than sitting beside it: two marks for one
+   folder in a 14px row is one too many. */
+.folder-mark:not(:empty)::before {
+  display: none;
+}
+
+/* The folder's own name, in its colour. The dot alone was too small to answer
+   "did that do anything" — a colour set on a folder has to be visible ON the
+   folder, immediately, or the picker is a control with no feedback. */
+.tree-name.c-slate,
+.tree-name.c-red,
+.tree-name.c-amber,
+.tree-name.c-green,
+.tree-name.c-teal,
+.tree-name.c-blue,
+.tree-name.c-violet,
+.tree-name.c-pink {
+  color: var(--folder);
+  font-weight: 600;
+}
+
+/* Where a thread belongs, shown on the thread. Coloured by its folder, and
+   falling back to the row's own muted grey for a folder with no colour set —
+   the name is still the answer. */
+.chat-folder {
+  color: var(--folder, var(--muted));
+  font-weight: 500;
+}
+
+.style-picker {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+  padding: 0.3rem;
+  margin: 0.1rem 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+/* Says what each group of controls is. Without them it was eight circles, a
+   smiley and a text box, and no indication that the box was the icon or that
+   anything in the row had been saved. */
+.picker-label {
+  font-size: 0.68rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-left: 0.2rem;
+}
+
+.picker-label:not(:first-child) {
+  margin-left: 0.5rem;
+}
+
+.icon-choice {
+  padding: 0.05rem 0.2rem;
+  font-size: 0.85rem;
+  line-height: 1.1;
+  border-color: transparent;
+  background: none;
+}
+
+.icon-choice:hover {
+  border-color: var(--border);
+  background: #ffffff;
+}
+
+.icon-choice.chosen {
+  border-color: var(--fg);
+  background: #ffffff;
+}
+
+/* Closes the picker; it does not save, because everything in here has saved
+   already. Named Done rather than OK for exactly that reason. */
+.picker-done {
+  margin-left: auto;
+  font-size: 0.72rem;
+}
+
+.swatch {
+  width: 1rem;
+  height: 1rem;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: var(--folder, transparent);
+  cursor: pointer;
+  font-size: 0.6rem;
+  line-height: 1;
+  color: var(--muted);
+}
+
+/* The chosen one is ringed rather than merely bigger: at 16px a size change is
+   not a state anyone can read. */
+.swatch.chosen {
+  outline: 2px solid var(--fg);
+  outline-offset: 1px;
+}
+
+.swatch.none {
+  border-color: var(--border);
+}
+
+.icon-input {
+  width: 2.4rem;
+  text-align: center;
+  font-size: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.1rem;
+}
+
 /* ------------------------------------------------------------------- tree */
 
 .tree-row {
@@ -161,6 +460,9 @@ button:disabled {
   padding: 0.15rem 0.3rem 0.15rem 0.4rem;
   cursor: default;
   border-radius: 4px;
+  /* The anchor for .row-actions, which is taken out of the flow so the folder's
+     name gets the width instead of four invisible buttons. */
+  position: relative;
 }
 
 .tree-row:hover {
@@ -183,6 +485,25 @@ button:disabled {
   white-space: nowrap;
 }
 
+/* Counts sit right of the name and left of the row actions, so revealing the
+   actions on hover does not shift them. Tabular figures because a column of
+   numbers that jitters as the digits change is harder to read than one that
+   does not. */
+.tree-count {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  padding: 0 0.15rem;
+}
+
+/* An empty folder still shows its 0 — the number is how you tell "nothing here"
+   from "not loaded yet" — but quietly. */
+.tree-count.zero {
+  opacity: 0.45;
+}
+
+/* The subtree total, beside the folder's own count. Bracketed so two adjacent
+   numbers cannot be read as one. */
 .twisty,
 .row-action {
   border: none;
@@ -203,13 +524,38 @@ button:disabled {
 }
 
 /* Row actions stay out of the way until the row is under the pointer —
-   otherwise three glyphs per row turn the tree into visual noise. */
-.row-action {
-  visibility: hidden;
+   otherwise four glyphs per row turn the tree into visual noise.
+
+   Absolutely positioned, and that is the fix rather than a refinement.
+   visibility: hidden hides an element but still RESERVES its box, so four
+   buttons cost about 72px of every row whether or not anyone was hovering.
+   Measured in a 220px pane: the folder name was left 49px and needed 67, so
+   "pepperdoll" rendered as "pepp…", and a nested folder got 69px for a name
+   needing 174.
+
+   Out of the flow they cost nothing, and on hover they sit over the right end of
+   the row — over the count, which is the least important thing there while you
+   are reaching for a button. The background is opaque so they do not read as
+   overlapping the number underneath. */
+.row-actions {
+  display: none;
+  position: absolute;
+  right: 0.2rem;
+  align-items: center;
+  gap: 0.1rem;
+  padding-left: 0.4rem;
+  /* Fades from transparent so the name does not end abruptly underneath. */
+  background: linear-gradient(to right, transparent, #f2f2f2 0.4rem);
 }
 
-.tree-row:hover .row-action {
-  visibility: visible;
+.tree-row:hover .row-actions {
+  display: flex;
+}
+
+/* The selected row has its own background, so the fade has to match it or the
+   buttons sit on a grey patch inside a blue row. */
+.tree-row.selected:hover .row-actions {
+  background: linear-gradient(to right, transparent, var(--selected) 0.4rem);
 }
 
 .row-action:hover {
@@ -230,6 +576,48 @@ button:disabled {
 
 /* ------------------------------------------------------------------- list */
 
+/* The border is always present and usually transparent, so a row that gains
+   one does not shift its text sideways relative to its neighbours. */
+.chat-row {
+  border-left: 3px solid transparent;
+  /* Rows off screen are not laid out or painted. The list runs to 2848 rows, each
+     with a thumbnail and several spans, and switching folders re-rendered every
+     one of them — five seconds of locked window for a pane showing about
+     fifteen.
+
+     contain-intrinsic-size is the height the browser reserves for a row it has
+     skipped, and it MUST match what the row really is. It did not: .chat-meta
+     was a block with no wrapping rule and nine spans in it — id, date, folder,
+     turns, sources, entries, differs, images, previews — which in a pane a third
+     of the window wide wrapped to two lines and sometimes three. So the
+     estimate was short on an unknown fraction of 2848 rows, the document's
+     scroll height was wrong by a large and varying amount, and dragging the
+     scrollbar meant dragging against a total that kept being corrected under
+     the cursor as rows were realised. That is the thumb lagging behind the
+     mouse.
+
+     Fixed by making the row height DETERMINISTIC below rather than by nudging
+     this number, so the reservation cannot drift out of step with reality
+     again. */
+  content-visibility: auto;
+  /* The HEIGHT longhand, not contain-intrinsic-size. A single-value shorthand
+     sets both axes, so it would also declare an intrinsic WIDTH of 3.4rem for
+     every skipped row — which is not a claim anyone wants to make about a row
+     that fills its pane. Only the block direction needs reserving here; the
+     inline size comes from the container either way. */
+  contain-intrinsic-height: 3.4rem;
+}
+
+/* An export entry is the baseline and deliberately carries no colour at all:
+   it is what almost every row is, and marking the ordinary case leaves nothing
+   for the marked case to stand out against. The green line means this
+   conversation has been read from the panel — the reading that has the real
+   images and the full text, rather than the export's rougher one. Same green as
+   the image count, which is the other thing only a panel read can produce. */
+.chat-row.enriched {
+  border-left-color: #047857;
+}
+
 .chat-row.selected {
   background: var(--selected);
 }
@@ -249,6 +637,37 @@ button:disabled {
   background: #f2f2f2;
 }
 
+/* A row is now two columns: the thumbnail, then the text. */
+.chat-open {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  /* Exactly the height reserved for a skipped row, and fixed rather than
+     derived from the content. Derived is what broke: every span added to the
+     meta line was another chance for a row to grow past the reservation, and
+     the last one added — the folder chip — did exactly that. A fixed height
+     means the next one cannot. */
+  height: 3.4rem;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.chat-text {
+  /* min-width: 0 is what lets the title ellipsis work at all — without it a
+     flex item refuses to shrink below its content and the row grows instead. */
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-thumb {
+  flex: none;
+  width: 2.25rem;
+  height: 2.25rem;
+  object-fit: cover;
+  border-radius: 3px;
+  background: var(--panel);
+}
+
 .chat-title {
   display: block;
   overflow: hidden;
@@ -261,11 +680,35 @@ button:disabled {
   font-style: italic;
 }
 
+/* One line, always. Nine spans in a narrow pane wrapped to two and three, and
+   the row grew past the height reserved for it — see .chat-row. The tail is cut
+   rather than dropped: the counts each carry a title attribute, and the reader
+   shows all of it for the thread that is open. */
 .chat-meta {
   display: block;
   font-size: 0.72rem;
   color: var(--muted);
   margin-top: 0.15rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Pulls one record by its own link. On the row that shows the link, so there is
+   never a question of which record it acts on — the header's version was gated
+   on the entry being attached, and a thread whose only link was on an unattached
+   entry showed no fetch control at all. */
+.entry-fetch {
+  font-size: 0.7rem;
+  padding: 0.05rem 0.35rem;
+}
+
+/* Reads this thread and every candidate the fingerprint matched. Sits with the
+   entry list rather than in the header: it acts on what that disclosure is
+   about, and the header is for the thread itself. */
+.capture-similar {
+  margin: 0.2rem 0 0.3rem;
+  font-size: 0.75rem;
 }
 
 /* ----------------------------------------------------------------- reader */
@@ -276,9 +719,23 @@ button:disabled {
   height: 100%;
 }
 
+/* The header must not be able to eat the pane.
+   MEASURED on the real app: an entry whose title runs to a sentence rendered as
+   a 99px-wide column of one word per line, 430px tall, above a reader pane only
+   332px wide. The whole conversation was pushed off screen by its own heading.
+
+   The cause is `flex: 1` on the title, whose basis is 0: the id and the two
+   buttons are laid out first at their natural widths, and the title gets what is
+   left over — 99px of 332. It is the same shape as the folder names that came out
+   four characters wide, and the same fix applies: bound the thing that grows,
+   rather than trusting that there will be room. */
 .reader-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
+  /* So the actions drop to their own line rather than squeezing the title into a
+     column. Below about 380px there is genuinely not room for both, and a title
+     on its own line is worth more than a title beside a button. */
+  flex-wrap: wrap;
   gap: 0.5rem;
   padding: 0.5rem 0.8rem;
   border-bottom: 1px solid var(--border);
@@ -288,7 +745,20 @@ button:disabled {
 .reader-head h2 {
   font-size: 1rem;
   margin: 0;
-  flex: 1;
+  /* min-width overrides the flex default of `auto`, which refuses to shrink a
+     box below its content — that default is why the browser chose to make this
+     tall instead of narrow. */
+  flex: 1 1 12rem;
+  min-width: 0;
+  /* Two lines, then an ellipsis. A title IS the conversation's opening prompt
+     here, so a single line loses too much of it, and no title is worth thirty
+     lines of header. The full text stays available on hover. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 .reader-body {
@@ -326,21 +796,63 @@ button:disabled {
   line-height: 1.55;
 }
 
-/* The question: tinted, boxed, and deliberately narrower than the answer, so
-   the shape alone says which is which. */
+/* The question: tinted, boxed, hugging its own text, and pushed to the right.
+   Side alone then identifies the speaker, which survives skim-reading a long
+   conversation better than colour does.
+
+   fit-content is what makes it a bubble. A max-width alone left it a block, so a
+   fifteen-character question still drew a 46rem bar across the pane — nothing
+   like AI Mode, where the bubble ends where the words do. The max-width stays as
+   the ceiling for the long ones, which do exist: some prompts run past 2000
+   characters. */
 .turn-user .turn-body {
   background: #eef2ff;
   border: 1px solid #c7d2fe;
   border-radius: 8px;
   padding: 0.55rem 0.75rem;
+  width: fit-content;
   max-width: 46rem;
+  margin-left: auto;
 }
 
-/* The answer: full width, no fill, with a rule down the side to anchor long
-   passages that scroll past their own heading. */
+.turn-user .turn-role {
+  text-align: right;
+}
+
+/* The answer: full width, but inside a container of its own.
+
+   It was unadorned, on the reasoning that AI Mode gives only the prompt a
+   bubble. True of AI Mode, and wrong here: a saved thread is read as a
+   transcript of many turns rather than one live exchange, and with the question
+   boxed and the answer bare the answers ran together and it stopped being
+   obvious where one ended. Kept deliberately quieter than the question — a
+   near-white ground and a hairline, no tint — so the asymmetry still says who
+   spoke. */
 .turn-ai .turn-body {
-  border-left: 3px solid #a7f3d0;
-  padding: 0.1rem 0 0.1rem 0.8rem;
+  background: #fcfcfd;
+  border: 1px solid #ececf0;
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+}
+
+/* The container supplies the outer spacing, so the first and last blocks inside
+   it must not add their own on top. */
+.turn-ai .turn-body > :first-child {
+  margin-top: 0;
+}
+
+.turn-ai .turn-body > :last-child {
+  margin-bottom: 0;
+}
+
+/* Citations look clickable now that they are. They were styled as plain text
+   while nothing happened on click, which was at least honest; leaving them that
+   way once they open a browser would hide the only route out of the archive. */
+.turn-body a {
+  color: #1d4ed8;
+  text-decoration: underline;
+  text-decoration-color: #93b4fc;
+  cursor: pointer;
 }
 
 /* Captured markup carries no stylesheet of its own — these keep third-party
@@ -372,14 +884,42 @@ button:disabled {
 
 /* --------------------------------------------------------------- harvesting */
 
+/* A column in the left pane now, not a bar across the top. */
 .harvest-bar {
   display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.35rem 0.6rem;
-  border-bottom: 1px solid var(--border);
-  flex: none;
-  font-size: 0.78rem;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.3rem;
+  min-width: 0;
+  font-size: 0.72rem;
+}
+
+.harvest-bar button {
+  width: 100%;
+  text-align: center;
+}
+
+/* Wraps instead of ellipsising: a run's summary is several facts joined by
+   dots, and cutting it at 220px would leave only the first. Vertical is the
+   direction this strip has.
+
+   Bounded, so a long summary cannot swallow the strip. The panel toggle is
+   outside it entirely (.side-pin) — measured at window heights down to 200px,
+   the toggle and Stop both stay visible. */
+.side-actions .harvest-status {
+  white-space: normal;
+  overflow-y: auto;
+  max-height: 3.5rem;
+  line-height: 1.3;
+}
+
+/* Was a vertical rule between groups in a horizontal bar; it is a horizontal
+   one between groups in a vertical strip. */
+.side-actions .harvest-sep {
+  width: auto;
+  height: 1px;
+  align-self: stretch;
+  margin: 0.1rem 0;
 }
 
 .harvest-status {
@@ -460,6 +1000,21 @@ button:disabled {
   outline: none;
 }
 
+/* How the last long job ended. Quiet when it finished, marked when it did not —
+   the distinction is the whole reason this exists. */
+.job-mark {
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.job-mark.done {
+  color: #047857;
+}
+
+.job-mark.warn {
+  color: #b45309;
+}
+
 .harvest-sep {
   width: 1px;
   align-self: stretch;
@@ -471,6 +1026,555 @@ button:disabled {
   color: #b45309;
 }
 
+/* A stand-in date, not the conversation's own. Deliberately the faintest text
+   in the list — fainter than --muted — because it is a loose end to be replaced
+   rather than information to read. Italic as well as pale, so it stays
+   distinguishable where the row is selected and the background changes. */
+.date-placeholder {
+  color: #a3a3a3;
+  font-style: italic;
+}
+
+/* A date the parser could not read, not a date the export lacked. Amber like
+   the other "this needs attention" markers rather than grey, because it is a
+   bug to fix here, not a fact about the data. */
+.date-unread {
+  color: #b45309;
+}
+
 .chat-images {
   color: #047857;
+}
+
+/* Page furniture, not content: muted rather than green, so it never competes
+   with the real image count for attention. */
+.chat-previews {
+  color: var(--muted);
+}
+
+/* A record that has no turns and never will. Muted rather than amber: nothing is
+   wrong and nothing can be done, unlike a failed capture. */
+.chat-noturns {
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* A record's own URL. Monospace and clipped, because it is an identifier to be
+   compared and quoted rather than read — the whole value is in the tooltip and on
+   the clipboard. Deliberately not styled as a link: it is not one, and it must
+   not invite a click that would re-run the prompt. */
+.entry-url {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  color: var(--muted);
+}
+
+.entry-copy {
+  font-size: 0.68rem;
+  padding: 0 0.25rem;
+  margin-left: 0.2rem;
+  color: var(--muted);
+}
+
+/* An internal row id, shown so it can be quoted back. Monospace because it is
+   an identifier to be read character by character, and faint because it is for
+   the rare occasion when something is wrong rather than for reading the list. */
+.chat-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  color: #9a9aa2;
+  white-space: nowrap;
+}
+
+/* Provenance: quiet by default, since it answers a question you only
+   occasionally ask, but always present so the answer exists. */
+.chat-source {
+  color: var(--muted);
+}
+
+/* .src-takeout deliberately has no rule. It used to be purple, which put the
+   loudest colour in the list on its most common row and left the enriched ones
+   — the interesting ones — looking plainer than the baseline. */
+
+.provenance {
+  margin: 0;
+  padding: 0.3rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.74rem;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  flex: none;
+}
+
+.provenance-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provenance-open {
+  margin-left: auto;
+  flex: none;
+}
+
+/* Inferred values read differently from known ones, deliberately. */
+.date-inferred {
+  color: #92400e;
+}
+
+.orphan-count {
+  color: #b45309;
+}
+
+.chat-grouped {
+  color: #4338ca;
+}
+
+.chat-mismatch {
+  color: #b45309;
+  font-weight: 600;
+}
+
+/* Data entries behind a conversation. Deliberately quiet until opened: it is
+   provenance, not content, but it must be reachable on every conversation
+   rather than only on ones that look ambiguous. */
+.sources {
+  /* flex: none, because .reader is a flex column and this was competing with
+     the conversation for height: an ambiguous opening can list dozens of
+     candidate entries, and an unbounded block of them pushed the chat off the
+     screen. It is chrome about the conversation, not part of it. */
+  flex: none;
+  /* Inset to match .reader-head and .reader-body. Without this the rows ran
+     flush to the pane edge while every other line was indented, which is what
+     made it read as garbling the conversation rather than framing it. */
+  padding: 0 0.8rem;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: #fafafa;
+}
+.sources-toggle {
+  background: none;
+  border: 0;
+  padding: 6px 0;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.sources-toggle:hover {
+  color: var(--fg);
+}
+.sources-hint {
+  color: var(--muted);
+}
+.sources-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 8px;
+  /* Scrolls within itself rather than growing without limit — the conversation
+     keeps the rest of the pane no matter how many candidates there are. */
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.sources-empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.source-entry {
+  display: flex;
+  /* Long prompts must not stretch the row; the facts and the button stay put. */
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--panel);
+}
+/* An unattached entry stays legible rather than being greyed into invisibility:
+   deciding whether it belongs here means reading it. */
+.source-entry.unlinked,
+.source-entry.candidate {
+  background: none;
+  border: 1px dashed var(--border);
+}
+.source-kind {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.source-facts {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.source-entry button {
+  font-size: 11px;
+  padding: 1px 6px;
+}
+
+/* Orphan entries take the list and reader panes together: reviewing one means
+   reading it in full, which needs the width. */
+.pane-orphans {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+.orphan {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 0;
+}
+/* A Lens record's image is its entire content, so it sits in the row rather
+   than behind a disclosure. Small, because these lists run long. */
+.orphan-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  padding: 0.3rem 0 0.1rem;
+}
+
+.orphan-images img {
+  width: 4.5rem;
+  height: 4.5rem;
+  object-fit: cover;
+  border-radius: 3px;
+  background: var(--panel);
+}
+
+.orphan-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+.orphan-open {
+  flex: 1;
+  background: none;
+  border: 0;
+  padding: 0;
+  text-align: left;
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------- find */
+
+/* Sticky, because the list is hundreds of rows long and a search box that
+   scrolls away is unreachable exactly when the result set is large enough to
+   need narrowing. */
+.find {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.5rem;
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+}
+
+.find-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.find-input:focus {
+  border-color: #3b82f6;
+  outline: none;
+}
+
+.find-count {
+  font-size: 0.72rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* Underlined as well as tinted: the rows are dense and a background alone
+   reads as selection here. */
+.chat-title mark {
+  background: #fef08a;
+  color: inherit;
+  text-decoration: underline;
+}
+
+/* A site favicon or source thumbnail, shown at the size it is meant to be read
+   at rather than the size it was served at.
+
+   These are mostly favicons, and favicons are shipped at 256px and larger now —
+   so at natural size a thread with thirteen of them was a column of giant logos
+   with the answer squeezed between. Sized to the surrounding text and set
+   inline, because that is what they are: an icon beside a cited source. Kept
+   rather than dropped, since they are part of what the answer looked like. */
+.turn-body img.preview-image {
+  max-width: 1.25em;
+  max-height: 1.25em;
+  vertical-align: -0.2em;
+  object-fit: contain;
+}
+
+/* The export's images, which belong to the thread but to no turn in it. Shown
+   large enough to be worth looking at — for many of these threads the picture is
+   the subject — and captioned, so their unknown position is stated rather than
+   implied by where they sit. */
+.unplaced-images {
+  flex: none;
+  padding: 0.5rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  background: #fafafa;
+}
+
+.unplaced-caption {
+  margin: 0 0 0.4rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.unplaced-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.unplaced-strip img {
+  max-width: 12rem;
+  max-height: 12rem;
+  object-fit: contain;
+  border-radius: 4px;
+  background: #fff;
+  border: 1px solid var(--border);
+}
+
+/* Choosing which reading to look at. Sits between the provenance and the turns,
+   because it changes what the turns ARE and reading it afterwards is too late. */
+.reading-switch {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+  padding: 0.35rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.reading-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-right: 0.2rem;
+}
+
+.reading-switch button {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.45rem;
+}
+
+/* The selected reading, marked strongly enough that it is obvious the turns
+   below are not the thread's own stored text. */
+.reading-switch button.reading-on {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+  color: #fff;
+}
+
+/* ----------------------------------------------------------------- report */
+
+/* The export report. Takes the list and reader panes together: it is prose and
+   a table, and in a third of the width it would be the same unreadable thing it
+   was as one truncated line in the toolbar. */
+.pane-report {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.report {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.report-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.report-head h2 {
+  font-size: 1rem;
+  margin: 0;
+  flex: 1;
+}
+
+.report-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.6rem 0.8rem 2rem;
+  /* Measured for reading rather than stretched to the pane: long explanatory
+     lines across a 900px pane are hard to track back to the next line. */
+  max-width: 46rem;
+}
+
+.report-path {
+  margin: 0 0 0.8rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.report-body h3 {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 1.1rem 0 0.4rem;
+}
+
+.report-body h3:first-of-type {
+  margin-top: 0;
+}
+
+/* The headline numbers. Large because they are the decision — everything
+   underneath is why they are what they are. */
+.report-figure {
+  margin: 0 0 0.3rem;
+  font-size: 1.05rem;
+}
+
+.report-figure.new {
+  color: #047857;
+  font-weight: 600;
+}
+
+.report-figure.warn {
+  color: #b45309;
+}
+
+.report-figure.bad {
+  color: #b91c1c;
+  font-weight: 600;
+}
+
+/* The explanation rides along at normal text size: it belongs to the figure but
+   must not compete with it. */
+.report-aside {
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* An aside that carries bad news still reads as an aside, but not a neutral
+   one. */
+.report-aside.bad {
+  color: #b91c1c;
+}
+
+.report-note {
+  margin: 0.4rem 0 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.report-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.8rem;
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.report-facts dt {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.report-facts dd {
+  margin: 0;
+}
+
+/* Unreadable date text, quoted verbatim. Monospace because the point is the
+   exact characters — where the date is glued to the word before it is visible
+   here and nowhere else. */
+/* The shape histogram: a table in all but name, so the counts line up and an
+   outlier is visible without reading every row. */
+.report-shapes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.82rem;
+}
+
+.report-shapes li {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.report-shape-count {
+  min-width: 3.5rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.report-samples {
+  margin: 0.3rem 0 0;
+  padding-left: 1.1rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.report-samples li {
+  overflow-wrap: anywhere;
+  margin-bottom: 0.15rem;
+}
+
+/* A group of threads whose stored conversations are identical. Boxed together so
+   the grouping is the visible thing — which threads are implicated with which is
+   the entire content of the report. */
+.copy-group {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem;
+  margin-bottom: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.copy-member {
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copy-member:hover {
+  background: var(--selected);
 }

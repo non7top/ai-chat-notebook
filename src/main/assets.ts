@@ -71,9 +71,32 @@ async function fetchWithSession(src: string): Promise<AssetOutcome> {
     // lens.usercontent.google.com will not serve these anonymously, and
     // net.fetch has no session option at all — it would quietly fetch
     // anonymously and get an error page instead of an image.
-    const response = await session.fromPartition('persist:google').fetch(src, {
-      credentials: 'include',
-    });
+    // Bounded, because an unbounded await here stops everything. A single image
+    // URL that accepts the connection and never answers hung a 1700-thread run
+    // at thread 413 with no error, no progress and nothing in the log — the whole
+    // job waiting on one picture. Chromium's fetch has no default timeout.
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), IMAGE_FETCH_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await session.fromPartition('persist:google').fetch(src, {
+        credentials: 'include',
+        signal: abort.signal,
+      });
+    } catch (error) {
+      // An abort arrives here as an ordinary error; named so the reason in the
+      // failure list says which it was.
+      return {
+        kind: 'failed',
+        reason: abort.signal.aborted
+          ? `Timed out after ${IMAGE_FETCH_TIMEOUT_MS / 1000}s`
+          : error instanceof Error
+            ? error.message
+            : String(error),
+      };
+    } finally {
+      clearTimeout(timer);
+    }
     if (!response.ok) {
       return { kind: 'failed', reason: `HTTP ${response.status}` };
     }
@@ -90,6 +113,15 @@ async function fetchWithSession(src: string): Promise<AssetOutcome> {
     return { kind: 'failed', reason: error instanceof Error ? error.message : String(error) };
   }
 }
+
+/**
+ * How long to wait for one image.
+ *
+ * Generous, because these are real images over a real network, but finite: the
+ * alternative is what happened, which is a run stopping dead on one unresponsive
+ * URL and reporting nothing at all.
+ */
+const IMAGE_FETCH_TIMEOUT_MS = 25_000;
 
 export async function storeImage(src: string): Promise<AssetOutcome> {
   if (src.startsWith('data:')) return storeDataUri(src);

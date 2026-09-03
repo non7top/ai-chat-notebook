@@ -17,9 +17,23 @@ const arg = (name, fallback) => {
 const target = arg('target', '127.0.0.1:9222');
 const match = arg('match', 'notebook');
 const out = arg('out', '.shots/screenshot.png');
+// A debug build puts its debugging port behind a Basic-auth proxy (default
+// ai:ai). The proxy authenticates the target list and hands back WebSocket URLs
+// that already carry the credential, since the WebSocket API takes no headers.
+const auth = arg('auth', process.env.NOTEBOOK_DEVTOOLS_AUTH ?? null);
 const base = target.startsWith('http') ? target : `http://${target}`;
 
-const pages = (await (await fetch(`${base}/json/list`)).json()).filter((t) => t.type === 'page');
+const listed = await fetch(`${base}/json/list`, {
+  headers: auth ? { authorization: `Basic ${Buffer.from(auth).toString('base64')}` } : undefined,
+});
+if (!listed.ok) {
+  console.error(
+    `${base}/json/list returned ${listed.status}` +
+      (listed.status === 401 ? ' — pass --auth=user:pass (a debug build defaults to ai:ai).' : ''),
+  );
+  process.exit(1);
+}
+const pages = (await listed.json()).filter((t) => t.type === 'page');
 const chosen = pages.find((t) => (t.url + ' ' + t.title).toLowerCase().includes(match.toLowerCase()));
 if (!chosen) {
   console.error(`No page target matched "${match}". Available:`);

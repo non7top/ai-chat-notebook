@@ -8,7 +8,10 @@ images)**, lets them be named and filed into a folder tree by hand, and lets
 any saved conversation be **resumed** in an embedded browser panel, with the
 new turns saving straight back.
 
-See [project.md](project.md) for the original brief.
+See [project.md](project.md) for the original brief, and
+[docs/GLOSSARY.md](docs/GLOSSARY.md) for what the words mean — thread, entry,
+link, reading, orphan — since several of them name things that look alike and
+behave differently.
 
 The archive is the point, not a cache: once a conversation is here it should
 render fully with the network off.
@@ -184,24 +187,32 @@ For driving the app from outside — including inspecting the live AI Mode page
 without sitting at the machine — start it with a debugging port:
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\AI Chat Notebook\AIChatNotebook.exe" --devtools-port=9222
+& "$env:LOCALAPPDATA\Programs\AIChatNotebook\AIChatNotebook.exe" --devtools-port=9222
 ```
 
-Two things that make the obvious version of that command fail:
+`$env:LOCALAPPDATA` resolves the user's own profile, so never spell out a
+`C:\Users\<name>` path — it is wrong for everyone but the person who wrote it.
 
-- The executable is `AIChatNotebook.exe`, **not** `AI Chat Notebook.exe`.
-  `electron-builder.yml` pins `executableName` separately from `productName`,
-  so the install *directory* has spaces and the binary does not.
-- PowerShell needs the `&` call operator. Without it a quoted path is parsed
-  as a string expression rather than a command, and `--devtools-port=9222`
-  then trips "The '--' operator works only on variables or on properties".
-  `cmd.exe` does not need `&`.
-
-If the install directory was changed at install time, locate it with:
+`nsis.allowToChangeInstallationDirectory` is on, so that location is only the
+default. Find the real one rather than assuming:
 
 ```powershell
 Get-ChildItem "$env:LOCALAPPDATA\Programs","$env:PROGRAMFILES" -Filter AIChatNotebook.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
 ```
+
+Two things that make the obvious version of the launch command fail:
+
+- Neither the directory nor the executable uses the product name. Both are
+  `AIChatNotebook`, not `AI Chat Notebook`: `electron-builder.yml` pins
+  `executableName`, and NSIS derives the install directory from that rather
+  than from `productName`. This section previously documented a directory
+  *with* spaces, reasoned from `productName` in the config instead of from an
+  actual install. Read it off a real install — the packed NSIS script is not
+  visible to `strings` on the installer, so the config is not a substitute.
+- PowerShell needs the `&` call operator. Without it a quoted path is parsed
+  as a string expression rather than a command, and `--devtools-port=9222`
+  then trips "The '--' operator works only on variables or on properties".
+  `cmd.exe` does not need `&`.
 
 `NOTEBOOK_REMOTE_DEBUGGING_PORT=9222` does the same thing, for launches where
 setting an env var is easier than editing a shortcut. Either way the app prints

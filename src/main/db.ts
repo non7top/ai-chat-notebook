@@ -1,8 +1,17 @@
 import { DatabaseSync } from 'node:sqlite';
+import { hammingDistance, openingFingerprint, promptFingerprint } from '../shared/fingerprint.ts';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { ChatDetail, ChatSummary, Folder, Message } from '../shared/types';
+import type {
+  ChatDetail,
+  ChatScope,
+  ChatSummary,
+  Folder,
+  Message,
+  ScopeCounts,
+  TakeoutImportRow,
+} from '../shared/types';
 
 let db: DatabaseSync;
 let assetsDir: string;
@@ -98,6 +107,81 @@ export function initDb(userDataPath: string): void {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS assets_chat_sha ON assets(chat_id, sha256);
 
+    -- Every source record, preserved verbatim and never grouped, edited or
+    -- deduplicated. This is the durable layer: conversations are a CURATED VIEW
+    -- over these, so a wrong grouping is re-derivable without re-importing, and
+    -- a glue that turns out to join two separate conversations can be undone
+    -- without having lost either.
+    --
+    -- Learned the hard way. Every automatic grouping rule tried here was wrong
+    -- in at least one real case — collapsing distinct conversations that opened
+    -- alike, or discarding the second of two identical prompts entirely. Keeping
+    -- the originals means those mistakes cost a re-derivation rather than data.
+    CREATE TABLE IF NOT EXISTS source_entries (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      -- 'takeout' | 'capture' | 'harvest'
+      kind         TEXT NOT NULL,
+      -- Whatever the source calls it: a Google thread id, or opening+timestamp
+      -- for an export entry that carries no id at all.
+      external_ref TEXT NOT NULL,
+      query        TEXT,
+      query_key    TEXT,
+      occurred_at  TEXT,
+      href         TEXT,
+      -- The entry exactly as parsed: turns, image names, everything.
+      payload_json TEXT NOT NULL,
+      imported_at  TEXT NOT NULL,
+      UNIQUE(kind, external_ref)
+    );
+    CREATE INDEX IF NOT EXISTS source_entries_key ON source_entries(query_key);
+
+    -- Which source records a conversation was built from. Many-to-one, because
+    -- gluing several entries into one conversation is expected — and
+    -- many-to-many, because one entry can be evidence for two conversations
+    -- Google cloned apart.
+    --
+    -- linked_by records who made the link, and it is load-bearing rather than
+    -- descriptive. Re-importing the export has to be able to undo a grouping
+    -- its own earlier run got wrong, which means deleting links; but it must
+    -- never delete a link made by hand, because that is the gluing work the
+    -- whole design asks for. Only 'import' links are the importer's to remove.
+    CREATE TABLE IF NOT EXISTS chat_sources (
+      chat_id         INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+      source_entry_id INTEGER NOT NULL REFERENCES source_entries(id) ON DELETE CASCADE,
+      linked_by       TEXT NOT NULL DEFAULT 'import',
+      PRIMARY KEY (chat_id, source_entry_id)
+    );
+
+    -- Takeout entries. Deliberately NOT chats: an export carries no thread id,
+    -- so nothing in it can identify a conversation, and an importer that
+    -- created chats from it invented 736 of them out of 981 entries — mostly
+    -- individual turns wearing a conversation's clothes.
+    --
+    -- These are records of "a prompt was submitted at this exact time", which
+    -- is all Takeout actually knows. They then get matched to real
+    -- conversations where possible, and the ones that never match are the
+    -- interesting residue: prompts whose conversation Google has dropped.
+    CREATE TABLE IF NOT EXISTS activity (
+      id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+      query              TEXT NOT NULL,
+      -- Normalised hash of the query, the same function chats use, so the two
+      -- can be compared at all.
+      query_key          TEXT NOT NULL,
+      -- Keeps its original UTC offset. Normalising to UTC moved late-evening
+      -- conversations across midnight and showed the wrong day.
+      occurred_at        TEXT,
+      href               TEXT,
+      -- Where it landed, if anywhere. Both null means an orphan.
+      matched_chat_id    INTEGER REFERENCES chats(id) ON DELETE SET NULL,
+      matched_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+      -- How the match was made, so a weak one can be told from a strong one.
+      match_kind         TEXT,
+      -- One row per submission: the same prompt sent twice is two events.
+      UNIQUE(query_key, occurred_at)
+    );
+    CREATE INDEX IF NOT EXISTS activity_query_key ON activity(query_key);
+    CREATE INDEX IF NOT EXISTS activity_chat ON activity(matched_chat_id);
+
     CREATE TABLE IF NOT EXISTS settings (
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -109,7 +193,152 @@ export function initDb(userDataPath: string): void {
   // already holds harvested rows.
   ensureColumn('chats', 'list_rank', 'list_rank INTEGER');
   ensureColumn('chats', 'capture_attempts', 'capture_attempts INTEGER NOT NULL DEFAULT 0');
+  // Accumulates rather than overwrites: a conversation imported from Takeout
+  // and then extended from the panel has two provenances, and reporting only
+  // the latest hides where its content actually came from.
+  ensureColumn('chats', 'sources', 'sources TEXT');
+  // How many export entries were folded into this conversation. Grouping
+  // successive snapshots is correct, but doing it invisibly hides that three
+  // records were collapsed into one — and that is exactly where a wrong
+  // grouping would be spotted.
+  ensureColumn('chats', 'takeout_entries', 'takeout_entries INTEGER NOT NULL DEFAULT 0');
+  // Existing links predate the distinction and are all the importer's own, so
+  // 'import' is the correct default for them: nothing had been glued by hand
+  // before there was a way to do it.
+  ensureColumn('chat_sources', 'linked_by', "linked_by TEXT NOT NULL DEFAULT 'import'");
+  // How started_at was arrived at, because the dates in this archive are not
+  // equally trustworthy and a bare date hides that. 'takeout' came from the
+  // export, 'activity' from the activity log's own stamp, and 'placeholder' is
+  // the moment the app first stored the conversation — a stand-in for a date
+  // nothing knows, kept so a conversation captured from the panel is not
+  // undateable forever, and marked so it is never mistaken for the real thing.
+  // NULL means no date at all. Existing rows with a date got it from the export
+  // or the activity log, and 'takeout' is the honest default for them: nothing
+  // else could have written one before this column existed.
+  ensureColumn('chats', 'date_basis', 'date_basis TEXT');
+  // What an image is: 'generated', 'upload', or 'other' for a rich link
+  // preview, a source-card thumbnail, or anything else the page put inline.
+  //
+  // Left NULL for everything captured before this existed, and NULL counts as
+  // an image rather than as furniture. Backfilling it would mean guessing from
+  // the URL, and both uploads and freshly generated images arrive as data: URIs
+  // with no host to guess from — mislabelling a real generated image as a
+  // preview would be worse than the over-count it replaces. Re-capturing a
+  // conversation classifies its images properly.
+  ensureColumn('assets', 'kind', 'kind TEXT');
+  // Simhash of the thread's opening exchange, for matching one thread across
+  // sources. Stored on both sides — written here for panel captures and kept on
+  // each entry for the export — but nothing matches on it yet: a threshold
+  // trades false matches against missed ones, and with ~300 threads still
+  // uncaptured there are no real pairs to choose one against. Collecting it now
+  // is what makes that choice possible later.
+  ensureColumn('chats', 'text_fingerprint', 'text_fingerprint TEXT');
+  // What happened last time this thread's export link was opened.
+  //
+  // NULL means never tried, or tried and failed transiently — worth another go.
+  // 'rejected' means the page's answer did not match the export's, which is what
+  // a link that re-runs its prompt looks like, and that is a property of the link
+  // rather than of the moment: retrying gains nothing. Without this the queue
+  // never shrank on rejection, so every run walked the same links again.
+  ensureColumn('chats', 'link_state', 'link_state TEXT');
+  // Why, alongside what. Without it a failed fetch left a state and no account of
+  // itself, so there was no way to tell a timeout from a page that was not the
+  // thread.
+  ensureColumn('chats', 'link_note', 'link_note TEXT');
+  // A folder's colour and icon, so a thread can carry a visible mark of where it
+  // belongs. Without one, "which group is this in" is only answerable by
+  // clicking through the tree one folder at a time — and the list is where the
+  // question is actually asked.
+  //
+  // The colour is a palette KEY, not a hex value: the app owns the palette, so
+  // the swatches stay a set that works together and a stored folder cannot end
+  // up an unreadable colour against the row it sits on.
+  // Whether THIS RECORD's link has been pulled. Per entry, because the entry is
+  // the unit of work and the thread never was: the queue joined chats to entries,
+  // so it could only see records attached to a thread, it excluded any thread
+  // already read from the panel, and it counted one job per thread where a thread
+  // can hold several records each with its own link. It reported "1" while 380
+  // records had never been pulled.
+  //
+  // Backfilled below from the per-chat verdict, so the 1641 threads already
+  // pulled are not pulled again.
+  ensureColumn('source_entries', 'link_state', 'link_state TEXT');
+  db.exec(`
+    UPDATE source_entries SET link_state = (
+      SELECT c.link_state FROM chat_sources cs JOIN chats c ON c.id = cs.chat_id
+       WHERE cs.source_entry_id = source_entries.id
+         AND c.link_state IN ('fetched', 'rejected')
+       LIMIT 1)
+     WHERE link_state IS NULL
+       AND EXISTS (
+         SELECT 1 FROM chat_sources cs JOIN chats c ON c.id = cs.chat_id
+          WHERE cs.source_entry_id = source_entries.id
+            AND c.link_state IN ('fetched', 'rejected'));
+  `);
+  db.exec('CREATE INDEX IF NOT EXISTS entries_link_state ON source_entries(link_state);');
+  // A thread climbing Google's list is the only signal this archive gets that a
+  // conversation GREW. The sidebar is ordered by last activity, so an old thread
+  // that gained a turn appears above threads that have not changed — which means
+  // "what needs re-reading" is answerable without opening anything.
+  //
+  // moved_up_at is set when a harvest sees a thread at a better position than it
+  // held before, and cleared when its turns are next stored. So it means exactly
+  // "climbed since the last time we read it", which is the queue. prev_list_rank
+  // is kept beside it to say how far, because a jump from 280 to 3 and a nudge
+  // from 6 to 5 are not the same news.
+  ensureColumn('chats', 'prev_list_rank', 'prev_list_rank INTEGER');
+  ensureColumn('chats', 'moved_up_at', 'moved_up_at TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS chats_moved_up ON chats(moved_up_at) WHERE moved_up_at IS NOT NULL;');
+  ensureColumn('folders', 'color', 'color TEXT');
+  // One character, an emoji in practice. Not a fixed icon set — this archive is
+  // one person's topics, and any set chosen here would be the wrong set.
+  ensureColumn('folders', 'icon', 'icon TEXT');
+  db.exec("UPDATE chats SET date_basis = 'takeout' WHERE started_at IS NOT NULL AND date_basis IS NULL");
+  // Threads listed before harvest stamped a placeholder. They have no date at
+  // all, so the sort files them below everything — the bottom of a 2863-row
+  // list, which is indistinguishable from not being there.
+  //
+  // last_seen_at rather than now: it is when the app actually saw the thread,
+  // and stamping a row created weeks ago with today's date would be a worse
+  // guess than the one already available. Marked 'placeholder', so it reads as
+  // a stand-in and any real date still overwrites it.
+  db.exec(
+    `UPDATE chats SET started_at = last_seen_at, date_basis = 'placeholder'
+      WHERE started_at IS NULL AND last_seen_at IS NOT NULL`,
+  );
   db.exec('CREATE INDEX IF NOT EXISTS chats_list_rank ON chats(list_rank);');
+
+  // Whether a turn's markup still carries a base64 image. NULL means not yet
+  // examined.
+  //
+  // This exists because the question "how many turns still hold inline images"
+  // was answered by LIKE '%data:image%' over messages.html — and that column is
+  // most of a 959MB file. node:sqlite is synchronous, so the scan ran on the
+  // main process's only thread: measured at 79 seconds cold, and it sat on the
+  // startup path, which is what the dead window on launch was. Answered from an
+  // index instead, it is immediate.
+  ensureColumn('messages', 'has_inline', 'has_inline INTEGER');
+  db.exec('CREATE INDEX IF NOT EXISTS messages_has_inline ON messages(has_inline);');
+  // Maintained by trigger rather than at each write site, because there are four
+  // of them — three inserts and the repair pass's rewrite — and a count that
+  // silently stops matching reality is worse than no count at all. A trigger
+  // cannot be forgotten by a fifth.
+  //
+  // The inner UPDATE sets has_inline, not html, so the AFTER UPDATE OF html
+  // trigger cannot re-fire on its own write; recursive_triggers is off by
+  // default regardless.
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS messages_inline_flag_ins
+    AFTER INSERT ON messages BEGIN
+      UPDATE messages SET has_inline = COALESCE(NEW.html LIKE '%data:image%', 0)
+       WHERE id = NEW.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS messages_inline_flag_upd
+    AFTER UPDATE OF html ON messages BEGIN
+      UPDATE messages SET has_inline = COALESCE(NEW.html LIKE '%data:image%', 0)
+       WHERE id = NEW.id;
+    END;
+  `);
 
   fts5Available = probeFts5(db);
   // Logged rather than assumed: which SQLite build Electron ships changes
@@ -124,6 +353,243 @@ export function initDb(userDataPath: string): void {
   fs.mkdirSync(assetsDir, { recursive: true });
 }
 
+/** Adds a contributing source without losing the ones already recorded. */
+/** Exported as noteChatSource for callers outside this module. */
+export function noteChatSource(chatId: number, source: string): void {
+  noteSource(chatId, source);
+}
+
+function noteSource(chatId: number, source: string): void {
+  const row = db.prepare('SELECT sources FROM chats WHERE id = ?').get(chatId) as unknown as
+    | { sources: string | null }
+    | undefined;
+  const set = new Set((row?.sources ?? '').split(',').filter(Boolean));
+  set.add(source);
+  db.prepare('UPDATE chats SET sources = ? WHERE id = ?').run([...set].join(','), chatId);
+}
+
+/**
+ * A stored asset as a relative "assets/..." path, or null.
+ *
+ * Returns null for anything not actually inside the assets directory. Such a
+ * path would come back with leading ".." segments and, resolved against the
+ * assets base in the renderer, would point outside the archive entirely — so
+ * the answer to "where is this image" becomes "somewhere else on this disk".
+ * Nothing should produce one; that is the reason to refuse it here rather than
+ * assume it cannot happen.
+ */
+export function assetHrefForPath(localPath: string): string {
+  return assetHrefFor(localPath) ?? '';
+}
+
+function assetHrefFor(localPath: string | null): string | null {
+  if (!localPath) return null;
+  const relative = path.relative(getAssetsDir(), localPath).split(path.sep).join('/');
+  if (relative === '' || relative.startsWith('../')) return null;
+  return `assets/${relative}`;
+}
+
+/**
+ * Writes a consistent snapshot of the archive to a directory.
+ *
+ * The reason this exists is the reason the whole app does: the source of this
+ * data is a cloud history that prunes and rewrites itself, and an archive that
+ * cannot be copied out is one more single point of failure rather than a defence
+ * against one.
+ *
+ * VACUUM INTO rather than copying the file. The database is open and being
+ * written to; a byte copy of a live SQLite file can land mid-transaction and
+ * produce something that opens and is subtly wrong, which is the worst possible
+ * outcome for a backup. VACUUM INTO takes a read transaction and writes a
+ * complete, defragmented database — and it refuses rather than overwriting, so a
+ * backup can never silently clobber an older one.
+ *
+ * Assets are copied beside it, because a database of conversations whose images
+ * live somewhere else is not a backup of the conversations.
+ */
+export interface ArchiveProgress {
+  phase: 'database' | 'counting' | 'copying' | 'done';
+  done: number;
+  total: number;
+}
+
+export async function exportArchive(
+  destDir: string,
+  onProgress?: (progress: ArchiveProgress) => void,
+): Promise<{ dbBytes: number; assetFiles: number; assetBytes: number }> {
+  fs.mkdirSync(destDir, { recursive: true });
+  const dbPath = path.join(destDir, 'notebook.sqlite');
+  if (fs.existsSync(dbPath)) {
+    throw new Error(
+      `${dbPath} already exists. Pick an empty folder — refusing to overwrite an existing backup.`,
+    );
+  }
+
+  onProgress?.({ phase: 'database', done: 0, total: 0 });
+  // Yielded before the blocking call so the phase actually paints. VACUUM INTO
+  // cannot be broken up — node:sqlite is synchronous — but it is seconds, where
+  // the asset copy below is minutes.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  // The path is interpolated because VACUUM INTO takes no parameters. Quotes are
+  // doubled, which is SQLite's own escape for a string literal, so a folder name
+  // containing an apostrophe cannot end the statement early.
+  db.exec(`VACUUM INTO '${dbPath.replace(/'/g, "''")}'`);
+
+  const assetsSource = getAssetsDir();
+  const assetsDest = path.join(destDir, 'assets');
+  let assetFiles = 0;
+  let assetBytes = 0;
+
+  if (fs.existsSync(assetsSource)) {
+    onProgress?.({ phase: 'counting', done: 0, total: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Enumerated first so the copy has a total to report against. An archive of
+    // image generation runs to thousands of files, and "copying…" with no
+    // denominator is the same unhelpful silence as no message at all.
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, item.name);
+        if (item.isDirectory()) walk(full);
+        else files.push(full);
+      }
+    };
+    walk(assetsSource);
+
+    // Copied in batches with the thread handed back between them. cpSync over
+    // the whole tree froze every window for the duration — synchronous work in
+    // the main process blocks the compositor, so the app was not slow, it was
+    // unresponsive with nothing on screen to say why.
+    const BATCH = 200;
+    for (let i = 0; i < files.length; i += BATCH) {
+      for (const file of files.slice(i, i + BATCH)) {
+        const relative = path.relative(assetsSource, file);
+        const target = path.join(assetsDest, relative);
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.copyFileSync(file, target);
+        assetFiles += 1;
+        assetBytes += fs.statSync(target).size;
+      }
+      onProgress?.({ phase: 'copying', done: assetFiles, total: files.length });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  const counts = db
+    .prepare(
+      `SELECT (SELECT COUNT(*) FROM chats) AS chats,
+              (SELECT COUNT(*) FROM messages) AS messages,
+              (SELECT COUNT(*) FROM assets) AS assets,
+              (SELECT COUNT(*) FROM source_entries) AS entries,
+              (SELECT COUNT(*) FROM folders) AS folders`,
+    )
+    .get() as unknown as Record<string, number>;
+
+  // Written last, so its presence means the copy finished. A restore checks for
+  // it before touching anything, which is what stops a half-written backup from
+  // being restored over a good archive.
+  fs.writeFileSync(
+    path.join(destDir, 'manifest.json'),
+    `${JSON.stringify(
+      {
+        format: 'ai-chat-notebook-archive',
+        version: 1,
+        writtenAt: new Date().toISOString(),
+        counts,
+        assetFiles,
+        assetBytes,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+
+  onProgress?.({ phase: 'done', done: assetFiles, total: assetFiles });
+  return { dbBytes: fs.statSync(dbPath).size, assetFiles, assetBytes };
+}
+
+/**
+ * Restores a snapshot, keeping the archive it replaces.
+ *
+ * The current database and assets are MOVED aside rather than deleted, into a
+ * timestamped folder beside them. A restore is the one operation here that can
+ * destroy more than it repairs, and the person doing it is by definition already
+ * having a bad day.
+ *
+ * The caller must reopen the database afterwards: the handle is closed here
+ * because a file cannot be replaced underneath an open SQLite connection and
+ * have the connection notice.
+ */
+export async function importArchive(
+  srcDir: string,
+  userDataPath: string,
+  onProgress?: (progress: ArchiveProgress) => void,
+): Promise<{ movedTo: string }> {
+  const manifestPath = path.join(srcDir, 'manifest.json');
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error(`No manifest.json in ${srcDir} — that is not an archive folder.`);
+  }
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as { format?: string };
+  if (manifest.format !== 'ai-chat-notebook-archive') {
+    throw new Error(`${manifestPath} is not an archive manifest.`);
+  }
+  const incomingDb = path.join(srcDir, 'notebook.sqlite');
+  if (!fs.existsSync(incomingDb)) throw new Error(`No notebook.sqlite in ${srcDir}.`);
+
+  // Opened read-only first as a sanity check. Restoring a corrupt file over a
+  // working archive would turn a backup into the thing it was meant to prevent.
+  const probe = new DatabaseSync(incomingDb, { readOnly: true });
+  try {
+    probe.prepare('SELECT COUNT(*) AS n FROM chats').get();
+  } finally {
+    probe.close();
+  }
+
+  db.close();
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const asideDir = path.join(userDataPath, `replaced-${stamp}`);
+  fs.mkdirSync(asideDir, { recursive: true });
+  const currentDb = path.join(userDataPath, 'notebook.sqlite');
+  if (fs.existsSync(currentDb)) fs.renameSync(currentDb, path.join(asideDir, 'notebook.sqlite'));
+  const currentAssets = getAssetsDir();
+  if (fs.existsSync(currentAssets)) fs.renameSync(currentAssets, path.join(asideDir, 'assets'));
+
+  onProgress?.({ phase: 'database', done: 0, total: 0 });
+  fs.copyFileSync(incomingDb, currentDb);
+
+  const incomingAssets = path.join(srcDir, 'assets');
+  if (fs.existsSync(incomingAssets)) {
+    // Batched for the same reason as the backup: cpSync over thousands of files
+    // blocks the main process, which blocks every window, and a restore is
+    // exactly the moment a frozen app is least welcome.
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, item.name);
+        if (item.isDirectory()) walk(full);
+        else files.push(full);
+      }
+    };
+    walk(incomingAssets);
+
+    const BATCH = 200;
+    let done = 0;
+    for (let i = 0; i < files.length; i += BATCH) {
+      for (const file of files.slice(i, i + BATCH)) {
+        const target = path.join(currentAssets, path.relative(incomingAssets, file));
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.copyFileSync(file, target);
+        done += 1;
+      }
+      onProgress?.({ phase: 'copying', done, total: files.length });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  onProgress?.({ phase: 'done', done: 0, total: 0 });
+  return { movedTo: asideDir };
+}
+
 export function getAssetsDir(): string {
   return assetsDir;
 }
@@ -135,17 +601,23 @@ interface FolderRow {
   parent_id: number | null;
   name: string;
   position: number;
+  color: string | null;
+  icon: string | null;
 }
 
 export function listFolders(): Folder[] {
   const rows = db
-    .prepare('SELECT id, parent_id, name, position FROM folders ORDER BY position, name')
+    .prepare(
+      'SELECT id, parent_id, name, position, color, icon FROM folders ORDER BY position, name',
+    )
     .all() as unknown as FolderRow[];
   return rows.map((row) => ({
     id: row.id,
     parentId: row.parent_id,
     name: row.name,
     position: row.position,
+    color: row.color ?? null,
+    icon: row.icon ?? null,
   }));
 }
 
@@ -153,7 +625,42 @@ export function createFolder(parentId: number | null, name: string): Folder {
   const { lastInsertRowid } = db
     .prepare('INSERT INTO folders (parent_id, name, created_at) VALUES (?, ?, ?)')
     .run(parentId, name, new Date().toISOString());
-  return { id: Number(lastInsertRowid), parentId, name, position: 0 };
+  return { id: Number(lastInsertRowid), parentId, name, position: 0, color: null, icon: null };
+}
+
+/**
+ * A folder's colour and icon, both optional and both clearable.
+ *
+ * The colour is checked against the palette rather than stored as given. It ends
+ * up in a CSS custom property on a row, and an arbitrary string reaching that is
+ * both a styling escape and a way to make a folder invisible against its own
+ * background.
+ */
+export const FOLDER_COLORS = [
+  'slate',
+  'red',
+  'amber',
+  'green',
+  'teal',
+  'blue',
+  'violet',
+  'pink',
+] as const;
+
+export function setFolderStyle(
+  id: number,
+  color: string | null,
+  icon: string | null,
+): void {
+  if (color !== null && !FOLDER_COLORS.includes(color as (typeof FOLDER_COLORS)[number])) {
+    throw new Error(`${color} is not one of the folder colours`);
+  }
+  // One character as the user sees it, which is not one JavaScript char: an
+  // emoji is a surrogate pair, and several are a pair plus a modifier. Counted
+  // by code point, and capped rather than rejected so a paste of something long
+  // becomes its first glyph instead of an error.
+  const trimmed = icon === null ? null : [...icon.trim()].slice(0, 2).join('') || null;
+  db.prepare('UPDATE folders SET color = ?, icon = ? WHERE id = ?').run(color, trimmed, id);
 }
 
 export function renameFolder(id: number, name: string): void {
@@ -198,10 +705,20 @@ interface ChatSummaryRow {
   folder_id: number | null;
   title: string;
   started_at: string | null;
+  date_basis: string | null;
   last_seen_at: string;
   message_count: number;
   image_count: number;
+  preview_count: number;
+  title_image: string | null;
   capture_attempts: number;
+  source: string;
+  sources: string;
+  alt_turns: number | null;
+  takeout_entries: number;
+  folder_name: string | null;
+  folder_color: string | null;
+  folder_icon: string | null;
 }
 
 // COALESCE order is the display rule in one place: a title typed by hand wins
@@ -210,13 +727,68 @@ interface ChatSummaryRow {
 const CHAT_TITLE_SQL = "COALESCE(NULLIF(user_title, ''), NULLIF(title, ''), '(untitled)')";
 
 const CHAT_SUMMARY_SQL = `
-  SELECT c.id, c.folder_id, ${CHAT_TITLE_SQL} AS title, c.started_at, c.last_seen_at,
-         c.capture_attempts,
+  SELECT c.id, c.folder_id, ${CHAT_TITLE_SQL} AS title, c.started_at, c.date_basis,
+         c.last_seen_at,
+         c.capture_attempts, c.source, COALESCE(c.sources, c.source) AS sources,
+         -- Turn count of the other reading, when one was kept, so a
+         -- disagreement between Takeout and the panel is visible instead of
+         -- being resolved out of sight.
+         (SELECT COUNT(*) FROM json_each(json_extract(c.raw_json, '$.takeout.turns'))) AS alt_turns,
+         c.takeout_entries,
          (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS message_count,
          -- DISTINCT sha256, not row count: every image is rendered twice by the
          -- page, so counting asset rows would report double.
-         (SELECT COUNT(DISTINCT a.sha256) FROM assets a WHERE a.chat_id = c.id) AS image_count
+         -- The conversation's own images. NULL kind is included: it means
+         -- "captured before kinds existed", not "furniture".
+         (SELECT COUNT(DISTINCT a.sha256) FROM assets a
+           WHERE a.chat_id = c.id
+             AND (a.kind IS NULL OR a.kind IN ('generated', 'upload', 'takeout')))
+           AS image_count,
+         -- Rich previews and source thumbnails. Kept, since nothing is
+         -- discarded, but counted apart so 17 previews never read as 17 images.
+         (SELECT COUNT(DISTINCT a.sha256) FROM assets a
+           WHERE a.chat_id = c.id AND a.kind = 'other') AS preview_count,
+         -- link_count is NOT here. It counts anchors by REPLACE over
+         -- messages.html, and that column holds 105MB — so computing it per row
+         -- meant every list query scanned the whole of it, and switching folders
+         -- locked the window for five seconds. Only the reader shows the number,
+         -- and the reader looks at one thread; getChat computes it there.
+         -- The image the conversation STARTED with, for the list thumbnail.
+         -- Two restrictions, and an earlier version had neither, which is why
+         -- conversations that begin with text were showing an unrelated picture:
+         --
+         -- 1. The opening turn pair only (seq 0 or 1) — the question's own
+         --    upload, or the first picture generated in answer to it. Taking
+         --    the earliest image anywhere meant a conversation whose seventh
+         --    answer happened to contain a picture was represented by it.
+         -- 2. Not a KNOWN preview. Unknown kinds are allowed, which reverses
+         --    an earlier decision: requiring a known kind meant that in practice
+         --    nothing qualified, because every image captured before the column
+         --    existed is NULL and that is most of the archive. Refusing to guess
+         --    produced no thumbnails at all, which is a worse answer than the
+         --    occasional wrong one. Restriction 1 carries the weight here — a
+         --    favicon in the opening turn is rare, where favicons ten turns deep
+         --    are the norm — and re-capturing a thread classifies its images
+         --    properly.
+         --
+         -- Export images have no turn to sit in, and are allowed on their own
+         -- terms: an entry that shipped a single image is exactly the case this
+         -- is for, and 'takeout' says what it is.
+         (SELECT a.local_path FROM assets a
+            LEFT JOIN messages m ON m.id = a.message_id
+           WHERE a.chat_id = c.id
+             AND COALESCE(a.kind, 'unknown') <> 'other'
+             AND (a.message_id IS NULL OR m.seq <= 1)
+           ORDER BY COALESCE(m.seq, -1) ASC, a.id ASC
+           LIMIT 1) AS title_image,
+         -- The folder this thread is in, so the list can show where it belongs.
+         -- A LEFT JOIN on a primary key over a handful of folder rows, NOT a
+         -- correlated subquery — the last per-row lookup added here scanned
+         -- 105MB of stored answers and locked the window for five seconds on
+         -- every folder switch.
+         f.name AS folder_name, f.color AS folder_color, f.icon AS folder_icon
   FROM chats c
+  LEFT JOIN folders f ON f.id = c.folder_id
 `;
 
 function toSummary(row: ChatSummaryRow): ChatSummary {
@@ -225,29 +797,127 @@ function toSummary(row: ChatSummaryRow): ChatSummary {
     folderId: row.folder_id,
     title: row.title,
     startedAt: row.started_at,
+    dateBasis: row.date_basis,
     lastSeenAt: row.last_seen_at,
     messageCount: row.message_count,
     imageCount: row.image_count,
+    previewCount: row.preview_count,
+    // Zero in a summary. The list does not show it, and finding out costs a scan
+    // of every stored answer — see the note in CHAT_SUMMARY_SQL.
+    linkCount: 0,
+    // Relative, matching what is stored in turn HTML, so the renderer resolves
+    // both the same way against the real assets directory.
+    titleImage: assetHrefFor(row.title_image),
     captureAttempts: row.capture_attempts,
+    source: row.source,
+    sources: row.sources,
+    altTurnCount: row.alt_turns ?? 0,
+    takeoutEntryCount: row.takeout_entries ?? 0,
+    folderName: row.folder_name ?? null,
+    folderColor: row.folder_color ?? null,
+    folderIcon: row.folder_icon ?? null,
   };
 }
 
-export type ChatScope = { kind: 'all' } | { kind: 'unfiled' } | { kind: 'folder'; id: number };
+// Re-exported rather than redeclared: the duplicate definition here drifted
+// from the shared one the moment a scope was added, and the two disagreeing is
+// exactly the kind of mismatch the type checker cannot see across an IPC hop.
+export type { ChatScope };
+
+/**
+ * How many threads each scope holds, in one call.
+ *
+ * The tree named five scopes and put a number on none of them, so "Unfiled" and
+ * "All threads" were two rows that looked the same and listed nearly the same
+ * 2848 conversations — nothing on screen said that 2846 of them were unfiled,
+ * which is the single most useful fact about this archive's state.
+ *
+ * Every count here uses the SAME predicate as the query that fills the pane it
+ * labels — merged_into IS NULL, and the scope's own clause. A count that
+ * disagrees with the list it sits beside is worse than no count, because the
+ * list is then the thing that looks wrong.
+ *
+ * One round trip rather than one per row: it is called on every reload, and six
+ * synchronous IPC hops on the main thread is how the last performance complaint
+ * started. All of it is over `chats` — 2848 rows, indexed — and measured under a
+ * millisecond.
+ */
+export function scopeCounts(): ScopeCounts {
+  const one = (sql: string): number =>
+    Number((db.prepare(sql).get() as unknown as { n: number }).n ?? 0);
+  const live = 'FROM chats c WHERE c.merged_into IS NULL';
+  const byFolder: Record<number, number> = {};
+  const rows = db
+    .prepare(
+      `SELECT c.folder_id AS folderId, COUNT(*) AS n ${live}
+         AND c.folder_id IS NOT NULL GROUP BY c.folder_id`,
+    )
+    .all() as unknown as { folderId: number; n: number }[];
+  for (const row of rows) byFolder[row.folderId] = Number(row.n);
+  return {
+    all: one(`SELECT COUNT(*) AS n ${live}`),
+    unfiled: one(`SELECT COUNT(*) AS n ${live} AND c.folder_id IS NULL`),
+    filed: one(`SELECT COUNT(*) AS n ${live} AND c.folder_id IS NOT NULL`),
+    empty: one(
+      `SELECT COUNT(*) AS n ${live}
+         AND NOT EXISTS (SELECT 1 FROM messages m2 WHERE m2.chat_id = c.id)`,
+    ),
+    // Entries, not threads — counted from the entry side for the same reason
+    // listChats returns nothing for that scope: they are a different kind of
+    // thing and the pane that shows them is a different pane.
+    orphans: one(
+      `SELECT COUNT(*) AS n FROM source_entries e
+        WHERE NOT EXISTS (SELECT 1 FROM chat_sources cs WHERE cs.source_entry_id = e.id)`,
+    ),
+    byFolder,
+  };
+}
 
 export function listChats(scope: ChatScope): ChatSummary[] {
   // merged_into IS NULL everywhere: a chat merged away is kept (so the merge
   // stays undoable) but must not show up as a separate conversation.
   const base = `${CHAT_SUMMARY_SQL} WHERE c.merged_into IS NULL`;
-  // Google's sidebar is ordered by recent activity, and the harvester walks it
-  // top to bottom, so list_rank preserves that order — the only recency
-  // information that exists, since no timestamp is rendered anywhere.
+  // Newest first, by the thread's own date — now that threads HAVE dates.
   //
-  // Ordering by last_seen_at instead looked random: a bulk harvest writes
-  // essentially the same timestamp to all 300 rows, leaving the sort with
-  // nothing to distinguish them. Rows with no rank yet (hand-seeded, or
-  // captured live) sort last rather than jumbling in among the ranked ones.
-  const order =
-    ' ORDER BY CASE WHEN c.list_rank IS NULL THEN 1 ELSE 0 END, c.list_rank ASC, c.last_seen_at DESC';
+  // This used to order by list_rank alone, Google's sidebar position, because
+  // that was the only recency signal in existence: no timestamp was rendered
+  // anywhere and a bulk harvest stamped last_seen_at identically across 300
+  // rows. Both premises are now false. The export dates a thread to the second,
+  // the panel to the day, and once dates are on screen an order that ignores
+  // them reads as sorted backwards — which is what it looked like.
+  //
+  // A placeholder date sorts as a date, like every other kind.
+  //
+  // It used to be excluded from the first key, on the reasoning that "the app
+  // saved this today" should not outrank a genuinely recent thread. The
+  // consequence was the opposite of what anyone wants: a thread just harvested
+  // has no date yet, so it went below all 2800 dated ones — the newest rows in
+  // the archive sorted last, at position 2820.
+  //
+  // And the reasoning was weak anyway. A thread with no date is one nothing knows
+  // the date of, so any position is a guess; "when it was first seen" is the best
+  // guess available and it matches what a person expects of a list they just added
+  // to. The faint italic "saved" on those rows is what keeps the guess honest —
+  // the uncertainty belongs in the label, not in the ordering.
+  const order = `
+    ORDER BY CASE WHEN c.started_at IS NULL THEN 1 ELSE 0 END,
+             -- As an INSTANT, not as text. The archive holds three date shapes at
+             -- once — measured: 2024 threads with a +hh:mm offset, 830 in UTC
+             -- with a trailing Z, and 18 with no zone at all — because the export
+             -- carries local offsets while every date this app writes itself is
+             -- toISOString. Compared as strings, '...T11:22:53.000Z' sorts BEFORE
+             -- '...T18:22:53+07:00' even though they are the same moment, so a
+             -- thread could sit up to seven hours from where it belongs.
+             --
+             -- strftime resolves all three to the same epoch; verified against
+             -- the real archive, where that pair both give 1779708173.
+             CAST(strftime('%s', c.started_at) AS INTEGER) DESC,
+             -- Kept as a tie-break for anything strftime cannot parse, which it
+             -- returns NULL for rather than failing.
+             c.started_at DESC,
+             CASE WHEN c.list_rank IS NULL THEN 1 ELSE 0 END,
+             c.list_rank ASC,
+             c.last_seen_at DESC`;
 
   if (scope.kind === 'all') {
     return (db.prepare(base + order).all() as unknown as ChatSummaryRow[]).map(toSummary);
@@ -255,6 +925,33 @@ export function listChats(scope: ChatScope): ChatSummary[] {
   if (scope.kind === 'unfiled') {
     return (
       db.prepare(`${base} AND c.folder_id IS NULL${order}`).all() as unknown as ChatSummaryRow[]
+    ).map(toSummary);
+  }
+  // The counterpart, and the reason it exists: with 2846 of 2848 threads
+  // unfiled, "All threads" and "Unfiled" show near-identical lists, so neither
+  // answers "what have I actually organised". A folder answers it one folder at
+  // a time, which is not the same question.
+  if (scope.kind === 'filed') {
+    return (
+      db.prepare(`${base} AND c.folder_id IS NOT NULL${order}`).all() as unknown as ChatSummaryRow[]
+    ).map(toSummary);
+  }
+  // Orphans are raw entries, not conversations — they are listed by
+  // orphanSourceEntries and rendered on their own. Returning nothing here
+  // matters: without this branch the scope fell through to the folder query
+  // and `scope.id` was undefined, which quietly matched no rows and looked
+  // like "no orphans" rather than "wrong query".
+  if (scope.kind === 'orphans') return [];
+  // Threads the app knows of but holds nothing for. Ordered like the rest, so
+  // the ones Google listed most recently come first — those are the ones a
+  // capture is most likely to still find.
+  if (scope.kind === 'empty') {
+    return (
+      db
+        .prepare(
+          `${base} AND NOT EXISTS (SELECT 1 FROM messages m2 WHERE m2.chat_id = c.id)${order}`,
+        )
+        .all() as unknown as ChatSummaryRow[]
     ).map(toSummary);
   }
   return (
@@ -290,16 +987,108 @@ export function getChat(id: number): ChatDetail | null {
     html: m.html,
   }));
 
+  // Which of this thread's images are page furniture rather than content.
+  //
+  // The reader renders the stored HTML and cannot tell one <img> from another,
+  // so a rich link preview came out at its natural size — a thread with thirteen
+  // of them was mostly a column of giant YouTube buttons with the answer
+  // squeezed between them. The kinds are known here, so the reader is told which
+  // paths to render small.
+  //
+  // BOUNDED BY SIZE as well as kind, and only as a fallback — the reader now
+  // decides from Google's own markup (img.IpiY3d) and consults this list only for
+  // images the markup said nothing about.
+  //
+  // 'other' is where everything unrecognised lands: 43,682 of 46,814 assets, with
+  // a median of 2,172 bytes. Handing that whole bucket to the reader as "page
+  // furniture" shrank 93% of the archive's pictures to the size of a letter. The
+  // 4KB bound keeps the favicons it was meant for — 35,430 of them are under it —
+  // and stops it claiming the 2,359 images above 12KB that are plainly content.
+  const previewPaths = (
+    db
+      .prepare(
+        "SELECT local_path FROM assets WHERE chat_id = ? AND kind = 'other' AND bytes < 4096",
+      )
+      .all(id) as unknown as { local_path: string }[]
+  )
+    .map((a) => assetHrefFor(a.local_path))
+    .filter((href): href is string => href !== null);
+
+  // Images that belong to the thread but to no turn in it.
+  //
+  // The export puts its images in a cell BESIDE the conversation rather than
+  // inside a turn, so there is nothing in any turn's HTML that references them
+  // and no honest way to say which exchange they came from. They were being
+  // stored, counted, and then never shown — which is the same as losing them from
+  // a reader's point of view. Rendered as the thread's own strip instead, with
+  // the reader saying plainly that their position is unknown.
+  const unplacedImagePaths = (
+    db
+      .prepare(
+        `SELECT local_path FROM assets
+          WHERE chat_id = ? AND message_id IS NULL
+            AND (kind IS NULL OR kind IN ('takeout', 'generated', 'upload'))
+          ORDER BY id`,
+      )
+      .all(id) as unknown as { local_path: string }[]
+  )
+    .map((a) => assetHrefFor(a.local_path))
+    .filter((href): href is string => href !== null);
+
+  // Counted here, for this one thread, rather than for every row of every list.
+  const linkCount = Number(
+    (
+      db
+        .prepare(
+          `SELECT COALESCE(SUM(
+                    (LENGTH(html) - LENGTH(REPLACE(LOWER(html), '<a ', ''))) / 3
+                  ), 0) AS n
+             FROM messages WHERE chat_id = ?`,
+        )
+        .get(id) as unknown as { n: number }
+    ).n,
+  );
+
   return {
     ...toSummary(row),
+    linkCount,
     externalId: extra?.external_id ?? '',
     url: extra?.url ?? null,
     messages,
+    previewPaths,
+    unplacedImagePaths,
   };
 }
 
-export function setChatFolder(chatId: number, folderId: number | null): void {
-  db.prepare('UPDATE chats SET folder_id = ? WHERE id = ?').run(folderId, chatId);
+/**
+ * Files threads into a folder, or out of every folder when folderId is null.
+ *
+ * Takes a list rather than one id because filing is the point of this app and
+ * one-at-a-time was the whole of it: 2846 of 2848 threads sat unfiled, which is
+ * what a workflow of one drag per thread produces. Selecting a hundred rows and
+ * moving them has to be one statement and one transaction, not a hundred IPC
+ * round trips each with its own commit.
+ */
+export function setChatsFolder(chatIds: number[], folderId: number | null): number {
+  if (chatIds.length === 0) return 0;
+  // Ids are numbers from this app's own list, but they are interpolated into
+  // SQL, so they are checked rather than trusted — a non-integer here would be
+  // an injection point in the one query that takes a variable-length list.
+  const ids = chatIds.filter((id) => Number.isSafeInteger(id));
+  if (ids.length !== chatIds.length) {
+    throw new Error('setChatsFolder was given something that is not a thread id');
+  }
+  db.exec('BEGIN');
+  try {
+    const { changes } = db
+      .prepare(`UPDATE chats SET folder_id = ? WHERE id IN (${ids.join(',')})`)
+      .run(folderId);
+    db.exec('COMMIT');
+    return Number(changes);
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 export function setChatTitle(chatId: number, userTitle: string): void {
@@ -331,6 +1120,30 @@ function contentKeyFor(title: string): string {
  * Records a thread seen in the history list. Turns are not captured here — a
  * list harvest only learns that a conversation exists and what it is called.
  */
+/**
+ * A placeholder date that preserves Google's own ordering.
+ *
+ * One timestamp for a whole run would make every thread in it tie, and the
+ * sort's next key is list_rank — so that would work too. It does not survive
+ * contact with reality: the dates get stamped a few milliseconds apart, ties
+ * never form, and started_at DESC decides first. Worse, it decides BACKWARDS.
+ * Rank 0 is the newest thread and gets written first, so it ends up with the
+ * EARLIEST timestamp and sorts last within the group. Measured on nine threads
+ * from one refresh: Google's ranks 0..8 came out at list positions 8..0,
+ * exactly inverted.
+ *
+ * So the rank is subtracted from the stamp: rank 0 keeps the moment of the run,
+ * rank 1 is a second older, and plain started_at DESC reproduces the sidebar.
+ *
+ * A second per rank is arbitrary but not meaningless — the spacing IS the
+ * ordering, and these dates are stand-ins whose only job is to put a thread in
+ * the right place until a real date arrives. Even a 300-thread sidebar spreads
+ * over five minutes, so they all still read as the same moment.
+ */
+function placeholderForRank(now: string, listRank: number): string {
+  return new Date(Date.parse(now) - listRank * 1000).toISOString();
+}
+
 export function upsertThreadFromList(
   externalId: string,
   title: string,
@@ -339,8 +1152,10 @@ export function upsertThreadFromList(
 ): UpsertResult {
   const now = new Date().toISOString();
   const existing = db
-    .prepare('SELECT id, title FROM chats WHERE external_id = ?')
-    .get(externalId) as unknown as { id: number; title: string | null } | undefined;
+    .prepare('SELECT id, title, list_rank FROM chats WHERE external_id = ?')
+    .get(externalId) as unknown as
+    | { id: number; title: string | null; list_rank: number | null }
+    | undefined;
 
   if (existing) {
     // last_seen_at moves on every sighting; title is refreshed in case Google
@@ -348,18 +1163,56 @@ export function upsertThreadFromList(
     // must survive re-harvesting.
     // list_rank is refreshed too: a thread that gained a turn moves to the top
     // of Google's list, and that reordering is the whole change signal.
-    db.prepare(
-      'UPDATE chats SET title = ?, url = ?, last_seen_at = ?, list_rank = ? WHERE id = ?',
-    ).run(title, url, now, listRank, existing.id);
+    // A better position than last time means activity since last time. Recorded
+    // rather than acted on here: what to do about it is the caller's business,
+    // and a harvest must stay a harvest.
+    //
+    // Only a strict improvement counts. Equal is no news, and worse is just other
+    // threads moving above it — every thread below an active one drifts down
+    // without anything happening to it, so treating that as a change would flag
+    // most of the list every time.
+    const climbed = existing.list_rank !== null && listRank < existing.list_rank;
+    if (climbed) {
+      db.prepare(
+        `UPDATE chats SET title = ?, url = ?, last_seen_at = ?, list_rank = ?,
+                          prev_list_rank = ?, moved_up_at = ?
+          WHERE id = ?`,
+      ).run(title, url, now, listRank, existing.list_rank, now, existing.id);
+    } else {
+      db.prepare(
+        'UPDATE chats SET title = ?, url = ?, last_seen_at = ?, list_rank = ? WHERE id = ?',
+      ).run(title, url, now, listRank, existing.id);
+    }
     return { created: false, titleChanged: (existing.title ?? '') !== title };
   }
 
+  // Dated on the spot, as a placeholder, for the same reason replaceTurns does
+  // it — and it was missing here, which put every newly listed thread at the
+  // BOTTOM of the list until something captured it.
+  //
+  // The sort puts undated rows last. A thread that has just appeared in Google's
+  // sidebar is the newest thing in the archive, and it landed below 2854 dated
+  // ones, where nobody would look for it. It climbed to the top later, when
+  // capture finally stamped a date — so the fix already existed one function
+  // away and this was the only path that skipped it.
+  //
+  // Safe against the real date arriving later: every path that writes a Takeout
+  // or panel date overwrites date_basis = 'placeholder' explicitly.
   db.prepare(
     `INSERT INTO chats
-       (folder_id, external_id, content_key, url, title, started_at, last_seen_at, source,
-        raw_json, list_rank)
-     VALUES (NULL, ?, ?, ?, ?, NULL, ?, 'harvest', ?, ?)`,
-  ).run(externalId, contentKeyFor(title), url, title, now, JSON.stringify({ title }), listRank);
+       (folder_id, external_id, content_key, url, title, started_at, date_basis,
+        last_seen_at, source, raw_json, list_rank)
+     VALUES (NULL, ?, ?, ?, ?, ?, 'placeholder', ?, 'harvest', ?, ?)`,
+  ).run(
+    externalId,
+    contentKeyFor(title),
+    url,
+    title,
+    placeholderForRank(now, listRank),
+    now,
+    JSON.stringify({ title }),
+    listRank,
+  );
   return { created: true, titleChanged: false };
 }
 
@@ -382,6 +1235,8 @@ export interface TurnToSave {
 
 export interface AssetToSave {
   messageSeq: number;
+  /** 'generated' | 'upload' | 'other' — see the assets.kind note in initDb. */
+  kind: string | null;
   originalUrl: string | null;
   sha256: string;
   mime: string;
@@ -404,6 +1259,29 @@ export interface AssetToSave {
 export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetToSave[]): void {
   db.exec('BEGIN');
   try {
+    // A conversation read from the panel has no date anywhere: the sidebar list
+    // carries none, and the panel's own timestamp is adaptive display text with
+    // no machine-readable value behind it (see aiModeDriver.ts). Rather than
+    // leave it undateable forever, record when the app first stored it — which
+    // is a real fact, just not the one wanted — and mark it as a stand-in so it
+    // is never read as the conversation's own date. A later export supplies the
+    // real one and replaces this.
+    db.prepare(
+      `UPDATE chats
+          SET started_at = ?, date_basis = 'placeholder'
+        WHERE id = ? AND started_at IS NULL`,
+    ).run(new Date().toISOString(), chatId);
+    // Computed from the turns about to be written, so it describes what is
+    // stored rather than what was stored before.
+    db.prepare('UPDATE chats SET text_fingerprint = ? WHERE id = ?').run(
+      openingFingerprint(turns.map((t) => ({ role: t.role, text: t.text }))),
+      chatId,
+    );
+    // The climb has been answered: whatever the thread gained is now stored, so
+    // it is no longer outstanding. Cleared HERE rather than in the capture flow
+    // because this is the moment the turns actually land — a run that failed
+    // half way must leave the flag up, and it does.
+    db.prepare('UPDATE chats SET moved_up_at = NULL WHERE id = ?').run(chatId);
     db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
     const insertMessage = db.prepare(
       'INSERT INTO messages (chat_id, seq, role, text, html) VALUES (?, ?, ?, ?, ?)',
@@ -422,8 +1300,8 @@ export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetT
 
     const insertAsset = db.prepare(
       `INSERT OR IGNORE INTO assets
-         (chat_id, message_id, original_url, sha256, mime, local_path, bytes)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         (chat_id, message_id, original_url, sha256, mime, local_path, bytes, kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const asset of assets) {
       insertAsset.run(
@@ -434,13 +1312,17 @@ export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetT
         asset.mime,
         asset.localPath,
         asset.bytes,
+        asset.kind,
       );
     }
 
-    db.prepare('UPDATE chats SET last_seen_at = ? WHERE id = ?').run(
+    // source moves to 'capture': this content came from the panel, uploads and
+    // images included, so it no longer wants a refresh.
+    db.prepare("UPDATE chats SET last_seen_at = ?, source = 'capture' WHERE id = ?").run(
       new Date().toISOString(),
       chatId,
     );
+    noteSource(chatId, 'capture');
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
@@ -456,29 +1338,254 @@ export function replaceTurns(chatId: number, turns: TurnToSave[], assets: AssetT
 
 export function getChatForCapture(chatId: number): ChatToCapture | null {
   const row = db
-    .prepare(`SELECT id, external_id, ${CHAT_TITLE_SQL} AS title FROM chats WHERE id = ?`)
-    .get(chatId) as unknown as { id: number; external_id: string; title: string } | undefined;
-  return row ? { id: row.id, externalId: row.external_id, title: row.title } : null;
+    .prepare(
+      `SELECT id, external_id, capture_attempts, ${CHAT_TITLE_SQL} AS title
+         FROM chats WHERE id = ?`,
+    )
+    .get(chatId) as unknown as
+    | { id: number; external_id: string; title: string; capture_attempts: number }
+    | undefined;
+  return row
+    ? {
+        id: row.id,
+        externalId: row.external_id,
+        title: row.title,
+        attempts: row.capture_attempts,
+      }
+    : null;
 }
 
 export interface ChatToCapture {
   id: number;
   externalId: string;
   title: string;
+  /** Failures on earlier runs — what tells a transient miss from a doomed one. */
+  attempts: number;
 }
 
 /**
- * Conversations still needing capture, in Google's own recency order so the
- * most recent are archived first — that is what a partial run should leave you
- * with.
+ * Conversations still wanting a sidebar capture, in Google's own recency order
+ * so the most recent are archived first — that is what a partial run should
+ * leave you with.
+ *
+ * Two kinds qualify. Ones with no turns at all, and ones whose text came from
+ * Takeout: that import gives complete text and exact timestamps but few images,
+ * and none of the original uploads. Only the sidebar path restores those, and
+ * only while Google still lists the conversation — so a Takeout-sourced chat
+ * stays queued until it has been pulled from the panel.
  */
-export function chatsWithoutTurns(limit: number): ChatToCapture[] {
+/**
+ * How many times a thread is tried before the automatic flows leave it alone.
+ *
+ * capture_attempts was recorded from the start and used only for ORDERING, so
+ * nothing ever gave up. Measured on the real archive: 18 threads sitting at six
+ * and seven attempts each, every one of them failing the same way — "Injected
+ * script timed out after 120000ms" — and every run picking up exactly the same
+ * 18 because there was nothing else to pick. Two minutes per timeout, twice each
+ * counting the retry pass. Once capture became a STEP of a flow meant to be run
+ * repeatedly, that became most of what running it did.
+ *
+ * Four, not one: the retry pass exists because most failures here really are
+ * transient, a page that took longer than usual to settle. Four attempts is
+ * generous about that and still finite.
+ */
+export const MAX_CAPTURE_ATTEMPTS = 4;
+
+/**
+ * Every entry Google could still be holding, for a full re-read.
+ *
+ * chatsWithoutTurns answers "what has nothing yet", which is the right queue for
+ * filling gaps and the wrong one for improving what is already there. Measured on
+ * the real archive: 365 entries carry a Google id, and that queue would take
+ * ZERO of them — 351 because they already have turns from some source. Meanwhile
+ * 98 have never been read from threads at all. So pressing "Re-read from threads"
+ * by hand produced content on entry after entry while the bulk path reported
+ * nothing to do, which is exactly what it was asked about, repeatedly.
+ *
+ * This queue takes ALL of them, whatever they already hold and however many times
+ * they have been tried, because the threads reading is the better content account
+ * 99% of the time and the point is to get it everywhere it can be had.
+ *
+ * takeout: and entry: ids are excluded: they carry no Google thread id, so the
+ * sidebar cannot open them however many times it is asked.
+ *
+ * Ordered by Google's own list position, newest first — the oldest are the ones
+ * most likely to have been rotated out, so the run gets the reachable ones done
+ * before it meets the wall.
+ */
+/**
+ * Threads that climbed Google's list since their turns were last stored.
+ *
+ * The cheapest possible answer to "what actually needs re-reading". The sidebar
+ * is ordered by last activity, so a thread appearing above where it used to sit
+ * has had something happen to it — a follow-up turn, most often. Nothing needs to
+ * be opened to learn that; the list already said it.
+ *
+ * This is what makes a check for changes affordable: a fast walk of the top rows
+ * finds the climbers, and only they are read. Re-reading all 375 to find the
+ * handful that changed is hours; this is minutes.
+ *
+ * moved_up_at is set by upsertThreadFromList when it sees a better position and
+ * cleared by replaceTurns when the turns land, so the flag means exactly
+ * "climbed, and not read since".
+ */
+export function entriesThatClimbed(limit: number): ChatToCapture[] {
   const rows = db
     .prepare(
-      `SELECT c.id, c.external_id, ${CHAT_TITLE_SQL} AS title
+      `SELECT id, external_id, capture_attempts, ${CHAT_TITLE_SQL} AS title
+         FROM chats
+        WHERE merged_into IS NULL
+          AND moved_up_at IS NOT NULL
+          AND external_id NOT LIKE 'takeout:%'
+          AND external_id NOT LIKE 'entry:%'
+        ORDER BY list_rank ASC, id ASC
+        LIMIT ?`,
+    )
+    .all(limit) as unknown as {
+    id: number;
+    external_id: string;
+    title: string;
+    capture_attempts: number;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    externalId: r.external_id,
+    title: r.title,
+    attempts: r.capture_attempts,
+  }));
+}
+
+export function countEntriesThatClimbed(): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM chats
+        WHERE merged_into IS NULL
+          AND moved_up_at IS NOT NULL
+          AND external_id NOT LIKE 'takeout:%'
+          AND external_id NOT LIKE 'entry:%'`,
+    )
+    .get() as unknown as { n: number };
+  return row.n;
+}
+
+/**
+ * Entries Google could still hold that have never been read from it.
+ *
+ * The narrow half of the full re-read, and worth its own action because of the
+ * cost: measured, 375 entries carry a Google id and only 80 have no threads
+ * reading. Re-reading all 375 takes hours and re-reads 295 entries that already
+ * hold the better account; these 80 are where a read adds something that is not
+ * there.
+ *
+ * Both entries the user pointed at — #51 at list position 113 and #72 at 144 —
+ * were in this group: content from the export only, a link whose verdict was
+ * earned on another entry, and a given-up mark from a walk that could not see
+ * past row 60. Nothing bulk would take them, and one manual press read each.
+ *
+ * 'capture' is the stored word for the threads source; see the note on the source
+ * vocabulary. Attempt marks are deliberately not consulted — a mark means an
+ * earlier run gave up, which is a fact about that run.
+ */
+const NEVER_READ_FROM_THREADS = `merged_into IS NULL
+      AND external_id NOT LIKE 'takeout:%'
+      AND external_id NOT LIKE 'entry:%'
+      AND ',' || COALESCE(sources, source) || ',' NOT LIKE '%,capture,%'`;
+
+export function entriesNeverReadFromThreads(limit: number): ChatToCapture[] {
+  const rows = db
+    .prepare(
+      `SELECT id, external_id, capture_attempts, ${CHAT_TITLE_SQL} AS title
+         FROM chats
+        WHERE ${NEVER_READ_FROM_THREADS}
+        ORDER BY CASE WHEN list_rank IS NULL THEN 1 ELSE 0 END, list_rank ASC, id ASC
+        LIMIT ?`,
+    )
+    .all(limit) as unknown as {
+    id: number;
+    external_id: string;
+    title: string;
+    capture_attempts: number;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    externalId: r.external_id,
+    title: r.title,
+    attempts: r.capture_attempts,
+  }));
+}
+
+export function countEntriesNeverReadFromThreads(): number {
+  const row = db
+    .prepare(`SELECT COUNT(*) AS n FROM chats WHERE ${NEVER_READ_FROM_THREADS}`)
+    .get() as unknown as { n: number };
+  return row.n;
+}
+
+export function entriesForFullReread(limit: number): ChatToCapture[] {
+  const rows = db
+    .prepare(
+      `SELECT id, external_id, capture_attempts, ${CHAT_TITLE_SQL} AS title
+         FROM chats
+        WHERE merged_into IS NULL
+          AND external_id NOT LIKE 'takeout:%'
+          AND external_id NOT LIKE 'entry:%'
+        ORDER BY CASE WHEN list_rank IS NULL THEN 1 ELSE 0 END, list_rank ASC, id ASC
+        LIMIT ?`,
+    )
+    .all(limit) as unknown as {
+    id: number;
+    external_id: string;
+    title: string;
+    capture_attempts: number;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    externalId: r.external_id,
+    title: r.title,
+    attempts: r.capture_attempts,
+  }));
+}
+
+export function countEntriesForFullReread(): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM chats
+        WHERE merged_into IS NULL
+          AND external_id NOT LIKE 'takeout:%'
+          AND external_id NOT LIKE 'entry:%'`,
+    )
+    .get() as unknown as { n: number };
+  return row.n;
+}
+
+export function chatsWithoutTurns(limit: number, includeExhausted = false): ChatToCapture[] {
+  const rows = db
+    .prepare(
+      `SELECT c.id, c.external_id, c.capture_attempts, ${CHAT_TITLE_SQL} AS title
        FROM chats c
        WHERE c.merged_into IS NULL
-         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
+         AND (
+           NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
+           OR c.source = 'takeout'
+         )
+         -- Excluded: threads that exist only in an export. They have no Google
+         -- thread id, so the panel cannot open them however many times it tries,
+         -- and queueing them would mark genuinely unrecoverable threads as
+         -- "capture failed" — which reads as a bug rather than as Google having
+         -- dropped them.
+         --
+         -- entry:% belongs here for the same reason and was missing. Those are
+         -- created by adopting an orphan entry or ungluing one, and they carry no
+         -- thread id either — so every one of them was queued to fail, and a run
+         -- of them together would trip the consecutive-failure abort and stop a
+         -- capture that had real work left to do.
+         AND c.external_id NOT LIKE 'takeout:%'
+         AND c.external_id NOT LIKE 'entry:%'
+         -- Threads that have been tried and tried. Excluded from the automatic
+         -- flows, NOT from the archive: they are still listed, still say how
+         -- many times they failed, and "Retry the threads that gave up" takes
+         -- them again deliberately.
+         AND (? OR c.capture_attempts < ${MAX_CAPTURE_ATTEMPTS})
        -- Never-attempted conversations first, then by Google's recency order.
        -- Without this, a long unattended run re-tries the same early failures
        -- ahead of hundreds of conversations it has never even looked at, and
@@ -488,8 +1595,60 @@ export function chatsWithoutTurns(limit: number): ChatToCapture[] {
                 c.list_rank ASC
        LIMIT ?`,
     )
-    .all(limit) as unknown as { id: number; external_id: string; title: string }[];
-  return rows.map((r) => ({ id: r.id, externalId: r.external_id, title: r.title }));
+    .all(includeExhausted ? 1 : 0, limit) as unknown as {
+    id: number;
+    external_id: string;
+    title: string;
+    capture_attempts: number;
+  }[];
+  return rows.map((r) => ({
+    id: r.id,
+    externalId: r.external_id,
+    title: r.title,
+    attempts: r.capture_attempts,
+  }));
+}
+
+/**
+ * Threads the automatic flows have given up on.
+ *
+ * Counted and shown rather than silently dropped. A queue that quietly shrinks
+ * from 18 to 0 with nothing captured is indistinguishable from finishing the
+ * work, and this archive's whole premise is that nothing disappears from view.
+ */
+/**
+ * Records that Google no longer lists a thread, so nothing tries it again.
+ *
+ * Counting it as one more ordinary failure meant three further attempts before
+ * the cap took it out of the queue — and each attempt is a walk of the whole
+ * sidebar. This is positive evidence rather than a miss: the search ran to the
+ * end of the list and the row is not in it. Retrying that gains nothing.
+ *
+ * The thread is not lost, and this does not say it is. It keeps its turns, its
+ * export entries and its link; it is only the PANEL that can no longer reach it.
+ */
+export function recordThreadNotListed(chatId: number): void {
+  db.prepare('UPDATE chats SET capture_attempts = ? WHERE id = ?').run(
+    MAX_CAPTURE_ATTEMPTS,
+    chatId,
+  );
+}
+
+export function countExhaustedCaptures(): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM chats c
+        WHERE c.merged_into IS NULL
+          AND (
+            NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
+            OR c.source = 'takeout'
+          )
+          AND c.external_id NOT LIKE 'takeout:%'
+          AND c.external_id NOT LIKE 'entry:%'
+          AND c.capture_attempts >= ${MAX_CAPTURE_ATTEMPTS}`,
+    )
+    .get() as unknown as { n: number };
+  return row.n;
 }
 
 /** Counted, so a conversation that keeps failing sinks in the queue. */
@@ -497,15 +1656,2945 @@ export function recordCaptureFailure(chatId: number): void {
   db.prepare('UPDATE chats SET capture_attempts = capture_attempts + 1 WHERE id = ?').run(chatId);
 }
 
-export function countChatsWithoutTurns(): number {
+/**
+ * How many threads a capture would actually attempt.
+ *
+ * Mirrors chatsWithoutTurns exactly, exhaustion clause included. It labels the
+ * button that starts the run, and a count that offers 18 to a run that will take
+ * none of them is the same class of lie as a tree count that disagrees with its
+ * own list.
+ */
+export function countChatsWithoutTurns(includeExhausted = false): number {
   const row = db
     .prepare(
       `SELECT COUNT(*) AS n FROM chats c
        WHERE c.merged_into IS NULL
-         AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)`,
+         AND (
+           NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
+           OR c.source = 'takeout'
+         )
+         AND c.external_id NOT LIKE 'takeout:%'
+         AND c.external_id NOT LIKE 'entry:%'
+         AND (? OR c.capture_attempts < ${MAX_CAPTURE_ATTEMPTS})`,
+    )
+    .get(includeExhausted ? 1 : 0) as unknown as { n: number };
+  return row.n;
+}
+
+/* ---------------------------------------------------------------- takeout */
+
+// Third copy of a shared type found this session, re-exported rather than
+// redeclared for the same reason as the other two: the renderer parses these
+// rows and the main process consumes them, so a member added on one side and
+// missing on the other is invisible to the type checker across the IPC hop.
+export type { TakeoutImportRow };
+
+export interface TakeoutImportResult {
+  created: number;
+  updatedText: number;
+  skipped: number;
+}
+
+export interface ActivityImportResult {
+  inserted: number;
+  duplicates: number;
+  skipped: number;
+}
+
+/**
+ * Records Takeout entries as activity. Creates no conversations, renames
+ * nothing, and cannot pollute the archive — so a wrong parse costs nothing and
+ * needs no undo.
+ */
+export function importActivity(rows: TakeoutImportRow[]): ActivityImportResult {
+  const result: ActivityImportResult = { inserted: 0, duplicates: 0, skipped: 0 };
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO activity (query, query_key, occurred_at, href)
+     VALUES (?, ?, ?, ?)`,
+  );
+  db.exec('BEGIN');
+  try {
+    for (const row of rows) {
+      const query = row.query.trim();
+      if (!query) {
+        // An entry with no query is still evidence that something happened, but
+        // there is nothing to match it on, so it is counted rather than stored.
+        result.skipped += 1;
+        continue;
+      }
+      const changes = insert.run(query, contentKeyFor(query), row.timestamp, row.href).changes;
+      if (Number(changes) > 0) result.inserted += 1;
+      else result.duplicates += 1;
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  return result;
+}
+
+export interface TakeoutConversationResult {
+  entries: number;
+  conversations: number;
+  created: number;
+  extended: number;
+  mergedIntoHarvested: number;
+  /**
+   * Openings shared by more than one entry in this import. None of them were
+   * matched to an existing conversation — see the loop below — so this is the
+   * count of conversations left for a person to glue by hand.
+   */
+  ambiguousOpenings: number;
+  /**
+   * Links an earlier import made that this one removed, because the entry it
+   * pointed at no longer describes the conversation. Non-zero means a previous
+   * run's wrong grouping was repaired, which is worth reporting rather than
+   * doing quietly.
+   */
+  regrouped: number;
+  /**
+   * Snapshots this import could not identify against a stored record.
+   *
+   * The ref that identifies a record is computed from parsed content, and the
+   * parser has changed repeatedly. A record stored under one version does not
+   * answer to the same ref under the next, so it falls out of the keep list, is
+   * detached, and nothing re-adds it. Non-zero means records were orphaned
+   * because their identity could not be recomputed — which looks identical to
+   * being orphaned for the legitimate reason, and was invisible until now.
+   */
+  unidentified: number;
+  /** Entries whose date text the parser could not read. */
+  unreadableDates: number;
+  /**
+   * Entries kept but attached to nothing, because nothing here can say where
+   * they belong. They are listed under Orphan entries — never dropped.
+   */
+  orphaned: number;
+  turnsWritten: number;
+}
+
+/**
+ * An export entry's identity — the one place this shape is written down.
+ *
+ * Three places need it: the loop that stores entries, the placement decision,
+ * and the image attachment that has to find the entry again afterwards. Three
+ * copies of the arithmetic would eventually disagree, and the symptom would be
+ * an image silently attaching to nothing.
+ *
+ * Keyed on the opening prompt plus the timestamp, so two conversations that
+ * begin identically at different times stay distinct. An entry with no opening
+ * prompt is keyed on its payload instead: there is nothing to identify it by, so
+ * every one of them would otherwise collide with every other.
+ */
+export function takeoutEntryRef(
+  opening: string,
+  timestamp: string | null,
+  payload: { turns: unknown; images: unknown; href: unknown },
+  entryId?: string | null,
+  fingerprints?: { long: string; short: string; empty: string },
+): string {
+  // Google's own token when the record has one. Preferred over anything derived
+  // from the content for a reason that has already bitten: a content hash moves
+  // whenever the parser changes, so fixing a parsing bug renames every entry and
+  // the next import duplicates all of them rather than updating them. The turn
+  // splitter changed exactly that way.
+  if (entryId) return `mstk:${entryId}`;
+  // The cell's own markup, for the records with no token. Measured on a real
+  // export: unique across all 1059 of them when paired with the timestamp, where
+  // the timestamp alone loses six. Preferred over anything derived from the
+  // parsed content for the same reason the token is — it does not move when the
+  // parser is fixed.
+  if (fingerprints?.long) return `cell:${timestamp ?? 'nodate'}:${fingerprints.long}`;
+  if (opening.trim()) return `${contentKeyFor(opening)}@${timestamp ?? 'nodate'}`;
+  // The timestamp is part of the identity, not decoration. An empty cell — no
+  // prompt, no turns, no images — has a payload identical to every other empty
+  // cell, so hashing the payload alone gave all 259 of them the same reference
+  // and INSERT OR IGNORE kept exactly one. The date is the only thing that tells
+  // them apart, and they are supposed to be preserved.
+  //
+  // Two cells with the same content AND the same timestamp are genuinely
+  // indistinguishable, and collapsing those is right.
+  return `payload:${contentKeyFor(JSON.stringify(payload))}@${timestamp ?? 'nodate'}`;
+}
+
+/** Where one entry would land, decided without writing anything. */
+export interface EntryPlacement {
+  /** Identity of the raw entry: opening prompt plus its timestamp. */
+  ref: string;
+  /** Hash of the opening prompt. Shared by entries that merely start alike. */
+  key: string;
+  /** This opening is shared by another entry in the same import. */
+  ambiguous: boolean;
+  /** Already stored from an earlier import of the same export. */
+  knownEntry: boolean;
+  /**
+   * An existing conversation the app learned about some other way — a sidebar
+   * listing or a panel capture — that this entry would enrich. Null when there
+   * is no such conversation, when the opening is ambiguous, or when the
+   * candidate's turns already contradict this entry's.
+   */
+  enrich: { id: number; source: string } | null;
+  /** The export-owned conversation for this entry, and whether it exists yet. */
+  ownExternalId: string;
+  ownChatId: number | null;
+}
+
+/**
+ * Decides where an entry belongs, reading the database but writing nothing.
+ *
+ * Extracted so the sweep and the import cannot disagree. A preview that
+ * reimplements the rule is worse than no preview: it would describe an import
+ * that never happens, and the discrepancy would surface as data loss rather
+ * than as a wrong number.
+ */
+export function placeEntry(
+  row: TakeoutImportRow,
+  openingCount: number,
+  /**
+   * The thread this entry was assigned in the whole-import pass, when its
+   * opening prompt is shared. Passed in rather than worked out here because the
+   * decision cannot be made one entry at a time: see resolveMatches.
+   */
+  resolved?: Map<string, { id: number; source: string }>,
+): EntryPlacement {
+  const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+  const key = contentKeyFor(opening);
+  // Must be computed exactly as the storing loop computes it, token included.
+  // A ref that differs between the two would make every entry look unknown, so
+  // nothing would ever be recognised as already imported.
+  const ref = takeoutEntryRef(
+    opening,
+    row.timestamp,
+    { turns: row.turns, images: row.imageFiles, href: row.href },
+    row.entryId,
+    row.fingerprints,
+  );
+  const ambiguous = openingCount > 1;
+
+  const known =
+    (db
+      .prepare("SELECT 1 AS n FROM source_entries WHERE kind = 'takeout' AND external_ref = ?")
+      .get(ref) as unknown as { n: number } | undefined) !== undefined;
+
+  // An entry already attached to a conversation stays there. This has to come
+  // first, and skipping it was a bug: an entry that enriched a harvested
+  // conversation on the first import found, on the second, that the candidate
+  // query now excluded that conversation — correctly, since it already holds an
+  // export entry — while its own takeout: row had never been created. So it
+  // created a standalone duplicate of a conversation it had already enriched,
+  // and every re-import would have made another.
+  //
+  // The importer's own link is preferred over one made by hand, because that is
+  // the one it is entitled to rewrite; a hand-glued conversation may hold
+  // several entries and is not this entry's alone to overwrite.
+  const placed = db
+    .prepare(
+      `SELECT cs.chat_id AS id FROM source_entries e
+         JOIN chat_sources cs ON cs.source_entry_id = e.id
+         JOIN chats c ON c.id = cs.chat_id
+        WHERE e.kind = 'takeout' AND e.external_ref = ? AND c.merged_into IS NULL
+          -- Only conversations the app learned about some other way. An
+          -- export-owned row is deliberately NOT rescued here: when an earlier
+          -- import grouped two entries into one of those, the link is the
+          -- mistake, and honouring it would send the entry straight back into
+          -- the grouping the re-import exists to undo.
+          AND c.external_id NOT LIKE 'takeout:%' AND c.external_id NOT LIKE 'entry:%'
+        ORDER BY CASE cs.linked_by WHEN 'import' THEN 0 ELSE 1 END
+        LIMIT 1`,
+    )
+    .get(ref) as { id: number } | undefined;
+  if (placed) {
+    return {
+      ref,
+      key,
+      ambiguous,
+      knownEntry: known,
+      enrich: null,
+      ownExternalId: `takeout:${key.slice(0, 16)}:${row.timestamp ?? 'nodate'}`,
+      ownChatId: placed.id,
+    };
+  }
+
+  // An entry may attach to a conversation the app learned about some OTHER way
+  // — a sidebar listing, or a panel capture. That is the enrichment case, and
+  // it is the whole reason for matching: the export carries text and a date,
+  // the panel carries the images, and together they describe one conversation.
+  //
+  // It may NOT attach to a conversation that came from another export entry.
+  // Two entries opening with the same prompt are indistinguishable from outside
+  // — one conversation logged twice, the same question asked twice, or a clone
+  // Google made on its own — and an earlier version of this check verified only
+  // that the second entry's prompts STARTED the same way, which is true in all
+  // three cases. The first entry's turns were then deleted and replaced by the
+  // second's, so a 2-turn conversation and a 4-turn one became a single 4-turn
+  // one and the shorter reading was gone.
+  //
+  // And the match must be unambiguous on both sides. When several entries in
+  // one import share an opening, at most one of them is that conversation and
+  // nothing here can tell which — so none of them claim it.
+  // When the opening prompt is shared, the ANSWER decides.
+  //
+  // Refusing to match on an ambiguous opening was right as far as it went, and
+  // its cost is visible in the list: a thread captured from the panel sitting
+  // beside an imported thread of the same conversation, because "gpg clearsign
+  // …" was asked more than once and nothing was allowed to tell them apart.
+  // Measured on a real export, 132 records share an opening prompt while only 2
+  // share the prompt AND its answer — so the answer almost always decides, and
+  // the fingerprints for it are recorded on both sides.
+  //
+  // Nearest match with a margin, not a threshold. An absolute cut-off would be a
+  // number picked out of the air; this asks the only question that matters — is
+  // one candidate clearly closer than the rest — and declines when the answer is
+  // no, which lands back on the old conservative behaviour exactly when it
+  // should.
+  // Needs turns to compare: a Lens or blank record has no answer, so there is
+  // nothing for the answer to decide with.
+  const byFingerprint = ambiguous ? (resolved?.get(ref) ?? null) : null;
+  if (byFingerprint) {
+    return {
+      ref,
+      key,
+      // Resolved, so no longer ambiguous for the caller's purposes.
+      ambiguous: false,
+      knownEntry: known,
+      enrich: byFingerprint,
+      ownExternalId: `takeout:${key.slice(0, 16)}:${row.timestamp ?? 'nodate'}`,
+      ownChatId: null,
+    };
+  }
+
+  const candidates = ambiguous
+    ? []
+    : (db
+        .prepare(
+          `SELECT id, source FROM chats
+            WHERE content_key = ? AND merged_into IS NULL
+              AND external_id NOT LIKE 'takeout:%' AND external_id NOT LIKE 'entry:%'
+              AND NOT EXISTS (
+                    SELECT 1 FROM chat_sources cs
+                      JOIN source_entries e ON e.id = cs.source_entry_id
+                     WHERE cs.chat_id = chats.id AND e.kind = 'takeout'
+                  )
+            LIMIT 2`,
+        )
+        .all(key) as unknown as { id: number; source: string }[]);
+
+  const agreesWith = (candidateId: number): boolean => {
+    const existing = db
+      .prepare("SELECT text FROM messages WHERE chat_id = ? AND role = 'user' ORDER BY seq LIMIT 2")
+      .all(candidateId) as unknown as { text: string }[];
+    // No turns stored yet (a bare sidebar listing) — nothing to contradict.
+    if (existing.length === 0) return true;
+    const norm = (t: string) => t.toLowerCase().replace(/\s+/g, ' ').trim();
+    const mine = row.turns.filter((t) => t.role === 'user').map((t) => norm(t.text));
+    const theirs = existing.map((t) => norm(t.text));
+    // Compare as far as both go. Divergence at the second prompt means two
+    // different conversations that happen to open alike, and merging them would
+    // fabricate a conversation that never existed.
+    return theirs.every((t, i) => mine[i] === undefined || mine[i] === t);
+  };
+
+  const enrich =
+    candidates.length === 1 && agreesWith(candidates[0].id) ? candidates[0] : null;
+
+  // Distinguished by timestamp as well as opening, so two conversations that
+  // begin identically get separate rows instead of overwriting each other —
+  // including Google's own clones.
+  const ownExternalId = `takeout:${key.slice(0, 16)}:${row.timestamp ?? 'nodate'}`;
+  const own = db.prepare('SELECT id FROM chats WHERE external_id = ?').get(ownExternalId) as
+    | { id: number }
+    | undefined;
+
+  return {
+    ref,
+    key,
+    ambiguous,
+    knownEntry: known,
+    enrich,
+    ownExternalId,
+    ownChatId: own?.id ?? null,
+  };
+}
+
+/**
+ * Groups entries that are successive snapshots of ONE conversation.
+ *
+ * The export records a snapshot per submission, each holding the conversation
+ * so far, so ~300 conversations arrive as thousands of entries. Importing one
+ * conversation per entry is the bug that turned 981 entries into 736 phantom
+ * chats; grouping them by opening prompt alone is the opposite bug, since two
+ * conversations can open identically and Google sometimes clones one outright.
+ *
+ * Neither is necessary, because snapshots of one conversation are not merely
+ * similar — they are PREFIX-CONSISTENT. Every turn of the earlier snapshot
+ * appears, identical and in order, at the start of the later one. That is a
+ * fact about the text rather than a judgement about intent, so it can be
+ * decided here.
+ *
+ * When two entries share an opening and then diverge, they are different
+ * conversations and each gets its own. That is the case nothing can resolve
+ * automatically, and it stays a manual glue.
+ */
+export interface ConversationPlan {
+  key: string;
+  /** Every snapshot, shortest first. All of them are recorded as source entries. */
+  snapshots: TakeoutImportRow[];
+  /** The furthest along, and therefore the conversation itself. */
+  best: TakeoutImportRow;
+}
+
+/** A row's turns as comparable text, so snapshots can be matched exactly. */
+function turnKeys(row: TakeoutImportRow): string[] {
+  return row.turns.map((t) => `${t.role}:${t.text.toLowerCase().replace(/\s+/g, ' ').trim()}`);
+}
+
+function isPrefixOf(shorter: string[], longer: string[]): boolean {
+  if (shorter.length > longer.length) return false;
+  return shorter.every((turn, index) => turn === longer[index]);
+}
+
+export function planConversations(rows: TakeoutImportRow[]): ConversationPlan[] {
+  const byKey = new Map<string, TakeoutImportRow[]>();
+  for (const row of rows) {
+    const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+    if (!opening.trim()) continue;
+    const key = contentKeyFor(opening);
+    const group = byKey.get(key);
+    if (group) group.push(row);
+    else byKey.set(key, [row]);
+  }
+
+  const plans: ConversationPlan[] = [];
+  for (const [key, group] of byKey) {
+    // Shortest first, so each entry either extends a chain already seen or
+    // starts one. Walking longest-first would need the same comparisons in
+    // reverse and makes the "extend" case harder to see.
+    const ordered = [...group].sort((a, b) => a.turns.length - b.turns.length);
+    const chains: { keys: string[]; plan: ConversationPlan }[] = [];
+    for (const row of ordered) {
+      const keys = turnKeys(row);
+      const chain = chains.find((c) => isPrefixOf(c.keys, keys));
+      if (chain) {
+        chain.keys = keys;
+        chain.plan.snapshots.push(row);
+        chain.plan.best = row;
+      } else {
+        const plan: ConversationPlan = { key, snapshots: [row], best: row };
+        chains.push({ keys, plan });
+        plans.push(plan);
+      }
+    }
+  }
+  return plans;
+}
+
+/**
+ * The thread whose stored conversation this entry most resembles.
+ *
+ * Only consulted when the opening prompt alone cannot decide. Compares the
+ * entry's opening exchange against each candidate thread's, and returns one only
+ * when it is CLEARLY closer than the next best — a margin, so a near-tie
+ * declines rather than guessing. MAX_MATCH is a ceiling on obvious nonsense
+ * rather than the decision itself: measured on real material, the same thread
+ * read from two sources sat at 14 of 64 bits apart while unrelated threads sat
+ * at 24.
+ */
+const MAX_MATCH_DISTANCE = 22;
+const REQUIRED_MARGIN = 6;
+/**
+ * The bound when there is only one candidate and therefore no second opinion.
+ *
+ * Tighter than MAX_MATCH_DISTANCE deliberately. With two or more candidates the
+ * decision rests on one being clearly closer than the others, which is evidence
+ * about this thread; with one candidate there is no comparison at all and the
+ * absolute number is doing the whole job. Measured on real material, the same
+ * thread read from two sources sat at 14 of 64 bits apart while unrelated
+ * threads sat at 24 — so 22 leaves room for a different conversation at 20 to be
+ * accepted on no evidence. 16 keeps the cross-source case and refuses that.
+ *
+ * Provisional, and known to be: those figures come from one pair, not a
+ * distribution. Until there is real paired data to calibrate against, the solo
+ * case is the one to be strict in, because getting it wrong attaches an entry to
+ * a conversation it has nothing to do with.
+ */
+const SOLO_MATCH_DISTANCE = 16;
+
+interface ScoredCandidate {
+  id: number;
+  source: string;
+  distance: number;
+}
+
+/** Candidate threads for an opening, with their distance from one entry. */
+function scoreCandidates(key: string, row: TakeoutImportRow): ScoredCandidate[] {
+  const mine = openingFingerprint(row.turns);
+  return (
+    db
+      .prepare(
+        `SELECT id, source, text_fingerprint FROM chats
+          WHERE content_key = ? AND merged_into IS NULL
+            AND text_fingerprint IS NOT NULL
+            AND external_id NOT LIKE 'takeout:%' AND external_id NOT LIKE 'entry:%'
+            AND NOT EXISTS (
+                  SELECT 1 FROM chat_sources cs
+                    JOIN source_entries e ON e.id = cs.source_entry_id
+                   WHERE cs.chat_id = chats.id AND e.kind = 'takeout'
+                )`,
+      )
+      .all(key) as unknown as { id: number; source: string; text_fingerprint: string }[]
+  )
+    .map((c) => ({
+      id: c.id,
+      source: c.source,
+      distance: hammingDistance(mine, c.text_fingerprint),
+    }))
+    .sort((a, b) => a.distance - b.distance);
+}
+
+/**
+ * Decides, for a whole import at once, which entry belongs to which thread.
+ *
+ * Done globally rather than per entry because per entry was order-dependent, and
+ * that is a bug rather than a rough edge: two entries sharing an opening prompt
+ * with one candidate thread were each placed on their own, so whichever the loop
+ * reached FIRST claimed the thread and the exclusion then pushed the other away.
+ * The closer entry did not win — the earlier one did. Which is precisely
+ * "confusing two threads that start the same way".
+ *
+ * Every (entry, thread) pair within a shared opening is scored, and the pairs are
+ * taken in order of distance: the most confident match is made first and removes
+ * both sides from consideration, so a merely-plausible pairing can never take a
+ * thread that a clearly better one wanted. A pair is only made when it also
+ * satisfies the margin — over the next-best thread for that entry, and over the
+ * next-best entry for that thread — so an ambiguous pairing is declined in both
+ * directions.
+ */
+export function resolveMatches(rows: TakeoutImportRow[]): Map<string, ScoredCandidate> {
+  const byKey = new Map<string, TakeoutImportRow[]>();
+  for (const row of rows) {
+    const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+    if (!opening.trim() || !row.turns.some((t) => t.role === 'ai')) continue;
+    const key = contentKeyFor(opening);
+    const group = byKey.get(key);
+    if (group) group.push(row);
+    else byKey.set(key, [row]);
+  }
+
+  const refOf = (row: TakeoutImportRow) => {
+    const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+    return takeoutEntryRef(
+      opening,
+      row.timestamp,
+      { turns: row.turns, images: row.imageFiles, href: row.href },
+      row.entryId,
+      row.fingerprints,
+    );
+  };
+
+  const decided = new Map<string, ScoredCandidate>();
+  for (const [key, group] of byKey) {
+    // Only entries competing for the same opening need this. A lone entry keeps
+    // the ordinary path, where the prompt itself is enough.
+    if (group.length < 2) continue;
+
+    const pairs: { ref: string; candidate: ScoredCandidate; rank: ScoredCandidate[] }[] = [];
+    for (const row of group) {
+      const scored = scoreCandidates(key, row);
+      for (const candidate of scored) pairs.push({ ref: refOf(row), candidate, rank: scored });
+    }
+    pairs.sort((a, b) => a.candidate.distance - b.candidate.distance);
+
+    const takenRefs = new Set<string>();
+    const takenChats = new Set<number>();
+    for (const pair of pairs) {
+      if (takenRefs.has(pair.ref) || takenChats.has(pair.candidate.id)) continue;
+      if (pair.candidate.distance > MAX_MATCH_DISTANCE) continue;
+
+      // Margin over this entry's next-best thread.
+      const nextForEntry = pair.rank.find(
+        (c) => c.id !== pair.candidate.id && !takenChats.has(c.id),
+      );
+      if (nextForEntry && nextForEntry.distance - pair.candidate.distance < REQUIRED_MARGIN) {
+        continue;
+      }
+      // Margin over the next-best entry for this thread — the direction that was
+      // missing entirely, and the one order-dependence hid.
+      const others = pairs.filter(
+        (p) => p.candidate.id === pair.candidate.id && p.ref !== pair.ref && !takenRefs.has(p.ref),
+      );
+      if (others.length > 0) {
+        const nextForChat = others[0].candidate.distance;
+        if (nextForChat - pair.candidate.distance < REQUIRED_MARGIN) continue;
+      }
+      // No second opinion in either direction: the absolute number is doing all
+      // the work, so it has to be a tighter one.
+      if (!nextForEntry && others.length === 0 && pair.candidate.distance > SOLO_MATCH_DISTANCE) {
+        continue;
+      }
+
+      decided.set(pair.ref, pair.candidate);
+      takenRefs.add(pair.ref);
+      takenChats.add(pair.candidate.id);
+    }
+  }
+  return decided;
+}
+
+/** How many entries in one import open with each prompt. */
+export function openingCounts(rows: TakeoutImportRow[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+    if (!opening.trim()) continue;
+    const key = contentKeyFor(opening);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+export interface TakeoutPreview {
+  entries: number;
+  /** Conversations those entries describe — far fewer, and the figure that matters. */
+  conversations: number;
+  /** Earlier snapshots folded into a later one, rather than made into conversations. */
+  snapshotsFolded: number;
+  /**
+   * Entries with no opening prompt. They are still stored — nothing is dropped —
+   * and become orphans for review rather than conversations.
+   */
+  wouldOrphan: number;
+  /** Already stored by an earlier import of the same export. */
+  alreadyKnown: number;
+  /** Would attach to a conversation harvested or captured from the panel. */
+  wouldEnrich: number;
+  /** Would update a conversation an earlier import of this export created. */
+  wouldUpdate: number;
+  /** Would create a conversation of its own. */
+  wouldCreate: number;
+  /** Openings shared by several entries, so none of them claim a match. */
+  ambiguous: number;
+  /** Existing conversations that would be touched. */
+  chatsTouched: number;
+}
+
+/**
+ * The sweep: what an import would do, before it does any of it.
+ *
+ * Reads only. Uses placeEntry, so it describes the import that will actually
+ * run rather than a second implementation of the same intent.
+ */
+export function previewTakeoutImport(rows: TakeoutImportRow[]): TakeoutPreview {
+  // Counted over CONVERSATIONS, exactly as the import counts them. Reporting
+  // entries here was wrong and misleading in the way that matters: 1779 "new
+  // threads" for an account with about 300, because the export records one
+  // entry per submission and most entries are earlier snapshots of a
+  // conversation another entry already describes.
+  const plans = planConversations(rows);
+  const counts = new Map<string, number>();
+  for (const plan of plans) counts.set(plan.key, (counts.get(plan.key) ?? 0) + 1);
+  // Resolved once for the whole import, so the sweep describes the assignment the
+  // import will actually make rather than a per-entry guess at it.
+  const resolved = resolveMatches(plans.map((p) => p.best));
+
+  const preview: TakeoutPreview = {
+    entries: rows.length,
+    conversations: plans.length,
+    snapshotsFolded: plans.reduce((n, plan) => n + plan.snapshots.length - 1, 0),
+    wouldOrphan: 0,
+    alreadyKnown: 0,
+    wouldEnrich: 0,
+    wouldUpdate: 0,
+    wouldCreate: 0,
+    ambiguous: 0,
+    chatsTouched: 0,
+  };
+  for (const row of rows) {
+    const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+    if (!opening.trim()) preview.wouldOrphan += 1;
+  }
+
+  const touched = new Set<number>();
+  for (const plan of plans) {
+    const placement = placeEntry(plan.best, counts.get(plan.key) ?? 1, resolved);
+    // Known when every snapshot of it is already stored; a conversation that has
+    // grown since the last import is not "already known".
+    if (placement.knownEntry) preview.alreadyKnown += 1;
+    if (placement.ambiguous) preview.ambiguous += 1;
+    if (placement.enrich) {
+      preview.wouldEnrich += 1;
+      touched.add(placement.enrich.id);
+    } else if (placement.ownChatId !== null) {
+      preview.wouldUpdate += 1;
+      touched.add(placement.ownChatId);
+    } else {
+      preview.wouldCreate += 1;
+    }
+  }
+  preview.chatsTouched = touched.size;
+  return preview;
+}
+
+/**
+ * Imports Takeout entries as conversations, with their turns.
+ *
+ * Takeout is the base and the panel extends it: an export holds the complete
+ * text of every conversation including ones Google has since dropped, while
+ * only the panel still has the original uploads and generated images.
+ *
+ * Nothing is grouped automatically — see the note in the body, and placeEntry
+ * for where each entry lands. A conversation the app already knows about from
+ * the sidebar or the panel is EXTENDED rather than duplicated, keeping its
+ * Google thread id, which is the only real identifier in the system and the
+ * thing that makes a later panel capture possible.
+ */
+export function importTakeoutConversations(
+  rows: TakeoutImportRow[],
+): TakeoutConversationResult {
+  const result: TakeoutConversationResult = {
+    entries: rows.length,
+    conversations: 0,
+    created: 0,
+    extended: 0,
+    mergedIntoHarvested: 0,
+    ambiguousOpenings: 0,
+    regrouped: 0,
+    unidentified: 0,
+    unreadableDates: 0,
+    orphaned: 0,
+    turnsWritten: 0,
+  };
+
+  // NO automatic grouping. Successive snapshots of one conversation, the same
+  // query asked twice, and Google's own clones are indistinguishable without
+  // judgement, and every automatic rule tried here was wrong in one of those
+  // three cases — collapsing distinct conversations, or discarding one
+  // outright. Each entry is therefore imported in full and kept reviewable, and
+  // gluing them together is a deliberate action (see mergeChats).
+  //
+  // The cost is more rows than conversations; the benefit is that nothing is
+  // silently lost or silently welded, and the duplicates are visible.
+  //
+  // What IS grouped is a conversation with its own earlier snapshots, because
+  // that needs no judgement: the export records one entry per submission, each
+  // holding the conversation so far, so an earlier snapshot's turns are a
+  // prefix of a later one's. See planConversations. Entries that share an
+  // opening and then diverge stay separate, which is the case a person has to
+  // decide.
+  const plans = planConversations(rows);
+  result.conversations = plans.length;
+
+  // Preserve every entry first, before any interpretation of it. If the
+  // grouping below is wrong, this is what makes it fixable without going back
+  // to the export.
+  const keepEntry = db.prepare(
+    `INSERT OR IGNORE INTO source_entries
+       (kind, external_ref, query, query_key, occurred_at, href, payload_json, imported_at)
+     VALUES ('takeout', ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const findEntry = db.prepare(
+    "SELECT id FROM source_entries WHERE kind = 'takeout' AND external_ref = ?",
+  );
+  const entryIdByRef = new Map<string, number>();
+  db.exec('BEGIN');
+  try {
+    const now = new Date().toISOString();
+    for (const row of rows) {
+      const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+      // EVERY entry is stored, including ones with no opening prompt. They used
+      // to be skipped here, before being written at all — which is a loss, and
+      // the one thing this design does not permit. An entry nothing can place
+      // becomes an orphan: kept verbatim, attached to nothing, listed under
+      // Orphan entries and reviewable there. Unplaceable is a statement about
+      // what can be worked out, not a licence to discard.
+      //
+      // Its identity is the payload rather than the opening, since there is no
+      // opening to key on and every such entry would otherwise collide with
+      // every other. Content-addressed, so re-importing the same export
+      // recognises them instead of piling up copies.
+      const ref = takeoutEntryRef(
+    opening,
+    row.timestamp,
+    { turns: row.turns, images: row.imageFiles, href: row.href },
+    row.entryId,
+    row.fingerprints,
+  );
+      if (!opening.trim()) result.orphaned += 1;
+      // A row with date text but no parsed timestamp is a parser failure, not
+      // a gap in the export, and the two need different responses — so it is
+      // counted separately and the raw text is kept on the entry so it can be
+      // read back and the pattern fixed.
+      if (row.timestamp === null && row.timestampText) result.unreadableDates += 1;
+      keepEntry.run(
+        ref,
+        row.query,
+        opening.trim() ? contentKeyFor(opening) : null,
+        row.timestamp,
+        row.href,
+        JSON.stringify({
+          turns: row.turns,
+          images: row.imageFiles,
+          timestampText: row.timestampText ?? null,
+          // Kept on the entry so the openings can be compared later without
+          // re-parsing the export — and so a future matching pass can use the
+          // opening EXCHANGE rather than the opening prompt. Measured on a real
+          // export: 132 records share an opening prompt while only 2 share an
+          // opening prompt AND its answer, so the prompt alone over-reports the
+          // clone case by a factor of sixty-five.
+          fingerprints: row.fingerprints ?? null,
+          entryId: row.entryId ?? null,
+          // The cross-source key, computed the same way on both sides. See
+          // src/shared/fingerprint.ts for why it is text and not markup: an
+          // image arrives re-encoded and renamed, and the export's own token
+          // does not exist outside the export.
+          textFingerprint: openingFingerprint(row.turns),
+        }),
+        now,
+      );
+      const found = findEntry.get(ref) as unknown as { id: number } | undefined;
+      if (found) entryIdByRef.set(ref, found.id);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+
+  // An opening shared by several entries cannot identify any one of them, so it
+  // disqualifies automatic matching outright rather than handing the
+  // conversation to whichever entry the loop happens to reach last.
+  // Counted over CONVERSATIONS, not entries. Several snapshots of one
+  // conversation share an opening by definition and say nothing about ambiguity;
+  // two distinct conversations sharing one is the case where neither may claim a
+  // harvested thread.
+  const counts = new Map<string, number>();
+  for (const plan of plans) counts.set(plan.key, (counts.get(plan.key) ?? 0) + 1);
+  const resolved = resolveMatches(plans.map((p) => p.best));
+
+  db.exec('BEGIN');
+  try {
+    for (const plan of plans) {
+      // The furthest-along snapshot IS the conversation; the shorter ones are
+      // its history, recorded as source entries against it.
+      const row = plan.best;
+      const members = plan.snapshots.length;
+      const key = plan.key;
+      const opening = row.turns.find((t) => t.role === 'user')?.text ?? row.query;
+
+      // One shared rule, so the sweep cannot promise an import that differs
+      // from the one that runs.
+      const placement = placeEntry(row, counts.get(key) ?? 1, resolved);
+      if (placement.ambiguous) result.ambiguousOpenings += 1;
+
+      let chatId: number;
+      // The panel's reading is better than the export's — it has the real images
+      // and the fuller text — so where a thread already has one, the import adds
+      // its date, its alternate reading and its link, and leaves the turns alone.
+      let keepExistingTurns = false;
+      if (placement.enrich) {
+        chatId = placement.enrich.id;
+        if (placement.enrich.source === 'capture') {
+          // The panel version wins on content: it has the uploads and generated
+          // images Takeout lacks, and Takeout's text is rougher.
+          //
+          // But the Takeout reading is KEPT rather than dropped. They are two
+          // independent readings of the same conversation, and where they differ
+          // that is worth knowing — a truncated capture, a turn Google has since
+          // edited, or an image that only one of them saw. Silently preferring
+          // one would hide the disagreement. raw_json exists for exactly this.
+          const existingRaw = db.prepare('SELECT raw_json FROM chats WHERE id = ?').get(chatId) as
+            | { raw_json: string }
+            | undefined;
+          let merged: Record<string, unknown> = {};
+          try {
+            merged = existingRaw ? JSON.parse(existingRaw.raw_json) : {};
+          } catch {
+            merged = {};
+          }
+          merged.takeout = { href: row.href, timestamp: row.timestamp, turns: row.turns };
+          db.prepare(
+            `UPDATE chats
+                SET started_at = CASE
+                      WHEN ? IS NOT NULL AND (started_at IS NULL OR date_basis = 'placeholder')
+                        THEN ?
+                      ELSE started_at
+                    END,
+                    date_basis = CASE
+                      WHEN ? IS NOT NULL AND (started_at IS NULL OR date_basis = 'placeholder')
+                        THEN 'takeout'
+                      ELSE date_basis
+                    END,
+                    raw_json = ?, takeout_entries = ?
+              WHERE id = ?`,
+          ).run(
+            row.timestamp,
+            row.timestamp,
+            row.timestamp,
+            JSON.stringify(merged),
+            members,
+            chatId,
+          );
+          noteSource(chatId, 'takeout-alt');
+          result.mergedIntoHarvested += 1;
+          // Falls through to the linking below instead of continuing.
+          //
+          // It used to skip straight past it, and that is why a thread the
+          // importer had just matched showed "0 data entries · 1 unattached with
+          // the same prompt": the entry had contributed its date and its
+          // alternate reading, and nothing recorded that it belonged. The link is
+          // the record of the match, so the one path that matches without
+          // rewriting turns is the last place that should omit it.
+          keepExistingTurns = true;
+        }
+        if (!keepExistingTurns) result.extended += 1;
+      } else {
+        const externalId = placement.ownExternalId;
+        if (placement.ownChatId !== null) {
+          chatId = placement.ownChatId;
+          result.extended += 1;
+        } else {
+          const { lastInsertRowid } = db
+            .prepare(
+              `INSERT INTO chats
+                 (folder_id, external_id, content_key, url, title, started_at, last_seen_at,
+                  source, raw_json, list_rank)
+               VALUES (NULL, ?, ?, NULL, ?, ?, ?, 'takeout', ?, NULL)`,
+            )
+            .run(
+              externalId,
+              key,
+              opening.slice(0, 300),
+              row.timestamp,
+              new Date().toISOString(),
+              JSON.stringify({ takeout: { href: row.href } }),
+            );
+          chatId = Number(lastInsertRowid);
+          result.created += 1;
+        }
+      }
+
+      db.prepare(
+        `UPDATE chats
+            SET started_at = COALESCE(?, started_at),
+                date_basis = CASE WHEN ? IS NOT NULL THEN 'takeout' ELSE date_basis END,
+                takeout_entries = ?
+          WHERE id = ?`,
+      ).run(row.timestamp, row.timestamp, members, chatId);
+      // Replace wholesale: this snapshot is a complete reading, and a partial
+      // upsert would leave stale turns from an earlier, shorter snapshot.
+      if (!keepExistingTurns) {
+      db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
+      const insert = db.prepare(
+        'INSERT INTO messages (chat_id, seq, role, text, html) VALUES (?, ?, ?, ?, ?)',
+      );
+      row.turns.forEach((turn, index) => {
+        // html is kept so emphasis and links survive; the reader sanitises it
+        // before rendering, as it does for panel captures.
+        insert.run(chatId, index, turn.role, turn.text, turn.html || null);
+      });
+      result.turnsWritten += row.turns.length;
+      // The same fingerprint a capture would record, from the turns just
+      // written. Without it an imported thread had none at all — only
+      // replaceTurns was setting it — so the fingerprint could never be used to
+      // match an imported thread against anything, which is most of what it
+      // exists for.
+      db.prepare('UPDATE chats SET text_fingerprint = ? WHERE id = ?').run(
+        openingFingerprint(row.turns),
+        chatId,
+      );
+      noteSource(chatId, 'takeout');
+      }
+      const openingRef = takeoutEntryRef(
+        opening,
+        row.timestamp,
+        { turns: row.turns, images: row.imageFiles, href: row.href },
+        row.entryId,
+        row.fingerprints,
+      );
+      const entryId = entryIdByRef.get(openingRef);
+      if (entryId !== undefined) {
+        // The turns above were written from this one entry, so this is the only
+        // entry the import can claim describes this conversation. Any other
+        // link the IMPORT made is a grouping an earlier run got wrong, and
+        // leaving it would show a conversation as built from entries whose
+        // turns are no longer in it. Links made by hand are untouched: gluing
+        // is the owner's decision and re-running an import must not reverse it.
+        // Every snapshot of this conversation, not only the one whose turns
+        // were written: they are the record of how it got here, and the reason
+        // a wrong grouping can be taken apart later.
+        const snapshotIds = plan.snapshots
+          .map((snapshot) => {
+            const opening =
+              snapshot.turns.find((t) => t.role === 'user')?.text ?? snapshot.query;
+            return entryIdByRef.get(
+              takeoutEntryRef(
+                opening,
+                snapshot.timestamp,
+                {
+                  turns: snapshot.turns,
+                  images: snapshot.imageFiles,
+                  href: snapshot.href,
+                },
+                snapshot.entryId,
+                snapshot.fingerprints,
+              ),
+            );
+          })
+          .filter((id): id is number => id !== undefined);
+        // A snapshot the ref could not identify is COUNTED, not just dropped.
+        //
+        // This filter is why records go missing. keepList decides which entries
+        // stay attached to this conversation, and anything not found here is
+        // detached by the delete below. The ref is computed from parsed content,
+        // and the parser has changed repeatedly — the timestamp pattern, the
+        // turn splitter, the fingerprints — so a record stored under one version
+        // does not answer to the same ref under the next. It falls out here,
+        // loses its link, and nothing re-adds it.
+        //
+        // Measured on the real archive: 1438 of 3085 records attached to
+        // nothing, 380 of them still matching a live thread by prompt and 248 of
+        // those matching exactly one. Orphaning is a legitimate outcome — it is
+        // the category the user asked for — but orphaning because an identity
+        // could not be recomputed is a different thing wearing the same clothes,
+        // and it was invisible. Now the import reports it.
+        result.unidentified += plan.snapshots.length - snapshotIds.length;
+        const keepList = snapshotIds.length > 0 ? snapshotIds : [entryId];
+        const placeholders = keepList.map(() => '?').join(',');
+        // The regroup: an import recomputes which records make up a
+        // conversation and detaches the ones it no longer counts.
+        //
+        // A record left attached to nothing by this is NOT a leak — it is the
+        // orphan category, which exists because "whats unmatched and no clue
+        // where should go, goes to orphaned". I briefly guarded this delete
+        // against stranding a record's last link, and check-sources rejected it
+        // immediately: keeping a record attached to a grouping the import has
+        // just decided is wrong is worse than showing it as unplaced. The check
+        // was right and the guard was wrong.
+        //
+        // What IS worth knowing: keepList drops any snapshot whose
+        // takeoutEntryRef is not found, silently, and that ref is computed from
+        // parsed content which has changed repeatedly. So a re-import under a
+        // new parser can orphan records it would otherwise have kept — 1438 of
+        // 3085 are attached to nothing, and 380 of those still match a live
+        // thread by prompt, which is what Match entries is for.
+        const { changes } = db
+          .prepare(
+            `DELETE FROM chat_sources
+               WHERE chat_id = ? AND source_entry_id NOT IN (${placeholders})
+                 AND linked_by = 'import'`,
+          )
+          .run(chatId, ...keepList);
+        result.regrouped += Number(changes);
+        const link = db.prepare(
+          `INSERT INTO chat_sources (chat_id, source_entry_id, linked_by)
+           VALUES (?, ?, 'import')
+           ON CONFLICT (chat_id, source_entry_id) DO NOTHING`,
+        );
+        for (const id of keepList) link.run(chatId, id);
+      }
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  return result;
+}
+
+/**
+ * Glues conversations together: the losers are marked as merged into the
+ * keeper rather than deleted.
+ *
+ * Deliberately manual. Deciding whether two conversations that open with the
+ * same prompt are one conversation, two separate attempts, or a clone Google
+ * made is a judgement about intent, and every automatic rule attempted here got
+ * one of those three wrong. Reversible for the same reason: merged_into is set,
+ * nothing is destroyed, so a wrong glue can be undone.
+ */
+export function mergeChats(keepId: number, mergeIds: number[]): { merged: number } {
+  const ids = mergeIds.filter((id) => id !== keepId);
+  if (ids.length === 0) return { merged: 0 };
+  db.exec('BEGIN');
+  try {
+    const placeholders = ids.map(() => '?').join(',');
+    // Folder and hand-typed title survive on the keeper; the merged rows keep
+    // their own turns so the glue can be inspected and reversed.
+    db.prepare(`UPDATE chats SET merged_into = ? WHERE id IN (${placeholders})`).run(keepId, ...ids);
+
+    // The data entries move to the keeper, and this is the substance of the
+    // glue rather than bookkeeping after it: one conversation with several
+    // entries attached to it IS what gluing means, and the keeper's entry list
+    // is where those entries are seen and taken apart again.
+    //
+    // Leaving them behind broke both ends. The keeper listed only its own
+    // entry, so a glue of three showed one. And a merged-away conversation is
+    // hidden from every list, so an entry attached only to one was held by
+    // something unreachable and never appeared among the orphans either —
+    // present in the database and absent from the app.
+    //
+    // Which entries moved is recorded on each loser so unmerging is an exact
+    // reversal rather than a guess at what was there before.
+    const moveLinks = db.prepare(
+      'UPDATE OR IGNORE chat_sources SET chat_id = ? WHERE chat_id = ?',
+    );
+    const dropLeftovers = db.prepare('DELETE FROM chat_sources WHERE chat_id = ?');
+    for (const id of ids) {
+      const moved = (
+        db
+          .prepare('SELECT source_entry_id AS id FROM chat_sources WHERE chat_id = ?')
+          .all(id) as unknown as { id: number }[]
+      ).map((r) => r.id);
+      moveLinks.run(keepId, id);
+      // UPDATE OR IGNORE leaves behind any row whose (keeper, entry) pair
+      // already existed — the entry is on the keeper either way, and the
+      // duplicate on the loser would otherwise survive the glue.
+      dropLeftovers.run(id);
+      const raw = db.prepare('SELECT raw_json FROM chats WHERE id = ?').get(id) as
+        | { raw_json: string }
+        | undefined;
+      let parsed: Record<string, unknown> = {};
+      try {
+        parsed = raw ? JSON.parse(raw.raw_json) : {};
+      } catch {
+        parsed = {};
+      }
+      parsed.glue = { into: keepId, movedEntries: moved };
+      db.prepare('UPDATE chats SET raw_json = ? WHERE id = ?').run(JSON.stringify(parsed), id);
+    }
+    noteSource(keepId, 'glued');
+    db.exec('COMMIT');
+    return { merged: ids.length };
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/** Reverses a glue, giving the conversation back the entries it brought. */
+export function unmergeChat(chatId: number): void {
+  db.exec('BEGIN');
+  try {
+    const raw = db.prepare('SELECT raw_json FROM chats WHERE id = ?').get(chatId) as
+      | { raw_json: string }
+      | undefined;
+    let moved: number[] = [];
+    try {
+      const parsed = raw ? (JSON.parse(raw.raw_json) as { glue?: { movedEntries?: number[] } }) : {};
+      moved = parsed.glue?.movedEntries ?? [];
+    } catch {
+      moved = [];
+    }
+    // Read before clearing it: merged_into IS the record of which conversation
+    // to take the entries back from, so clearing it first loses the answer.
+    const keeper = db.prepare('SELECT merged_into FROM chats WHERE id = ?').get(chatId) as
+      | { merged_into: number | null }
+      | undefined;
+    db.prepare('UPDATE chats SET merged_into = NULL WHERE id = ?').run(chatId);
+    // Taken off the keeper as well: after unmerging, the entry describes this
+    // conversation and not the one it was glued into. An entry deliberately
+    // attached to both by hand is a separate decision and is made again by
+    // hand — guessing which of the two a link was would be worse than either.
+    const give = db.prepare(
+      `INSERT INTO chat_sources (chat_id, source_entry_id, linked_by)
+       VALUES (?, ?, 'manual')
+       ON CONFLICT (chat_id, source_entry_id) DO UPDATE SET linked_by = 'manual'`,
+    );
+    const takeBack = db.prepare('DELETE FROM chat_sources WHERE chat_id = ? AND source_entry_id = ?');
+    for (const entryId of moved) {
+      give.run(chatId, entryId);
+      if (keeper?.merged_into != null) takeBack.run(keeper.merged_into, entryId);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+export interface SourceEntryView {
+  id: number;
+  kind: string;
+  occurredAt: string | null;
+  href: string | null;
+  query: string | null;
+  turnCount: number;
+  imageCount: number;
+  linked: boolean;
+  /**
+   * How many conversations this entry is attached to. Normally one, but the
+   * link table is many-to-many on purpose and that is not a case to design
+   * away: one export entry can be evidence for two conversations that Google
+   * cloned apart, and the same entry can legitimately be cited by both until
+   * someone decides otherwise. A count above one is a fact worth showing, not
+   * a corruption to repair.
+   */
+  chatCount: number;
+  /**
+   * The date as the export wrote it, kept when it could not be parsed. Present
+   * only in that case, so an entry showing no date says which kind of no-date
+   * it is: nothing to read, or something we failed to read.
+   */
+  dateText: string | null;
+  /**
+   * Where this entry's images ended up, as relative "assets/..." paths. An
+   * orphan has no thread to render through, so this is the only way its picture
+   * can be seen — and for a Lens record the picture is the entire content.
+   */
+  imagePaths: string[];
+}
+
+/**
+ * The data entries behind a conversation, and the unlinked ones that share its
+ * opening prompt.
+ *
+ * A conversation is a view over these: each contributes different fields — one
+ * may carry the only timestamp, another the only image, a third the fullest
+ * text — so which entries are attached is the substance of the record, not
+ * metadata about it. Unlinked candidates are listed alongside so attaching one
+ * is a decision made with everything in sight.
+ */
+export function sourceEntriesForChat(chatId: number): SourceEntryView[] {
+  const rows = db
+    .prepare(
+      `SELECT e.id, e.kind, e.occurred_at, e.href, e.query, e.payload_json,
+              (SELECT COUNT(*) FROM chat_sources cs WHERE cs.source_entry_id = e.id) AS chat_count,
+              EXISTS (
+                SELECT 1 FROM chat_sources cs
+                 WHERE cs.source_entry_id = e.id AND cs.chat_id = ?
+              ) AS linked
+         FROM source_entries e
+        WHERE EXISTS (
+                SELECT 1 FROM chat_sources cs
+                 WHERE cs.source_entry_id = e.id AND cs.chat_id = ?
+              )
+           OR e.query_key = (SELECT content_key FROM chats WHERE id = ?)
+        ORDER BY linked DESC, e.occurred_at`,
+    )
+    .all(chatId, chatId, chatId) as unknown as {
+    id: number;
+    kind: string;
+    occurred_at: string | null;
+    href: string | null;
+    query: string | null;
+    payload_json: string;
+    linked: number;
+    chat_count: number;
+  }[];
+
+  return rows.map((row) => {
+    let turnCount = 0;
+    let imageCount = 0;
+    let dateText: string | null = null;
+    let imagePaths: string[] = [];
+    let linkCount = 0;
+    try {
+      const payload = JSON.parse(row.payload_json) as {
+        turns?: unknown[];
+        images?: unknown[];
+        timestampText?: string | null;
+        storedImages?: string[];
+      };
+      turnCount = payload.turns?.length ?? 0;
+      imageCount = payload.images?.length ?? 0;
+      dateText = payload.timestampText ?? null;
+      imagePaths = payload.storedImages ?? [];
+      // Counted, not sampled. Asserting "this has no anchors" from the first and
+      // last few hundred characters of a 2,503-character string got the answer
+      // wrong twice: all three of that record's links sat in the middle.
+      linkCount = ((payload.turns ?? []) as { html?: string }[]).reduce<number>(
+        (n, turn) => n + (turn.html?.match(/<a\b[^>]*href=/gi)?.length ?? 0),
+        0,
+      );
+    } catch {
+      // A payload that will not parse is still worth listing: its existence is
+      // the point, and hiding it would make the record look complete.
+    }
+    return {
+      id: row.id,
+      kind: row.kind,
+      occurredAt: row.occurred_at,
+      href: row.href,
+      query: row.query,
+      turnCount,
+      imageCount,
+      linked: row.linked === 1,
+      chatCount: row.chat_count,
+      dateText,
+      imagePaths,
+      linkCount,
+    };
+  });
+}
+
+/**
+ * Attaches a data entry to a conversation by hand — the entry-level glue.
+ *
+ * Does not detach anything it displaces. An entry may end up attached to
+ * several conversations, and that is allowed: see SourceEntryView.chatCount.
+ */
+export function linkSourceEntry(chatId: number, entryId: number): void {
+  db.prepare(
+    `INSERT INTO chat_sources (chat_id, source_entry_id, linked_by)
+     VALUES (?, ?, 'manual')
+     ON CONFLICT (chat_id, source_entry_id) DO UPDATE SET linked_by = 'manual'`,
+  ).run(chatId, entryId);
+}
+
+/** Writes an entry's own reading of the conversation as the chat's turns. */
+function writeTurnsFromEntries(chatId: number, entryIds: number[]): number {
+  db.prepare('DELETE FROM messages WHERE chat_id = ?').run(chatId);
+  if (entryIds.length === 0) return 0;
+  const insert = db.prepare(
+    'INSERT INTO messages (chat_id, seq, role, text, html) VALUES (?, ?, ?, ?, ?)',
+  );
+  const get = db.prepare('SELECT payload_json FROM source_entries WHERE id = ?');
+  let seq = 0;
+  for (const entryId of entryIds) {
+    const row = get.get(entryId) as unknown as { payload_json: string } | undefined;
+    if (!row) continue;
+    let turns: { role: string; text: string; html?: string }[] = [];
+    try {
+      turns = (JSON.parse(row.payload_json) as { turns?: typeof turns }).turns ?? [];
+    } catch {
+      continue;
+    }
+    for (const turn of turns) {
+      insert.run(chatId, seq, turn.role, turn.text, turn.html || null);
+      seq += 1;
+    }
+  }
+  return seq;
+}
+
+/**
+ * Ungluing: detaches one data entry and gives it a conversation of its own.
+ *
+ * The case this exists for is two entries that were glued together only
+ * because they open with the same prompt — the same question asked twice, or a
+ * clone Google made — which is a mistake nothing but a person can recognise.
+ * So it is a manual action, and it produces a real conversation: its own
+ * internal id, its own external id, and its own link to the entry. Merely
+ * dropping the link would leave the entry attached to nothing, which loses the
+ * reading it carries.
+ *
+ * The entry keeps the identity: the new external id is derived from the entry
+ * row, so ungluing the same entry twice reuses the conversation it already
+ * made rather than piling up near-duplicates.
+ *
+ * The conversation left behind is rebuilt from whatever entries remain — the
+ * "conversation is a view over its entries" rule actually applied — unless it
+ * has been read from the panel, which is a better reading than any export and
+ * must not be overwritten by one.
+ */
+export function unglueSourceEntry(chatId: number, entryId: number): { chatId: number } {
+  db.exec('BEGIN');
+  try {
+    db.prepare('DELETE FROM chat_sources WHERE chat_id = ? AND source_entry_id = ?').run(
+      chatId,
+      entryId,
+    );
+    const folder = db.prepare('SELECT folder_id FROM chats WHERE id = ?').get(chatId) as
+      | { folder_id: number | null }
+      | undefined;
+    const newChatId = adoptEntry(entryId, folder?.folder_id ?? null, chatId);
+
+    // The conversation left behind is rebuilt from whatever entries remain —
+    // the "conversation is a view over its entries" rule actually applied —
+    // unless it has been read from the panel, which is a fuller reading than
+    // any export and must not be overwritten by one.
+    const remaining = (
+      db
+        .prepare(
+          `SELECT cs.source_entry_id AS id FROM chat_sources cs
+             JOIN source_entries e ON e.id = cs.source_entry_id
+            WHERE cs.chat_id = ? ORDER BY e.occurred_at`,
+        )
+        .all(chatId) as unknown as { id: number }[]
+    ).map((r) => r.id);
+    const left = db.prepare('SELECT sources FROM chats WHERE id = ?').get(chatId) as
+      | { sources: string | null }
+      | undefined;
+    if (remaining.length > 0 && !(left?.sources ?? '').split(',').includes('capture')) {
+      writeTurnsFromEntries(chatId, remaining);
+    }
+    db.prepare('UPDATE chats SET takeout_entries = ? WHERE id = ?').run(remaining.length, chatId);
+
+    db.exec('COMMIT');
+    return { chatId: newChatId };
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/**
+ * Gives one entry a conversation of its own. Caller holds the transaction.
+ *
+ * The entry keeps the identity: the external id is derived from the entry row,
+ * so adopting the same entry twice reuses the conversation it already made
+ * rather than piling up near-duplicates.
+ */
+function adoptEntry(entryId: number, folderId: number | null, from?: number): number {
+  const entry = db
+    .prepare(
+      'SELECT id, kind, query, query_key, occurred_at, href FROM source_entries WHERE id = ?',
+    )
+    .get(entryId) as unknown as
+    | {
+        id: number;
+        kind: string;
+        query: string | null;
+        query_key: string | null;
+        occurred_at: string | null;
+        href: string | null;
+      }
+    | undefined;
+  if (!entry) throw new Error(`No source entry ${entryId}`);
+
+  const externalId = `entry:${entry.id}`;
+  let chatId: number;
+  const existing = db.prepare('SELECT id FROM chats WHERE external_id = ?').get(externalId) as
+    | { id: number }
+    | undefined;
+  if (existing) {
+    chatId = existing.id;
+    // A previous split of this entry was merged away; splitting again is a
+    // reversal of that, so bring it back rather than making a third row.
+    db.prepare('UPDATE chats SET merged_into = NULL WHERE id = ?').run(chatId);
+  } else {
+    const { lastInsertRowid } = db
+      .prepare(
+        `INSERT INTO chats
+           (folder_id, external_id, content_key, url, title, started_at, last_seen_at,
+            source, raw_json, list_rank)
+         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL)`,
+      )
+      .run(
+        folderId,
+        externalId,
+        entry.query_key,
+        (entry.query ?? '(untitled)').slice(0, 300),
+        entry.occurred_at,
+        new Date().toISOString(),
+        entry.kind,
+        JSON.stringify({ adopted: { from: from ?? null, entry: entry.id, href: entry.href } }),
+      );
+    chatId = Number(lastInsertRowid);
+  }
+
+  db.prepare(
+    `INSERT INTO chat_sources (chat_id, source_entry_id, linked_by)
+     VALUES (?, ?, 'manual')
+     ON CONFLICT (chat_id, source_entry_id) DO UPDATE SET linked_by = 'manual'`,
+  ).run(chatId, entryId);
+  writeTurnsFromEntries(chatId, [entryId]);
+  // Both: where the content came from, and how this conversation came to
+  // exist. Recording only the latter would make an unglued conversation look
+  // like it had no source at all.
+  noteSource(chatId, entry.kind);
+  noteSource(chatId, from === undefined ? 'adopted' : 'unglued');
+  return chatId;
+}
+
+/**
+ * The conversation an entry is attached to, by the entry's own reference.
+ *
+ * Uses the link table, so it answers the question the same way the rest of the
+ * app does rather than re-deriving it from the entry's contents.
+ */
+export function chatIdForEntry(ref: string): number | null {
+  const row = db
+    .prepare(
+      `SELECT cs.chat_id AS id FROM source_entries e
+         JOIN chat_sources cs ON cs.source_entry_id = e.id
+         JOIN chats c ON c.id = cs.chat_id
+        WHERE e.kind = 'takeout' AND e.external_ref = ? AND c.merged_into IS NULL
+        ORDER BY CASE cs.linked_by WHEN 'import' THEN 0 ELSE 1 END
+        LIMIT 1`,
+    )
+    .get(ref) as { id: number } | undefined;
+  return row?.id ?? null;
+}
+
+/**
+ * Records an image shipped in the export against its conversation.
+ *
+ * Without this the export's images were copied into the asset store and then
+ * abandoned: files on disk with no row pointing at them, so the app could not
+ * count them, show them, or find them again. Bytes kept and knowledge of them
+ * thrown away, which is the same loss as deleting them.
+ *
+ * message_id is null: the export puts its images in a cell of their own, beside
+ * the conversation rather than inside a turn, so there is no turn to attribute
+ * them to without guessing.
+ */
+export function attachExportImage(
+  chatId: number,
+  asset: { sha256: string; mime: string; localPath: string; bytes: number },
+): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO assets
+       (chat_id, message_id, original_url, sha256, mime, local_path, bytes, kind)
+     VALUES (?, NULL, NULL, ?, ?, ?, ?, 'takeout')`,
+  ).run(chatId, asset.sha256, asset.mime, asset.localPath, asset.bytes);
+}
+
+/**
+ * Records where an entry's image was stored, on the entry itself.
+ *
+ * An entry that belongs to no thread — a Lens search is a date and an image and
+ * nothing else — has no chat row to hang an asset off, and assets.chat_id cannot
+ * be null. Without this the file was copied to disk and the only thing naming it
+ * was the export's own filename, so the orphan list could say an image existed
+ * and never show it.
+ */
+/**
+ * A date read off the panel, for a thread that has none.
+ *
+ * The panel's own timestamp element is adaptive display text — "17:05" for a turn
+ * from today, "August 22, 2026" for an older one — and it is not rendered for
+ * every turn, which is why it was recorded as unusable and thrown away. That was
+ * too strong: when it does say a date, it is a real one, and a real date to the
+ * day beats a placeholder saying only that the app saved the thread today.
+ *
+ * Only ever improves on a placeholder or on nothing. An export's date wins,
+ * because it is precise to the second while this is precise to the day, and a
+ * coarser fact must not overwrite a finer one.
+ */
+export interface SuspectCopy {
+  fingerprint: string;
+  chatIds: number[];
+  titles: string[];
+}
+
+/**
+ * Threads holding identical conversations, which should be impossible.
+ *
+ * Written to detect the damage from a specific bug: clicking a sidebar row that
+ * does not exist did nothing and reported success, so a thread Google had
+ * rotated out was stored with whatever the panel was still showing — the
+ * previously captured thread. The result is two thread rows with byte-identical
+ * turns and different ids, and nothing on screen to suggest it.
+ *
+ * text_fingerprint makes it findable after the fact. Two threads genuinely
+ * having the same opening exchange is possible — the same question asked twice —
+ * so this reports candidates rather than a verdict; a run of them appearing
+ * together, all captured in the same pass, is the signature.
+ */
+export function suspectCopies(): SuspectCopy[] {
+  return (
+    db
+      .prepare(
+        `SELECT c.text_fingerprint AS fingerprint,
+                GROUP_CONCAT(c.id) AS ids,
+                GROUP_CONCAT(${CHAT_TITLE_SQL}, ' ||| ') AS titles
+           FROM chats c
+          WHERE c.text_fingerprint IS NOT NULL
+            AND c.text_fingerprint <> '0000000000000000'
+            AND c.merged_into IS NULL
+          GROUP BY c.text_fingerprint
+         HAVING COUNT(*) > 1
+          ORDER BY COUNT(*) DESC`,
+      )
+      .all() as unknown as { fingerprint: string; ids: string; titles: string }[]
+  ).map((row) => ({
+    fingerprint: row.fingerprint,
+    chatIds: row.ids.split(',').map(Number),
+    titles: row.titles.split(' ||| '),
+  }));
+}
+
+export function setPanelDate(chatId: number, isoDate: string): void {
+  db.prepare(
+    `UPDATE chats
+        SET started_at = ?, date_basis = 'panel'
+      WHERE id = ?
+        AND (started_at IS NULL OR date_basis = 'placeholder')`,
+  ).run(isoDate, chatId);
+}
+
+export function attachEntryImage(ref: string, relativePath: string): void {
+  const row = db
+    .prepare("SELECT id, payload_json FROM source_entries WHERE kind = 'takeout' AND external_ref = ?")
+    .get(ref) as { id: number; payload_json: string } | undefined;
+  if (!row) return;
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  const stored = Array.isArray(payload.storedImages) ? (payload.storedImages as string[]) : [];
+  if (stored.includes(relativePath)) return;
+  stored.push(relativePath);
+  payload.storedImages = stored;
+  db.prepare('UPDATE source_entries SET payload_json = ? WHERE id = ?').run(
+    JSON.stringify(payload),
+    row.id,
+  );
+}
+
+export interface EntryToOpen {
+  id: number;
+  href: string | null;
+  query: string | null;
+  /** The export's own reading of the whole opening exchange. */
+  fingerprint: string | null;
+  /**
+   * The opening PROMPT alone. What a page is checked against, because the export
+   * truncates answers — a real archived thread returned 6,689 characters where
+   * the export held 1,775, so comparing answers rejected a genuine recovery.
+   */
+  promptFingerprint: string | null;
+  /** When the export says this happened. The page states its own date, and they
+   * either agree or this is not that thread. */
+  occurredAt: string | null;
+  chatId: number | null;
+}
+
+export interface ThreadToFetch {
+  chatId: number;
+  entryId: number;
+  title: string;
+}
+
+/**
+ * Threads that only an export knows about, and that carry a link to fetch.
+ *
+ * This is most of the archive. The sidebar lists a few hundred threads while the
+ * export holds 2026 records with a link, so for everything Google has rotated
+ * out the link is the only route to the real thread — the full text and the
+ * generated images, rather than the export's rougher account.
+ *
+ * Threads already read from the panel are excluded: they have the better reading
+ * already, and re-fetching would spend a page load to replace it with itself.
+ */
+export interface RematchResult {
+  attached: number;
+  considered: number;
+  declined: number;
+  /** Links an earlier import should have made and did not. See repairEntryLinks. */
+  relinked: number;
+}
+
+/**
+ * Restores links an earlier import failed to make.
+ *
+ * Found in a real archive: threads created by an import, each with exactly one
+ * entry carrying the right query and the right URL, and no link between them. The
+ * cause was a bug since fixed — the linking code rebuilt the entry's reference
+ * string locally instead of calling takeoutEntryRef, so it looked up the old
+ * format and missed every entry keyed by Google's mstk token, which is the common
+ * case. The import wrote the turns and then failed to record where they came
+ * from.
+ *
+ * Repairing beats re-importing. A re-import would work, but references changed
+ * shape between those builds, so entries stored under the old form would be
+ * stored again under the new one rather than recognised — turning a repair into a
+ * duplication.
+ *
+ * Only unambiguous pairs are linked: one export-owned thread, one unlinked entry
+ * with that opening. Where several entries share it there is nothing here to
+ * choose between them, and guessing is what the rest of this file exists to
+ * avoid.
+ */
+function repairEntryLinks(): number {
+  const orphanedThreads = db
+    .prepare(
+      `SELECT id, content_key FROM chats
+        WHERE merged_into IS NULL
+          AND external_id LIKE 'takeout:%'
+          AND content_key IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM chat_sources cs WHERE cs.chat_id = chats.id)`,
+    )
+    .all() as unknown as { id: number; content_key: string }[];
+
+  let relinked = 0;
+  for (const thread of orphanedThreads) {
+    const entries = db
+      .prepare(
+        `SELECT e.id FROM source_entries e
+          WHERE e.kind = 'takeout' AND e.query_key = ?
+            AND NOT EXISTS (SELECT 1 FROM chat_sources cs WHERE cs.source_entry_id = e.id)
+          LIMIT 2`,
+      )
+      .all(thread.content_key) as unknown as { id: number }[];
+    if (entries.length !== 1) continue;
+    db.prepare(
+      `INSERT INTO chat_sources (chat_id, source_entry_id, linked_by)
+       VALUES (?, ?, 'import')
+       ON CONFLICT (chat_id, source_entry_id) DO NOTHING`,
+    ).run(thread.id, entries[0].id);
+    relinked += 1;
+  }
+  return relinked;
+}
+
+/**
+ * Glues export-only threads into the captured threads they duplicate.
+ *
+ * The second half of "fetch the threads, then match". Matching during an import
+ * decides too early: only the threads that existed at that moment could be
+ * considered, so an entry imported before its thread was captured got a thread
+ * of its own — and the two then sit side by side in the list holding the same
+ * conversation.
+ *
+ * The first attempt at this looked for unattached entries and found none, because
+ * an import always gives its entry a thread and links it. The entry is not
+ * homeless; it is on the wrong thread. So the operation is a glue between
+ * threads, not an attachment of an entry.
+ *
+ * Uses mergeChats, so the export thread is marked as merged rather than deleted
+ * and its entries move to the keeper — reversible by hand if a match was wrong,
+ * which matters because this runs over the whole archive at once.
+ */
+export function rematchEntriesToThreads(): RematchResult {
+  const result: RematchResult = { attached: 0, considered: 0, declined: 0, relinked: 0 };
+  result.relinked = repairEntryLinks();
+  const exportThreads = db
+    .prepare(
+      `SELECT id, content_key, text_fingerprint FROM chats
+        WHERE merged_into IS NULL
+          AND external_id LIKE 'takeout:%'
+          AND content_key IS NOT NULL
+          AND text_fingerprint IS NOT NULL`,
+    )
+    .all() as unknown as { id: number; content_key: string; text_fingerprint: string }[];
+
+  for (const thread of exportThreads) {
+    result.considered += 1;
+    const scored = (
+      db
+        .prepare(
+          `SELECT id, text_fingerprint FROM chats
+            WHERE content_key = ? AND merged_into IS NULL AND id <> ?
+              AND text_fingerprint IS NOT NULL
+              -- Only threads Google itself knows about. Gluing two export-only
+              -- threads together would be inventing a relationship neither has
+              -- any evidence for.
+              AND external_id NOT LIKE 'takeout:%' AND external_id NOT LIKE 'entry:%'`,
+        )
+        .all(thread.content_key, thread.id) as unknown as {
+        id: number;
+        text_fingerprint: string;
+      }[]
+    )
+      .map((c) => ({
+        id: c.id,
+        distance: hammingDistance(thread.text_fingerprint, c.text_fingerprint),
+      }))
+      .sort((a, b) => a.distance - b.distance);
+
+    if (scored.length === 0) continue;
+    const best = scored[0];
+    const next = scored[1];
+    // Same rule as an import: a lone candidate has no second opinion, so it is
+    // held to a tighter bound; several candidates must be separated by a margin.
+    const withinBound = next
+      ? best.distance <= MAX_MATCH_DISTANCE
+      : best.distance <= SOLO_MATCH_DISTANCE;
+    if (!withinBound || (next && next.distance - best.distance < REQUIRED_MARGIN)) {
+      result.declined += 1;
+      continue;
+    }
+
+    // The captured thread keeps its Google id and its reading; the export thread
+    // folds into it and hands over its entries.
+    mergeChats(best.id, [thread.id]);
+    result.attached += 1;
+  }
+  return result;
+}
+
+export interface InlineImageRow {
+  id: number;
+  chatId: number;
+  html: string;
+}
+
+/**
+ * Turns whose stored HTML still carries base64 rather than pointing at the store.
+ *
+ * Measured on a real archive: 452 of them, holding 63.9 MB of a 198 MB database.
+ * The images were never written to the asset store, so this is the only copy —
+ * which is why the repair moves them rather than simply deleting the markup.
+ */
+export function messagesWithInlineImages(limit: number, afterId = 0): InlineImageRow[] {
+  // Paged by id, and that is the whole point rather than a detail. Re-querying
+  // "html LIKE '%data:image%'" each round meant any row the rewrite could not
+  // fully clean was selected again on the next pass, forever — the progress
+  // counter read "3200 of 480" on a real archive, which is what an endless loop
+  // looks like from the outside. Walking ids visits every row exactly once
+  // whether or not cleaning it succeeded.
+  //
+  // Selected by the has_inline flag rather than by LIKE, so this reads the 2245
+  // rows that actually hold base64 instead of all 23285 to find them. The caller
+  // drains the flag backfill before the first page, so an unexamined row cannot
+  // be silently passed over.
+  return db
+    .prepare(
+      `SELECT id, chat_id AS chatId, html FROM messages
+        WHERE has_inline = 1 AND id > ?
+        ORDER BY id
+        LIMIT ?`,
+    )
+    .all(afterId, limit) as unknown as InlineImageRow[];
+}
+
+export interface InlineImageCount {
+  /** Turns known to hold base64. */
+  inline: number;
+  /**
+   * Turns not yet examined, so `inline` is a lower bound. Reported rather than
+   * hidden: a number presented as final while a third of the archive has not
+   * been looked at is the kind of confident wrong answer this code keeps
+   * producing.
+   */
+  unexamined: number;
+}
+
+/**
+ * How many turns still hold base64 images — from the index, not from the text.
+ *
+ * The scan this replaces read every byte of messages.html on the main thread.
+ * Both counts here are index lookups and return in microseconds.
+ */
+export function countMessagesWithInlineImages(): InlineImageCount {
+  const one = (sql: string) =>
+    Number((db.prepare(sql).get() as unknown as { n: number }).n ?? 0);
+  return {
+    inline: one('SELECT COUNT(*) AS n FROM messages WHERE has_inline = 1'),
+    unexamined: one('SELECT COUNT(*) AS n FROM messages WHERE has_inline IS NULL'),
+  };
+}
+
+/**
+ * Fills in has_inline for rows written before the column existed.
+ *
+ * The whole backfill is one scan of every stored turn, which is the very thing
+ * that froze the window — so it is handed out in slices and the caller yields
+ * between them. Returns what is left, so the caller knows when to stop.
+ */
+export function examineInlineImages(limit: number): { examined: number; remaining: number } {
+  const rows = db
+    .prepare('SELECT id, html FROM messages WHERE has_inline IS NULL LIMIT ?')
+    .all(limit) as unknown as { id: number; html: string | null }[];
+  // A plain UPDATE, not a rewrite of html: the AFTER UPDATE OF html trigger
+  // would not fire for this column, and firing it would mean writing the markup
+  // back out for no reason.
+  const set = db.prepare('UPDATE messages SET has_inline = ? WHERE id = ?');
+  for (const row of rows) {
+    set.run((row.html ?? '').includes('data:image') ? 1 : 0, row.id);
+  }
+  return {
+    examined: rows.length,
+    remaining: Number(
+      (
+        db
+          .prepare('SELECT COUNT(*) AS n FROM messages WHERE has_inline IS NULL')
+          .get() as unknown as { n: number }
+      ).n ?? 0,
+    ),
+  };
+}
+
+export function replaceMessageHtml(messageId: number, html: string): void {
+  db.prepare('UPDATE messages SET html = ? WHERE id = ?').run(html, messageId);
+}
+
+/** Records an image recovered from inline base64 against its own turn. */
+export function addAssetForMessage(
+  chatId: number,
+  messageId: number,
+  asset: { sha256: string; mime: string; localPath: string; bytes: number },
+  kind: string,
+): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO assets
+       (chat_id, message_id, original_url, sha256, mime, local_path, bytes, kind)
+     VALUES (?, ?, NULL, ?, ?, ?, ?, ?)`,
+  ).run(chatId, messageId, asset.sha256, asset.mime, asset.localPath, asset.bytes, kind);
+}
+
+/**
+ * Records the verdict from opening a thread's export link, and why.
+ *
+ * The reason is stored, not just the state. A run that stopped left no record of
+ * which threads it had tried or how they went — "I don't know if it has failed
+ * some entry or not" is not a question the archive should be unable to answer
+ * about itself.
+ *
+ * 'error' is deliberately NOT excluded from the queue: it means something went
+ * wrong this time, and a later run should try again. Only 'rejected' — the page
+ * was not this thread — is permanent.
+ */
+export function setLinkState(
+  chatId: number,
+  state: 'rejected' | 'fetched' | 'error',
+  reason?: string,
+): void {
+  db.prepare('UPDATE chats SET link_state = ?, link_note = ? WHERE id = ?').run(
+    state,
+    reason ?? null,
+    chatId,
+  );
+}
+
+export interface JobRecord {
+  job: string;
+  /** 'finished' | 'stopped' | 'failed' — how it ended, not how it went. */
+  outcome: string;
+  startedAt: string;
+  endedAt: string;
+  /** The run's own summary, whatever shape that job reports. */
+  detail: Record<string, unknown>;
+}
+
+/**
+ * Records how a long job ended, and survives a restart.
+ *
+ * Because "it stopped" and "it finished" looked identical: a progress line that
+ * has ceased to move says nothing about which, the summary vanished with the run,
+ * and a reload lost even that. A job that cannot say it completed is a job you
+ * have to watch, and these run for an hour.
+ *
+ * 'outcome' is deliberately separate from the counts. A run can finish having
+ * fetched nothing, or be stopped having fetched a thousand, and those are
+ * different facts about different things.
+ */
+export function recordJob(
+  job: string,
+  outcome: 'finished' | 'stopped' | 'failed',
+  startedAt: string,
+  detail: Record<string, unknown>,
+): void {
+  db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(
+    `job:${job}`,
+    JSON.stringify({ job, outcome, startedAt, endedAt: new Date().toISOString(), detail }),
+  );
+}
+
+/** The last recorded ending of every job that has ever run. */
+export function lastJobs(): JobRecord[] {
+  return (
+    db
+      .prepare("SELECT value FROM settings WHERE key LIKE 'job:%'")
+      .all() as unknown as { value: string }[]
+  )
+    .map((row) => {
+      try {
+        return JSON.parse(row.value) as JobRecord;
+      } catch {
+        return null;
+      }
+    })
+    .filter((r): r is JobRecord => r !== null)
+    .sort((a, b) => b.endedAt.localeCompare(a.endedAt));
+}
+
+export interface LinkOutcome {
+  chatId: number;
+  title: string;
+  state: string;
+  note: string | null;
+}
+
+/** Every thread whose link has been tried, and how it went. */
+export function linkOutcomes(): LinkOutcome[] {
+  return db
+    .prepare(
+      `SELECT id AS chatId, ${CHAT_TITLE_SQL} AS title, link_state AS state, link_note AS note
+         FROM chats
+        WHERE link_state IS NOT NULL AND link_state <> 'fetched'
+        ORDER BY link_state, id`,
+    )
+    .all() as unknown as LinkOutcome[];
+}
+
+export function threadsWithLinksToFetch(limit: number): ThreadToFetch[] {
+  return db
+    .prepare(
+      `SELECT c.id AS chatId, e.id AS entryId, ${CHAT_TITLE_SQL} AS title
+         FROM chats c
+         JOIN chat_sources cs ON cs.chat_id = c.id
+         JOIN source_entries e ON e.id = cs.source_entry_id
+        WHERE c.merged_into IS NULL
+          AND e.href IS NOT NULL
+          AND ',' || COALESCE(c.sources, c.source) || ',' NOT LIKE '%,capture,%'
+          -- A link whose page did not match the export is not tried again. The
+          -- verdict is about the link, so a second attempt spends a page load to
+          -- reach the same conclusion — and with rejections dominating, every run
+          -- would otherwise re-walk the entire queue.
+          AND COALESCE(c.link_state, '') <> 'rejected'
+          -- 'error' stays in the queue on purpose: it says this attempt went
+          -- wrong, not that the thread cannot be had.
+        GROUP BY c.id
+        -- Newest first: an older thread is likelier to have been dropped by
+        -- Google altogether, so the ones most likely to still be there go first.
+        ORDER BY c.started_at DESC
+        LIMIT ?`,
+    )
+    .all(limit) as unknown as ThreadToFetch[];
+}
+
+/**
+ * Orphan entries that carry a link.
+ *
+ * The queue above joins chats to entries, so it can only ever see entries that
+ * are ATTACHED to a thread. Measured on the real archive: 2026 entries hold a
+ * Takeout href, 1641 threads have been enriched from one, one thread's link is
+ * still unfetched — and 379 entries with a link belong to no thread at all, so
+ * nothing bulk has ever been able to reach them. They were fetchable only one at
+ * a time, from the orphan pane.
+ *
+ * captureFromEntryLink already copes: an entry with no chat is adopted into a new
+ * one before its turns are stored. The only thing missing was a list to hand it.
+ */
+/**
+ * Every export record with a link that has not been pulled yet.
+ *
+ * The queue this replaces was per THREAD, and that was wrong three ways at once:
+ * it joined chats to entries so it could not see records attached to no thread
+ * (379 of them), it skipped any thread already read from the panel even though
+ * the two readings hold different links and different text, and it counted one
+ * job per thread where a thread can hold several records each with a link of its
+ * own. It reported 1 outstanding against 380.
+ *
+ * Per entry, which is the unit of work: one record, one link, one verdict.
+ */
+/**
+ * Links that the import left on the entry and never turned into a record.
+ *
+ * MEASURED on the real archive: 2680 entries carry a Takeout link inside
+ * chats.raw_json — the payload is `{"takeout":{"href":"..."}}` — and 815 of them
+ * have no record holding that href. The link queue is entirely record-based, so
+ * those 815 are invisible to it: the reader shows the entry's link, "Read from
+ * links" says there is nothing to do, and both are telling the truth about
+ * different places.
+ *
+ * 780 of the 815 have never been read from threads either, which makes this the
+ * bulk of the population I had called unreachable. It is not unreachable; its
+ * links were simply never written down anywhere a query could find them.
+ *
+ * Recovered rather than re-derived: the href is already on the entry, so
+ * attaching it to that entry needs no judgement — the pairing is not a guess, it
+ * is what the import stored. That is the standard for doing this automatically.
+ */
+export interface TakeoutLinkRecovery {
+  /** Entries holding a payload link with no record to carry it. */
+  entries: number;
+}
+
+export function planTakeoutLinkRecovery(): TakeoutLinkRecovery {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM chats c
+        WHERE c.merged_into IS NULL
+          AND c.raw_json LIKE '%udm=50%'
+          AND NOT EXISTS (
+                SELECT 1 FROM chat_sources cs
+                  JOIN source_entries se ON se.id = cs.source_entry_id
+                 WHERE cs.chat_id = c.id AND se.href IS NOT NULL)`,
+    )
+    .get() as unknown as { n: number };
+  return { entries: row.n };
+}
+
+/**
+ * Writes those links down as records, so the existing link flow can see them.
+ *
+ * Deliberately NOT a new fetch path. Everything downstream — the queue, the
+ * per-record verdict, the rejection handling, the orphan model — already works on
+ * records, and a second parallel path for links-that-live-elsewhere would be the
+ * same divergence that has cost this codebase four bugs today.
+ *
+ * The record is written as what it is: kind 'takeout', because that payload came
+ * from an export, with the entry's own start instant and external id, linked by
+ * 'recovered' so these are identifiable afterwards. link_state stays NULL, which
+ * is what puts them in the queue.
+ *
+ * chats.url is filled in at the same time when empty — same href, and it is what
+ * the entry itself should have been carrying all along.
+ */
+export function recoverTakeoutLinks(): { records: number; urls: number; skipped: number } {
+  const rows = db
+    .prepare(
+      `SELECT c.id, c.raw_json, c.external_id, c.started_at, c.url,
+              ${CHAT_TITLE_SQL} AS title
+         FROM chats c
+        WHERE c.merged_into IS NULL
+          AND c.raw_json LIKE '%udm=50%'
+          AND NOT EXISTS (
+                SELECT 1 FROM chat_sources cs
+                  JOIN source_entries se ON se.id = cs.source_entry_id
+                 WHERE cs.chat_id = c.id AND se.href IS NOT NULL)`,
+    )
+    .all() as unknown as {
+    id: number;
+    raw_json: string;
+    external_id: string;
+    started_at: string | null;
+    url: string | null;
+    title: string;
+  }[];
+
+  // payload_json is NOT NULL and every consumer parses it for turns, images,
+  // timestampText and storedImages. A recovered record holds a LINK and nothing
+  // else — its conversation is still on Google — so the payload says exactly
+  // that: empty collections rather than a null nobody can parse.
+  //
+  // external_ref is 'recovered:<chat id>', NOT the entry's own external_id, and
+  // the reason is the UNIQUE(kind, external_ref) on this table. Using the entry's
+  // id would collide the moment a re-import mints the real record for the same
+  // ref — and collide silently, because the importer inserts with OR IGNORE, so
+  // its genuine record would be dropped in favour of this stub. A ref the
+  // importer can never produce cannot be in its way.
+  const insertRecord = db.prepare(
+    `INSERT OR IGNORE INTO source_entries
+       (kind, external_ref, query, occurred_at, href, payload_json, imported_at)
+     VALUES ('takeout', ?, ?, ?, ?, ?, ?)`,
+  );
+  const findRecord = db.prepare(
+    "SELECT id FROM source_entries WHERE kind = 'takeout' AND external_ref = ?",
+  );
+  const link = db.prepare(
+    `INSERT INTO chat_sources (chat_id, source_entry_id, linked_by)
+     VALUES (?, ?, 'recovered')
+     ON CONFLICT (chat_id, source_entry_id) DO NOTHING`,
+  );
+  const setUrl = db.prepare('UPDATE chats SET url = ? WHERE id = ? AND url IS NULL');
+  const now = new Date().toISOString();
+
+  let records = 0;
+  let urls = 0;
+  let skipped = 0;
+  db.exec('BEGIN');
+  try {
+    for (const row of rows) {
+      let href: string | null = null;
+      try {
+        const parsed = JSON.parse(row.raw_json) as { takeout?: { href?: string } };
+        href = parsed.takeout?.href ?? null;
+      } catch {
+        href = null;
+      }
+      // A payload that does not parse, or holds no href, is left exactly as it
+      // is. The LIKE that found it matches the whole payload, so a udm=50 string
+      // somewhere else in it is not a link to this conversation.
+      if (!href || !href.startsWith('http')) {
+        skipped += 1;
+        continue;
+      }
+      const ref = `recovered:${row.id}`;
+      insertRecord.run(
+        ref,
+        row.title,
+        row.started_at,
+        href,
+        JSON.stringify({ turns: [], images: [], recoveredFrom: 'chats.raw_json' }),
+        now,
+      );
+      // Looked up rather than taken from lastInsertRowid: with OR IGNORE a second
+      // run inserts nothing and lastInsertRowid then names whatever row was
+      // written last, which would attach an unrelated record to this entry.
+      const found = findRecord.get(ref) as { id: number } | undefined;
+      if (!found) {
+        skipped += 1;
+        continue;
+      }
+      link.run(row.id, found.id);
+      records += 1;
+      if (!row.url) {
+        setUrl.run(href, row.id);
+        urls += 1;
+      }
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  return { records, urls, skipped };
+}
+
+/**
+ * Entries that hold a link's content NOWHERE, whatever the link's own verdict.
+ *
+ * link_state answers "has this link been opened". The question a person asks
+ * looking at an entry is "does THIS ENTRY hold what the link has", and the two
+ * come apart:
+ *
+ *  - a record glued to a second entry by hand arrives carrying the 'fetched' it
+ *    earned while attached to the first, and the content stayed on the first
+ *  - the migration that introduced link_state copied the CHAT's verdict onto
+ *    every record attached to it, and a chat can hold several records each with
+ *    its own link — the exact conflation the per-record queue was built to end
+ *
+ * Either way the record is excluded from the queue for work that never happened
+ * to this entry. Measured: 163 entries whose record says fetched while their
+ * sources show neither a link nor a threads reading, 81 of them holding four
+ * turns or fewer. Entry #51 is one of them — a link on screen, "nothing to do"
+ * in the menu, and both statements true about different things.
+ *
+ * Deliberately excludes entries that already carry a THREADS reading. Those hold
+ * the better account, and with one slot for a non-takeout reading a link pull
+ * would replace it with a worse one. This queue only ever adds.
+ */
+const UNUSED_LINK_WHERE = `se.href IS NOT NULL
+      AND c.merged_into IS NULL
+      AND ',' || COALESCE(c.sources, c.source) || ',' NOT LIKE '%,link,%'
+      AND ',' || COALESCE(c.sources, c.source) || ',' NOT LIKE '%,capture,%'`;
+
+export function entriesWithUnusedLinks(limit: number): ThreadToFetch[] {
+  return db
+    .prepare(
+      `SELECT c.id AS chatId,
+              se.id AS entryId,
+              COALESCE(NULLIF(se.query, ''), '(untitled record)') AS title
+         FROM source_entries se
+         JOIN chat_sources cs ON cs.source_entry_id = se.id
+         JOIN chats c ON c.id = cs.chat_id
+        WHERE ${UNUSED_LINK_WHERE}
+        ORDER BY CAST(strftime('%s', se.occurred_at) AS INTEGER) DESC, se.id DESC
+        LIMIT ?`,
+    )
+    .all(limit) as unknown as ThreadToFetch[];
+}
+
+export function countEntriesWithUnusedLinks(): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM source_entries se
+         JOIN chat_sources cs ON cs.source_entry_id = se.id
+         JOIN chats c ON c.id = cs.chat_id
+        WHERE ${UNUSED_LINK_WHERE}`,
     )
     .get() as unknown as { n: number };
   return row.n;
+}
+
+/**
+ * Empty threads that share an opening prompt with a thread that has content.
+ *
+ * The one duplicate case that needs no judgement. Everywhere else in this app
+ * grouping is manual on purpose — two records with the same opening prompt may
+ * be one conversation snapshotted twice, the same question asked twice, or a
+ * clone Google made on its own, and the fingerprint compares ANSWERS precisely
+ * because prompts cannot tell those apart.
+ *
+ * An empty thread has no answer to compare, which is why the matcher declines
+ * it: measured on the real archive, 69 threads hold no turns and 37 of them
+ * share a content_key with a thread that does. Their dates cannot rescue it
+ * either — an empty thread carries a placeholder stamped when the app first saw
+ * it, so 0 of the 37 agree on a date even where the records plainly do.
+ *
+ * But an empty thread holds NOTHING. Folding it into its content-bearing twin
+ * cannot lose text, images, entries or a link, because it has none of them —
+ * which makes this the one merge that is safe without a person looking at it.
+ * Still not automatic: it is offered with a count, and mergeChats sets
+ * merged_into rather than deleting, so it is undoable like any other merge.
+ */
+export function emptyDuplicateThreads(): { emptyId: number; keepId: number }[] {
+  return db
+    .prepare(
+      `SELECT c.id AS emptyId,
+              (SELECT o.id FROM chats o
+                WHERE o.merged_into IS NULL
+                  AND o.id <> c.id
+                  AND o.content_key = c.content_key
+                  AND EXISTS (SELECT 1 FROM messages m2 WHERE m2.chat_id = o.id)
+                -- The fullest twin, so folding never picks a thinner reading to
+                -- keep than one already stored.
+                ORDER BY (SELECT COUNT(*) FROM messages m3 WHERE m3.chat_id = o.id) DESC
+                LIMIT 1) AS keepId
+         FROM chats c
+        WHERE c.merged_into IS NULL
+          AND c.content_key IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id)
+          -- Nor any entries of its own: a thread with a raw record attached is
+          -- not empty, it is unread, and those are different things.
+          AND NOT EXISTS (SELECT 1 FROM chat_sources cs WHERE cs.chat_id = c.id)
+          AND EXISTS (
+            SELECT 1 FROM chats o
+             WHERE o.merged_into IS NULL AND o.id <> c.id
+               AND o.content_key = c.content_key
+               AND EXISTS (SELECT 1 FROM messages m2 WHERE m2.chat_id = o.id))`,
+    )
+    .all() as unknown as { emptyId: number; keepId: number }[];
+}
+
+export function foldEmptyDuplicates(): { folded: number } {
+  const pairs = emptyDuplicateThreads();
+  let folded = 0;
+  for (const pair of pairs) {
+    if (!pair.keepId) continue;
+    mergeChats(pair.keepId, [pair.emptyId]);
+    folded += 1;
+  }
+  return { folded };
+}
+
+export function entriesWithLinksToFetch(limit: number): ThreadToFetch[] {
+  return db
+    .prepare(
+      `SELECT (SELECT cs.chat_id FROM chat_sources cs
+                 JOIN chats c ON c.id = cs.chat_id
+                WHERE cs.source_entry_id = e.id AND c.merged_into IS NULL
+                LIMIT 1) AS chatId,
+              e.id AS entryId,
+              COALESCE(NULLIF(e.query, ''), '(untitled record)') AS title
+         FROM source_entries e
+        WHERE e.href IS NOT NULL
+          -- NULL means never tried, or tried and failed transiently. 'rejected'
+          -- is a property of the link rather than of the moment — the page did
+          -- not match the export — so retrying spends a page load to reach the
+          -- same answer.
+          AND COALESCE(e.link_state, '') NOT IN ('fetched', 'rejected')
+        -- Newest first: an older record is likelier to have been dropped by
+        -- Google altogether, so the ones most likely to still be there go first.
+        -- As an instant; see the note on the list ordering. The export's own
+        -- dates carry local offsets and everything this app writes is UTC.
+        ORDER BY CAST(strftime('%s', e.occurred_at) AS INTEGER) DESC, e.id DESC
+        LIMIT ?`,
+    )
+    .all(limit) as unknown as ThreadToFetch[];
+}
+
+export function countEntriesWithLinksToFetch(): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM source_entries e
+        WHERE e.href IS NOT NULL
+          AND COALESCE(e.link_state, '') NOT IN ('fetched', 'rejected')`,
+    )
+    .get() as unknown as { n: number };
+  return row.n;
+}
+
+/** Records this entry's own verdict, so it is not pulled twice. */
+export function setEntryLinkState(entryId: number, state: string): void {
+  db.prepare('UPDATE source_entries SET link_state = ? WHERE id = ?').run(state, entryId);
+}
+
+export function orphanEntriesWithLinks(limit: number): ThreadToFetch[] {
+  return db
+    .prepare(
+      `SELECT NULL AS chatId, e.id AS entryId,
+              COALESCE(NULLIF(e.query, ''), '(untitled entry)') AS title
+         FROM source_entries e
+        WHERE e.href IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM chat_sources cs WHERE cs.source_entry_id = e.id)
+        -- Newest first, for the same reason as the thread queue: an older record
+        -- is likelier to have been dropped by Google altogether.
+        ORDER BY e.occurred_at DESC, e.id DESC
+        LIMIT ?`,
+    )
+    .all(limit) as unknown as ThreadToFetch[];
+}
+
+export function countOrphanEntriesWithLinks(): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM source_entries e
+        WHERE e.href IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM chat_sources cs WHERE cs.source_entry_id = e.id)`,
+    )
+    .get() as unknown as { n: number };
+  return row.n;
+}
+
+export function countThreadsWithLinksToFetch(): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(DISTINCT c.id) AS n
+         FROM chats c
+         JOIN chat_sources cs ON cs.chat_id = c.id
+         JOIN source_entries e ON e.id = cs.source_entry_id
+        WHERE c.merged_into IS NULL
+          AND e.href IS NOT NULL
+          AND ',' || COALESCE(c.sources, c.source) || ',' NOT LIKE '%,capture,%'
+          AND COALESCE(c.link_state, '') <> 'rejected'`,
+    )
+    .get() as unknown as { n: number };
+  return row.n;
+}
+
+/** An entry's link and its own reading, for opening it in the panel. */
+export function getEntryToOpen(entryId: number): EntryToOpen | null {
+  const row = db
+    .prepare(
+      `SELECT e.id, e.href, e.query, e.payload_json, e.occurred_at,
+              (SELECT cs.chat_id FROM chat_sources cs
+                 JOIN chats c ON c.id = cs.chat_id
+                WHERE cs.source_entry_id = e.id AND c.merged_into IS NULL
+                LIMIT 1) AS chat_id
+         FROM source_entries e WHERE e.id = ?`,
+    )
+    .get(entryId) as
+    | {
+        id: number;
+        href: string | null;
+        query: string | null;
+        payload_json: string;
+        occurred_at: string | null;
+        chat_id: number | null;
+      }
+    | undefined;
+  if (!row) return null;
+  let fingerprint: string | null = null;
+  let prompt: string | null = null;
+  try {
+    const payload = JSON.parse(row.payload_json) as {
+      textFingerprint?: string;
+      turns?: { role: 'user' | 'ai'; text: string }[];
+    };
+    fingerprint = payload.textFingerprint ?? null;
+    // Computed from the stored turns rather than read from a field, so it works
+    // for entries imported before the field existed — which is all of them in an
+    // archive imported before today.
+    prompt = payload.turns ? promptFingerprint(payload.turns) : null;
+  } catch {
+    fingerprint = null;
+  }
+  return {
+    id: row.id,
+    href: row.href,
+    query: row.query,
+    fingerprint,
+    promptFingerprint: prompt,
+    occurredAt: row.occurred_at,
+    chatId: row.chat_id,
+  };
+}
+
+/** Gives an orphan entry a conversation of its own. */
+/**
+ * The one live thread this record plainly belongs to, or null.
+ *
+ * Exists because pulling a record's link used to ADOPT it into a brand-new
+ * thread whenever it was attached to none — and 1438 of 3085 records are
+ * attached to none, most of them matching a thread that already exists. A link
+ * run over 383 records created 346 new threads, and all 346 were duplicates of
+ * a thread already in the archive. Nothing was lost; everything was doubled.
+ *
+ * Deliberately narrow. It answers only when exactly ONE live, non-adopted thread
+ * shares the record's opening prompt: with two or more the record is genuinely
+ * ambiguous and adopting it into its own thread is the honest outcome, which is
+ * the rule this app has followed from the start.
+ */
+export interface DuplicateFoldStep {
+  keepId: number;
+  foldIds: number[];
+  keepTurns: number;
+  /** The fullest reading in the group, when it is not the keeper's. */
+  fullestId: number;
+  fullestTurns: number;
+}
+
+/**
+ * Threads that share an opening prompt AND a start instant.
+ *
+ * The archive holds 738 groups sharing an opening prompt, which is NOT enough to
+ * merge on: two records with the same prompt may be one conversation twice, the
+ * same question asked twice, or a clone Google made, and that ambiguity is why
+ * grouping has been manual from the start.
+ *
+ * The start instant settles it. Two separate asks do not land on the same second.
+ * Measured: of the 738, 670 have every member starting at the same instant — 594
+ * of those with identical turn counts and 76 where one reading is fuller — and 68
+ * have different instants. Those 68 are the genuinely ambiguous case and are left
+ * alone.
+ *
+ * The instant is compared through strftime rather than as text, because the same
+ * moment is written three ways in this archive: 2024 threads with a +hh:mm
+ * offset, 830 in UTC, 18 with no zone.
+ *
+ * The keeper is the thread carrying a hand-typed title or a folder, because that
+ * is work a person did and no reading is worth losing it for; failing that, the
+ * fullest; failing that, the lowest id, which is the earliest import. When the
+ * keeper is not the fullest, the fullest reading moves onto it before the merge.
+ */
+export function planPromptInstantFold(): DuplicateFoldStep[] {
+  const groups = db
+    .prepare(
+      `SELECT c.content_key AS k
+         FROM chats c
+        WHERE c.merged_into IS NULL AND c.content_key IS NOT NULL AND c.started_at IS NOT NULL
+        GROUP BY c.content_key
+       HAVING COUNT(*) > 1
+          AND COUNT(DISTINCT CAST(strftime('%s', c.started_at) AS INTEGER)) = 1`,
+    )
+    .all() as unknown as { k: string }[];
+
+  const members = db.prepare(
+    `SELECT c.id,
+            (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS turns,
+            (CASE WHEN COALESCE(NULLIF(c.user_title, ''), NULL) IS NOT NULL
+                    OR c.folder_id IS NOT NULL THEN 1 ELSE 0 END) AS claimed
+       FROM chats c
+      WHERE c.merged_into IS NULL AND c.content_key = ?
+      ORDER BY claimed DESC, turns DESC, c.id ASC`,
+  );
+
+  const steps: DuplicateFoldStep[] = [];
+  for (const group of groups) {
+    const rows = members.all(group.k) as unknown as {
+      id: number;
+      turns: number;
+      claimed: number;
+    }[];
+    if (rows.length < 2) continue;
+    const keep = rows[0];
+    const fullest = rows.reduce((best, r) => (Number(r.turns) > Number(best.turns) ? r : best), rows[0]);
+    steps.push({
+      keepId: Number(keep.id),
+      foldIds: rows.slice(1).map((r) => Number(r.id)),
+      keepTurns: Number(keep.turns),
+      fullestId: Number(fullest.id),
+      fullestTurns: Number(fullest.turns),
+    });
+  }
+  return steps;
+}
+
+export function foldPromptInstantDuplicates(): {
+  groups: number;
+  folded: number;
+  turnsMoved: number;
+} {
+  const plan = planPromptInstantFold();
+  let folded = 0;
+  let turnsMoved = 0;
+  for (const step of plan) {
+    // The fullest reading moves onto the keeper first when they differ, because
+    // mergeChats keeps the keeper's turns and leaves the others' behind.
+    if (step.fullestId !== step.keepId && step.fullestTurns > step.keepTurns) {
+      const turns = db
+        .prepare('SELECT seq, role, text, html FROM messages WHERE chat_id = ? ORDER BY seq')
+        .all(step.fullestId) as unknown as TurnToSave[];
+      const assets = db
+        .prepare(
+          `SELECT m.seq AS messageSeq, a.kind, a.original_url AS originalUrl, a.sha256,
+                  a.mime, a.local_path AS localPath, a.bytes
+             FROM assets a JOIN messages m ON m.id = a.message_id
+            WHERE a.chat_id = ?`,
+        )
+        .all(step.fullestId) as unknown as AssetToSave[];
+      replaceTurns(step.keepId, turns, assets);
+      turnsMoved += turns.length;
+    }
+    mergeChats(step.keepId, step.foldIds);
+    folded += step.foldIds.length;
+  }
+  return { groups: plan.length, folded, turnsMoved };
+}
+
+export interface AdoptedFoldStep {
+  adoptedId: number;
+  keepId: number;
+  adoptedTurns: number;
+  keepTurns: number;
+  /** True when the adopted thread holds the fuller reading and must be moved. */
+  movesTurns: boolean;
+  adoptedImages: number;
+}
+
+/**
+ * The plan for undoing an over-eager link run, and it is a PLAN so it can be
+ * read before it is run.
+ *
+ * A link run over 383 records adopted 346 of them into new threads because they
+ * were attached to none — and every one of those 346 shares an opening prompt
+ * with a thread that already existed. Nothing was lost, everything was doubled.
+ *
+ * The fold keeps the ORIGINAL thread, because that is where a folder, a
+ * hand-typed title and a Google thread id live, and moves the freshly pulled
+ * reading onto it when the adopted copy holds more turns. Then it merges, which
+ * carries the record's link onto the keeper — so the same act that removes the
+ * duplicate also attaches the record that was stranded.
+ *
+ * Nothing is deleted: mergeChats sets merged_into and unmergeChat reverses it.
+ */
+export function planAdoptedFold(): AdoptedFoldStep[] {
+  return db
+    .prepare(
+      `SELECT c.id AS adoptedId,
+              (SELECT o.id FROM chats o
+                WHERE o.merged_into IS NULL AND o.id <> c.id
+                  AND o.content_key = c.content_key
+                  AND o.external_id NOT LIKE 'entry:%'
+                ORDER BY (SELECT COUNT(*) FROM messages m3 WHERE m3.chat_id = o.id) DESC
+                LIMIT 1) AS keepId,
+              (SELECT COUNT(*) FROM messages m WHERE m.chat_id = c.id) AS adoptedTurns,
+              (SELECT COUNT(*) FROM assets a WHERE a.chat_id = c.id) AS adoptedImages,
+              (SELECT COUNT(*) FROM messages m2
+                WHERE m2.chat_id = (
+                  SELECT o.id FROM chats o
+                   WHERE o.merged_into IS NULL AND o.id <> c.id
+                     AND o.content_key = c.content_key
+                     AND o.external_id NOT LIKE 'entry:%'
+                   ORDER BY (SELECT COUNT(*) FROM messages m4 WHERE m4.chat_id = o.id) DESC
+                   LIMIT 1)) AS keepTurns
+         FROM chats c
+        WHERE c.merged_into IS NULL
+          AND c.external_id LIKE 'entry:%'
+          AND c.content_key IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM chats o
+             WHERE o.merged_into IS NULL AND o.id <> c.id
+               AND o.content_key = c.content_key
+               AND o.external_id NOT LIKE 'entry:%')
+        ORDER BY c.id`,
+    )
+    .all()
+    .map((r) => {
+      const row = r as unknown as Omit<AdoptedFoldStep, 'movesTurns'>;
+      return { ...row, movesTurns: Number(row.adoptedTurns) > Number(row.keepTurns) };
+    }) as AdoptedFoldStep[];
+}
+
+export function foldAdoptedDuplicates(): {
+  folded: number;
+  turnsMoved: number;
+  imagesMoved: number;
+} {
+  const plan = planAdoptedFold();
+  let folded = 0;
+  let turnsMoved = 0;
+  let imagesMoved = 0;
+  for (const step of plan) {
+    if (!step.keepId) continue;
+    if (step.movesTurns) {
+      // The adopted copy is the fuller reading, so it moves onto the keeper
+      // BEFORE the merge — mergeChats keeps the keeper's own turns and leaves
+      // the loser's behind, so merging first would hide the reading this run
+      // spent hours pulling.
+      const turns = db
+        .prepare('SELECT seq, role, text, html FROM messages WHERE chat_id = ? ORDER BY seq')
+        .all(step.adoptedId) as unknown as TurnToSave[];
+      const assets = db
+        .prepare(
+          `SELECT m.seq AS messageSeq, a.kind, a.original_url AS originalUrl, a.sha256,
+                  a.mime, a.local_path AS localPath, a.bytes
+             FROM assets a LEFT JOIN messages m ON m.id = a.message_id
+            WHERE a.chat_id = ?`,
+        )
+        .all(step.adoptedId) as unknown as AssetToSave[];
+      // Images with no turn of their own would land on seq -1 and be dropped by
+      // replaceTurns; they stay on the adopted row, which the merge keeps.
+      replaceTurns(
+        step.keepId,
+        turns,
+        assets.filter((a) => a.messageSeq !== null),
+      );
+      turnsMoved += turns.length;
+      imagesMoved += assets.length;
+    }
+    mergeChats(step.keepId, [step.adoptedId]);
+    folded += 1;
+  }
+  return { folded, turnsMoved, imagesMoved };
+}
+
+export function soleThreadForEntry(entryId: number): number | null {
+  const row = db
+    .prepare(
+      `SELECT c.id AS id,
+              (SELECT COUNT(*) FROM chats o
+                WHERE o.merged_into IS NULL
+                  AND o.content_key = c.content_key
+                  AND o.external_id NOT LIKE 'entry:%') AS matches
+         FROM chats c
+         JOIN source_entries e ON e.query_key = c.content_key
+        WHERE e.id = ?
+          AND c.merged_into IS NULL
+          AND c.external_id NOT LIKE 'entry:%'
+        LIMIT 1`,
+    )
+    .get(entryId) as unknown as { id: number; matches: number } | undefined;
+  if (!row || Number(row.matches) !== 1) return null;
+  return row.id;
+}
+
+export function adoptSourceEntry(entryId: number, folderId: number | null): { chatId: number } {
+  db.exec('BEGIN');
+  try {
+    const chatId = adoptEntry(entryId, folderId);
+    db.exec('COMMIT');
+    return { chatId };
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+/**
+ * Entries attached to no conversation at all.
+ *
+ * These are the ones with nowhere to be seen from: an import that could not
+ * decide where an entry belonged, or an entry left behind when a wrong glue was
+ * taken apart. Without a list of them they would be present in the database and
+ * absent from the app, which is the worst of both — stored, and lost.
+ */
+export function orphanSourceEntries(): SourceEntryView[] {
+  const rows = db
+    .prepare(
+      `SELECT e.id, e.kind, e.occurred_at, e.href, e.query, e.payload_json
+         FROM source_entries e
+        WHERE NOT EXISTS (SELECT 1 FROM chat_sources cs WHERE cs.source_entry_id = e.id)
+        ORDER BY e.occurred_at DESC, e.id DESC`,
+    )
+    .all() as unknown as {
+    id: number;
+    kind: string;
+    occurred_at: string | null;
+    href: string | null;
+    query: string | null;
+    payload_json: string;
+  }[];
+  return rows.map((row) => {
+    let turnCount = 0;
+    let imageCount = 0;
+    let dateText: string | null = null;
+    let imagePaths: string[] = [];
+    let linkCount = 0;
+    try {
+      const payload = JSON.parse(row.payload_json) as {
+        turns?: unknown[];
+        images?: unknown[];
+        timestampText?: string | null;
+        storedImages?: string[];
+      };
+      turnCount = payload.turns?.length ?? 0;
+      imageCount = payload.images?.length ?? 0;
+      dateText = payload.timestampText ?? null;
+      imagePaths = payload.storedImages ?? [];
+      // Counted, not sampled. Asserting "this has no anchors" from the first and
+      // last few hundred characters of a 2,503-character string got the answer
+      // wrong twice: all three of that record's links sat in the middle.
+      linkCount = ((payload.turns ?? []) as { html?: string }[]).reduce<number>(
+        (n, turn) => n + (turn.html?.match(/<a\b[^>]*href=/gi)?.length ?? 0),
+        0,
+      );
+    } catch {
+      // Listed regardless — see sourceEntriesForChat.
+    }
+    return {
+      id: row.id,
+      kind: row.kind,
+      occurredAt: row.occurred_at,
+      href: row.href,
+      query: row.query,
+      turnCount,
+      imageCount,
+      linked: false,
+      chatCount: 0,
+      dateText,
+      imagePaths,
+      linkCount,
+    };
+  });
+}
+
+/**
+ * One entry's full stored reading — what it actually says, not a summary of it.
+ * Reviewing an entry before deciding where it belongs needs the whole thing.
+ */
+export function sourceEntryTurns(entryId: number): Message[] {
+  const row = db.prepare('SELECT payload_json FROM source_entries WHERE id = ?').get(entryId) as
+    | { payload_json: string }
+    | undefined;
+  if (!row) return [];
+  try {
+    const turns =
+      (JSON.parse(row.payload_json) as { turns?: { role: string; text: string; html?: string }[] })
+        .turns ?? [];
+    return turns.map((turn, index) => ({
+      id: index,
+      seq: index,
+      role: turn.role === 'user' ? 'user' : 'ai',
+      text: turn.text,
+      html: turn.html || null,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/** Conversations sharing this one's opening prompt — glue candidates, not facts. */
+export function similarChats(chatId: number): ChatSummary[] {
+  const row = db.prepare('SELECT content_key FROM chats WHERE id = ?').get(chatId) as unknown as
+    | { content_key: string | null }
+    | undefined;
+  if (!row?.content_key) return [];
+  const rows = db
+    .prepare(`${CHAT_SUMMARY_SQL} WHERE c.content_key = ? AND c.id != ? ORDER BY c.started_at`)
+    .all(row.content_key, chatId) as unknown as ChatSummaryRow[];
+  return rows.map(toSummary);
+}
+
+export interface ActivityMatchResult {
+  matchedToChat: number;
+  matchedToTurn: number;
+  ambiguous: number;
+  orphans: number;
+}
+
+/**
+ * Matches activity to real conversations, strongest evidence first, and dates
+ * what it can.
+ *
+ * Rerunnable and purely additive: matching improves as capture progresses,
+ * because a conversation with turns offers far more to match against than a
+ * title alone.
+ */
+export function matchActivity(): ActivityMatchResult {
+  db.exec('BEGIN');
+  try {
+    db.exec('UPDATE activity SET matched_chat_id = NULL, matched_message_id = NULL, match_kind = NULL');
+
+    // 1. Query equals a conversation's opening query, which is its title. Only
+    //    when exactly one conversation matches — the duplicate-prompt groups
+    //    match several by construction and must stay unresolved rather than be
+    //    attributed by coin flip.
+    db.exec(`
+      UPDATE activity
+         SET matched_chat_id = (
+               SELECT c.id FROM chats c
+                WHERE c.content_key = activity.query_key AND c.merged_into IS NULL
+             ),
+             match_kind = 'title'
+       WHERE matched_chat_id IS NULL
+         AND (
+           SELECT COUNT(*) FROM chats c
+            WHERE c.content_key = activity.query_key AND c.merged_into IS NULL
+         ) = 1
+    `);
+
+    // 2. Query equals the text of a captured user turn. This is where Takeout
+    //    earns its place: it dates individual turns, which AI Mode renders
+    //    nowhere.
+    db.exec(`
+      UPDATE activity
+         SET matched_message_id = (
+               SELECT m.id FROM messages m
+                WHERE m.role = 'user' AND TRIM(LOWER(m.text)) = TRIM(LOWER(activity.query))
+             ),
+             matched_chat_id = COALESCE(matched_chat_id, (
+               SELECT m.chat_id FROM messages m
+                WHERE m.role = 'user' AND TRIM(LOWER(m.text)) = TRIM(LOWER(activity.query))
+             )),
+             match_kind = COALESCE(match_kind, 'turn')
+       WHERE matched_message_id IS NULL
+         AND (
+           SELECT COUNT(*) FROM messages m
+            WHERE m.role = 'user' AND TRIM(LOWER(m.text)) = TRIM(LOWER(activity.query))
+         ) = 1
+    `);
+
+    // 3. A matched conversation with no date of its own inherits the earliest
+    //    activity time that points at it — its opening turn.
+    db.exec(`
+      UPDATE chats
+         SET started_at = (
+               SELECT MIN(a.occurred_at) FROM activity a
+                WHERE a.matched_chat_id = chats.id AND a.occurred_at IS NOT NULL
+             ),
+             date_basis = 'activity'
+       WHERE (started_at IS NULL OR date_basis = 'placeholder')
+         AND EXISTS (
+           SELECT 1 FROM activity a
+            WHERE a.matched_chat_id = chats.id AND a.occurred_at IS NOT NULL
+         )
+    `);
+
+    const one = (sql: string) => Number((db.prepare(sql).get() as unknown as { n: number }).n);
+    const result: ActivityMatchResult = {
+      matchedToChat: one("SELECT COUNT(*) AS n FROM activity WHERE match_kind = 'title'"),
+      matchedToTurn: one("SELECT COUNT(*) AS n FROM activity WHERE match_kind = 'turn'"),
+      ambiguous: one(`
+        SELECT COUNT(*) AS n FROM activity a
+         WHERE a.matched_chat_id IS NULL
+           AND (SELECT COUNT(*) FROM chats c WHERE c.content_key = a.query_key) > 1
+      `),
+      orphans: one(`
+        SELECT COUNT(*) AS n FROM activity a
+         WHERE a.matched_chat_id IS NULL
+           AND (SELECT COUNT(*) FROM chats c WHERE c.content_key = a.query_key) = 0
+      `),
+    };
+    db.exec('COMMIT');
+    return result;
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+export interface ActivityStats {
+  total: number;
+  matched: number;
+  orphans: number;
+  dated: number;
+}
+
+export function activityStats(): ActivityStats {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN matched_chat_id IS NOT NULL THEN 1 ELSE 0 END) AS matched,
+              SUM(CASE WHEN matched_chat_id IS NULL THEN 1 ELSE 0 END) AS orphans,
+              SUM(CASE WHEN occurred_at IS NOT NULL THEN 1 ELSE 0 END) AS dated
+         FROM activity`,
+    )
+    .get() as unknown as { total: number; matched: number; orphans: number; dated: number };
+  return {
+    total: row.total ?? 0,
+    matched: row.matched ?? 0,
+    orphans: row.orphans ?? 0,
+    dated: row.dated ?? 0,
+  };
+}
+
+/**
+ * Removes everything a Takeout import created, leaving harvested conversations
+ * untouched.
+ *
+ * Exists because the first import was wrong in a way that cannot be corrected
+ * in place: Takeout logs one entry per QUERY, not per conversation, so it
+ * created a chat per turn. Rolling back has to be possible without discarding
+ * the sidebar harvest alongside it — hence the synthetic "takeout:" external_id
+ * prefix, which makes imported rows identifiable.
+ *
+ * Rows the import merely annotated (an existing harvested conversation given a
+ * timestamp) keep their content; only the timestamp attribution is dropped.
+ */
+export function undoTakeoutImport(): { deleted: number; reverted: number } {
+  db.exec('BEGIN');
+  try {
+    const deleted = db
+      .prepare("DELETE FROM chats WHERE external_id LIKE 'takeout:%'")
+      .run().changes;
+    // Harvested conversations that the import touched: forget the imported
+    // date, and put them back in the capture queue.
+    const reverted = db
+      .prepare(
+        `UPDATE chats
+           -- A placeholder, not NULL. Reverting to no date at all would drop
+           -- the thread to the bottom of the list, which is where undoing an
+           -- import should not put anything.
+           SET started_at = last_seen_at, date_basis = 'placeholder', source = 'harvest'
+         WHERE source = 'takeout' AND external_id NOT LIKE 'takeout:%'`,
+      )
+      .run().changes;
+    db.exec('COMMIT');
+    return { deleted: Number(deleted), reverted: Number(reverted) };
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 /* --------------------------------------------------------------- dev seed */

@@ -12,6 +12,26 @@ const external = [
   ...builtinModules.map((mod) => `node:${mod}`),
 ];
 
+// Baked in at build time, not read from the environment at runtime: a release
+// must not be turnable into a debug build by setting a variable, and a PR build
+// must not quietly lose the setting depending on how it was launched.
+//
+// CI sets this for pull-request builds only. Releases are built without it, so
+// they ship with remote debugging off and it stays an explicit opt-in there —
+// which matters, because the endpoint is unauthenticated and the embedded panel
+// holds a live Google session.
+const debugBuild = process.env.NOTEBOOK_DEBUG_BUILD === '1';
+
+// Which build this is, baked in for the same reason: the app has to be able to
+// say what it is without being told at launch.
+//
+// It cannot come from package.json. Pull-request installers are renamed AFTER
+// packaging to the predicted next version — the file in D:\tmp says
+// 0.4.0-rc13 while package.json still says 0.3.0 — so app.getVersion() would
+// confidently name a version that matches nothing anyone has on disk. CI passes
+// the real label; a local build says so plainly rather than guessing.
+const buildId = process.env.NOTEBOOK_BUILD_ID || 'local build';
+
 export default defineConfig({
   main: {
     // electron-vite auto-adds its own externalize-deps plugin unless told not
@@ -24,6 +44,10 @@ export default defineConfig({
     // no node_modules that crashes the packaged app at startup (contextMenu()
     // is called at module top level in src/main.ts, so it isn't even deferred
     // to the first right-click).
+    define: {
+      __DEBUG_BUILD__: JSON.stringify(debugBuild),
+      __BUILD_ID__: JSON.stringify(buildId),
+    },
     build: {
       externalizeDeps: false,
       rollupOptions: {
@@ -51,6 +75,10 @@ export default defineConfig({
   },
   renderer: {
     root: '.',
+    define: {
+      __DEBUG_BUILD__: JSON.stringify(debugBuild),
+      __BUILD_ID__: JSON.stringify(buildId),
+    },
     build: {
       rollupOptions: {
         input: 'index.html',

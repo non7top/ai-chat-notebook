@@ -9,7 +9,11 @@
     "sourceMap": true,
     "outDir": "dist",
     "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
     "resolveJsonModule": true,
     "jsx": "react-jsx"
-  }
+  },
+  "include": ["src", "env.d.ts", "electron.vite.config.ts"],
+  "exclude": ["scripts"]
 }

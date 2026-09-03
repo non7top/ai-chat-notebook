@@ -63,6 +63,65 @@ jobs:
       - name: Check bundle externals
         run: docker compose run --rm dev npm run check:bundle
 
+      # Exercises import, glue, unmerge, unglue, adopt and the orphan listing
+      # against a real SQLite database. It earns its place: it found three
+      # separate ways the import silently destroyed a conversation's turns, none
+      # of which lint, tsc or a bundle check can see, and all of which look like
+      # ordinary success from the outside.
+      - name: Check the source-entry model
+        run: docker compose run --rm dev npm run check:sources
+
+      - name: Check link recovery
+        run: |
+          docker compose run --rm dev npm run check:recover
+
+      - name: Check the inline-image flag
+        run: docker compose run --rm dev npm run check:inline
+
+      # The reader's image de-duplication has a branch that DELETES an <img>, so
+      # a wrong rule loses pictures silently — the one failure this archive
+      # exists to prevent. Both real shapes are covered, including the copy that
+      # must be kept.
+      - name: Check reader sanitising
+        run: docker compose run --rm dev npm run check:sanitize
+
+      # A count computed by a query that is subtly not the list's query looks
+      # authoritative and is wrong, and it is the LIST that then appears broken.
+      # Every tree count is asserted against the length of the list it labels.
+      - name: Check the tree's counts
+        run: docker compose run --rm dev npm run check:counts
+
+      - name: Check title matching
+        run: docker compose run --rm dev npm run check:find
+
+      - name: Check the export's date pattern
+        run: docker compose run --rm dev npm run check:dates
+
+      # Against the export's real markup. The blocks an answer is made of — code,
+      # headings, lists, tables — are siblings of its paragraphs, and a splitter
+      # that walked only the paragraphs dropped every one of them without a
+      # trace: 3032 code blocks in a single export.
+      - name: Check turn splitting
+        run: docker compose run --rm dev npm run check:turns
+
+      # Guards a measured failure: 452 turns in a real archive held 63.9 MB of
+      # inline base64 because an image that failed the size filter had its data:
+      # URI left in the markup verbatim.
+      - name: Check image rewriting
+        run: docker compose run --rm dev npm run check:rewrite
+
+      # A simhash is only useful through its distance, so what is checked is an
+      # ordering: the same thread read from two sources must land closer than two
+      # different threads. Equality would prove nothing about that.
+      - name: Check the cross-source fingerprint
+        run: docker compose run --rm dev npm run check:fingerprint
+
+      # The CDP proxy is the only authentication in front of an endpoint that
+      # has none of its own. A lock that does not lock is worse than no lock,
+      # because it invites forwarding a port in the belief that it is protected.
+      - name: Check the CDP auth proxy
+        run: docker compose run --rm dev npm run check:cdp-proxy
+
   build-windows:
     # electron-builder cross-builds its deb and rpm targets from Linux, but
     # not NSIS — that needs a real Windows host. (Established the hard way on
@@ -70,10 +129,14 @@ jobs:
     # rather than a matrix entry.
     runs-on: windows-latest
     permissions:
-      contents: read
+      # write, so an installer can be attached to a prerelease when the artifact
+      # store will not take it — see "Publish to the rolling prerelease".
+      contents: write
       pull-requests: write
       # Needed for the cosign dry run below to mint a Fulcio cert via OIDC.
       id-token: write
+      # For "Make room in the artifact store" below, which deletes.
+      actions: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -116,8 +179,26 @@ jobs:
         shell: bash
         run: git checkout preview-head
 
+      # Pull-request builds ship with remote debugging on by default, because
+      # they exist to be driven and inspected and a flag you have to remember
+      # every launch defeats that. Releases are built WITHOUT this — see
+      # release.yml — so there it stays an explicit opt-in, which is the consent
+      # for an unauthenticated endpoint in front of a signed-in Google session.
+      # The window title says DEBUG BUILD so one is never mistaken for the other.
+      #
+      # NOTEBOOK_BUILD_ID is the same label the artifact is renamed to further
+      # down, computed here because it has to be baked in BEFORE packaging.
+      # Without it the app could only report package.json's version, which for a
+      # PR build names a version nobody has on disk — the installer says
+      # 0.4.0-rc13 while package.json still says 0.3.0.
       - name: Package Windows installer
         run: npm run make
+        env:
+          NOTEBOOK_DEBUG_BUILD: '1'
+          NOTEBOOK_BUILD_ID: >-
+            ${{ github.event_name == 'pull_request' && steps.predict.outputs.version != ''
+            && format('{0}-rc{1}', steps.predict.outputs.version, github.event.pull_request.number)
+            || steps.vars.outputs.sha_short }}
 
       # Same guard as the release workflow, and the reason it exists: a bare
       # require() left in the bundle crashes the installed app at startup,
@@ -159,8 +240,103 @@ jobs:
           echo "version_tag=$VERSION_TAG" >> "$GITHUB_OUTPUT"
           echo "exe_path=$NEW_EXE" >> "$GITHUB_OUTPUT"
 
+      # Artifact storage has a hard account quota, and a day of iteration fills
+      # it: twenty 99MB installers. The failure then lands on the upload step of
+      # an otherwise green build and no binary comes out for the six to twelve
+      # hours GitHub takes to recalculate usage — which is exactly the moment a
+      # fix is wanted.
+      #
+      # Release assets are not charged against that quota. So the installer also
+      # goes to one rolling prerelease, replacing the asset each time: always
+      # downloadable, never accumulating, and unaffected by however full the
+      # artifact store is. Marked prerelease so it cannot be mistaken for a
+      # published version, and pointed at the branch rather than a tag of its own.
+      # Runs for a manual dispatch too, not only for a pull_request event.
+      #
+      # It was gated on pull_request, which made workflow_dispatch useless for
+      # the one thing it exists for: getting an installer for a work-in-progress
+      # branch. GitHub failed to dispatch the pull_request workflows for one
+      # push — Build never appeared and release-please-preview reported
+      # startup_failure — so the branch was rebuilt by hand, and the build
+      # succeeded and published nothing.
+      #
+      # The PR number is not in the event payload on a dispatch, so it is looked
+      # up from the branch. No open PR means no rolling tag to publish to, which
+      # is reported rather than failing the build.
+      - name: Publish to the rolling prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXE=$(find dist -maxdepth 1 -name '*.exe' | head -1)
+          PR="${{ github.event.pull_request.number }}"
+          if [ -z "$PR" ]; then
+            PR=$(gh pr list --head "${GITHUB_REF_NAME}" --state open \
+                   --json number --jq '.[0].number // empty')
+          fi
+          if [ -z "$PR" ]; then
+            echo "No open pull request for ${GITHUB_REF_NAME}; nothing to publish to."
+            exit 0
+          fi
+          TAG="pr-${PR}-latest"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "PR #${PR} — latest build" \
+            --notes "Rolling build of this pull request. Replaced on every push; not a release."
+          gh release upload "$TAG" "$EXE" --clobber
+
+      # BEFORE the upload, not after, and that ordering is the whole point.
+      #
+      # retention-days below bounds how LONG an artifact lives, not how many
+      # exist at once: twenty pushes in a day is twenty live artifacts of ~99MB
+      # inside a three-day window. Measured, that had reached 27 artifacts and
+      # ~2.7GB of a 10GB account quota — and a full quota makes the upload step
+      # fail, which continue-on-error then swallows. The evidence it had already
+      # been happening: after a first pass at this ran AFTER the upload, the one
+      # surviving artifact was four days old, because every build since had
+      # silently failed to upload anything at all.
+      #
+      # So the room is made first and the upload fills it, leaving exactly one:
+      # the installer from THIS build. Deleting all of them here is safe because
+      # the rolling prerelease is the reliable route to a binary, not this store.
+      #
+      # It does NOT take effect the same run, and the log says why in one line:
+      # "Artifact storage quota has been hit. Unable to upload any new artifacts.
+      # Usage is recalculated every 6-12 hours." Deleting frees the bytes, not the
+      # accounting. So the first build after this lands still fails to upload with
+      # an EMPTY store, and the store only reopens once GitHub recounts. That is
+      # the reason the step below tolerates its own failure and the PR comment
+      # falls back to the prerelease link.
+      - name: Make room in the artifact store
+        shell: bash
+        # Never fail a green build over housekeeping.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          # Expired artifacts are already gone as bytes; deleting them by id
+          # answers 404 and reads as a failure.
+          gh api --paginate "repos/$REPO/actions/artifacts" \
+            --jq '.artifacts[] | select(.expired == false) | "\(.id)\t\(.name)"' > live.tsv
+          echo "live artifacts before this build: $(wc -l < live.tsv)"
+          while IFS=$'\t' read -r id name; do
+            [ -n "${id:-}" ] || continue
+            if gh api -X DELETE "repos/$REPO/actions/artifacts/$id" >/dev/null 2>&1; then
+              echo "  deleted $name"
+            else
+              echo "  could not delete $name — already gone?"
+            fi
+          done < live.tsv
+
       - name: Upload installer
         id: upload-installer
+        # Best effort. The prerelease above is the reliable route; this keeps the
+        # familiar per-run artifact while there is quota for it, and must not fail
+        # a build that has otherwise passed.
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           # `name` is ignored by the action whenever archive: false — the
@@ -168,7 +344,12 @@ jobs:
           # rename step above (when it ran) is what actually names this.
           name: windows-installer
           path: ${{ steps.artifact_names.outputs.exe_path || 'dist/*.exe' }}
-          retention-days: 14
+          # Three days, not fourteen. A 99MB installer per push filled the
+          # account's 10GB artifact quota in a single day of iteration — twenty
+          # builds — and the failure lands on the upload step of an otherwise
+          # green build, which reads as a broken build rather than a full disk.
+          # These exist to be installed within minutes of being made.
+          retention-days: 3
           # Setup.exe is already a compressed archive internally, so the
           # action's own zip wrapper is pure overhead.
           archive: false
@@ -180,5 +361,16 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           LABEL_SUFFIX="${{ steps.artifact_names.outputs.version_tag || steps.vars.outputs.sha_short }}"
+          ARTIFACT_URL="${{ steps.upload-installer.outputs.artifact-url }}"
+          # An empty url means the upload failed, and it fails whenever the
+          # artifact quota's accounting says full — which it can for 6-12 hours
+          # after the store has actually been emptied. A comment linking an empty
+          # url reads as "here is your build" and goes nowhere; the prerelease has
+          # the same installer and was never affected.
+          if [ -n "$ARTIFACT_URL" ]; then
+            LINK="- [ai-chat-notebook-installer-${LABEL_SUFFIX}]($ARTIFACT_URL)"
+          else
+            LINK="- the artifact store would not take it (quota) — [get it from the rolling prerelease](https://github.com/${{ github.repository }}/releases/tag/pr-${{ github.event.pull_request.number }}-latest)"
+          fi
           gh pr comment "${{ github.event.pull_request.number }}" --body "Windows build ready for \`${{ steps.vars.outputs.sha_short }}\`:
-          - [ai-chat-notebook-installer-${LABEL_SUFFIX}](${{ steps.upload-installer.outputs.artifact-url }})"
+          $LINK"

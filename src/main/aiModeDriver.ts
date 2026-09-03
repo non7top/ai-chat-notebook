@@ -170,6 +170,19 @@ import { getAiModeNavState, getAiModeWebContents } from './aiModeView';
 //   they are map chrome, not conversation content.
 // - Sidebar row thumbnails are `img.RKMwI` at 24x24 from the same
 //   lens.usercontent.google.com host. Not conversation content.
+// - Source-citation favicons are `img.IpiY3d`, and they are the reason a thread
+//   reported seventeen images with none of them the pictures it was about: 100x100
+//   in the file, 18x18 on screen. One thread carried 173. The chip around one is
+//   `div.S9OuHf`, holding the icon and the site's name — that is what AI Mode
+//   draws as "YouTube Music +1" inline in the answer.
+// - Hovering that chip opens `div.jR6h WaKIwf Q1xFeb HIe7pd FEKEgc` with
+//   role="dialog", around 360x237, several links and images: the rich source card.
+//   Not captured, and not worth capturing — it is a UI affordance over links the
+//   answer text already names.
+// - The lesson from all of the above: judge an image by the size the PAGE gives
+//   it, not the size of the file. Every one of these is large in the file and
+//   small on screen. Class names are minified and get reissued; a rendered box
+//   does not lie and does not churn.
 //
 // TURN STRUCTURE
 // - `div.CKgc1d` is a turn-pair block; several exist per conversation.
@@ -411,7 +424,15 @@ export interface ListGeometry {
   scrollTop: number;
   scrollHeight: number;
   clientHeight: number;
+  /** One row's own height. Kept for the report, and as a fallback for pitch. */
   rowHeight: number;
+  /**
+   * The distance from one row to the next — the number scrollHeight is actually
+   * made of. Divided into it, rowHeight gave 301 for a list of 150.
+   */
+  pitch: number;
+  /** Rows rendered right now, which for a virtualised list is a small window. */
+  rendered: number;
   /**
    * How many threads the list should ultimately yield, from the container's
    * pre-sized scroll height. The list is virtualised and never holds more than
@@ -441,6 +462,24 @@ const OPEN_SIDEBAR_SCRIPT = `
  * The list stays in the DOM with the sidebar closed, so presence proves
  * nothing — every read has to happen against a visible container or it silently
  * scrapes a stale copy.
+ *
+ * MEASURED 2026-08-26, and then CORRECTED the same day. First reading: the
+ * scroller's `display` stayed `flex` across a close and a reopen, from which I
+ * concluded it is never 'none' and this test is vacuous. Second reading, hours
+ * later on the same machine: `display: none`, scrollHeight 0, zero rows. So the
+ * test is real and my generalisation from one observation was wrong — the panel
+ * does report itself closed, just not always when it looks closed.
+ *
+ * What holds from both readings is the weaker, more useful claim: display alone
+ * cannot tell a LOADED list from a stub. The list can sit open holding ten rows
+ * of three hundred —
+ * observed holding 10 rows of 300, laid out, with scrollHeight already sized for
+ * all 300 — and no amount of scrolling adds to it. A harvest against that reads
+ * ten threads and calls it the history.
+ *
+ * So "open" is not a thing this can test for. What CAN be tested is whether the
+ * list is LIVE: whether scrolling it produces rows. See recycleHistorySidebar
+ * and the growth check in harvestThreadList.
  */
 export async function ensureHistorySidebarOpen(): Promise<boolean> {
   const result = await run<{ alreadyOpen: boolean }>(OPEN_SIDEBAR_SCRIPT);
@@ -451,6 +490,79 @@ export async function ensureHistorySidebarOpen(): Promise<boolean> {
   return result.alreadyOpen;
 }
 
+/**
+ * Rebuilds the history list, and leaves it OPEN — verified, not assumed.
+ *
+ * The first version clicked the toggle exactly twice on the theory that the
+ * sidebar starts open, so two clicks close it and open it again. It does not
+ * always start open. Caught live: display 'none', scrollHeight 0, zero rows,
+ * with a harvest reporting "10 / ~301 · INCOMPLETE" and the capture behind it
+ * walking a list that was not on screen. Two blind clicks from a closed sidebar
+ * leave it closed, and nothing here checked.
+ *
+ * So it reads the state, drives toward open, and CONFIRMS. Being open is also not
+ * enough on its own — a list can be open and hold ten rows of three hundred with
+ * no amount of scrolling adding to it, which is what the close-and-reopen is
+ * for — so "did the rows come back" is part of the check.
+ */
+const RECYCLE_SIDEBAR_SCRIPT = `
+(async () => {
+  try {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const toggle = document.querySelector(${JSON.stringify(HISTORY_TOGGLE_SELECTOR)});
+    if (!toggle) return { ok: false, error: 'History toggle button not found' };
+
+    const scroller = () => document.querySelector(${JSON.stringify(THREAD_LIST_SCROLLER)});
+    const isOpen = () => {
+      const s = scroller();
+      return !!s && getComputedStyle(s).display !== 'none';
+    };
+    const rows = () =>
+      document.querySelectorAll(${JSON.stringify(THREAD_BUTTON_SELECTOR)}).length;
+
+    const startedOpen = isOpen();
+    // Closed first if it is open, so the list is genuinely rebuilt rather than
+    // merely revealed — a revealed stub stays a stub.
+    if (startedOpen) {
+      toggle.click();
+      await wait(900);
+    }
+    // Then open, and keep trying until it is. A click landing during the panel's
+    // own animation does nothing at all, which is how two blind clicks ended
+    // with the sidebar shut.
+    for (let attempt = 0; attempt < 4 && !isOpen(); attempt += 1) {
+      toggle.click();
+      await wait(1000);
+    }
+    if (!isOpen()) {
+      return { ok: false, error: 'History sidebar would not open after four attempts' };
+    }
+    // Give the list a moment to populate before reporting what it holds.
+    for (let i = 0; i < 12 && rows() === 0; i += 1) await wait(250);
+    const s = scroller();
+    return {
+      ok: true,
+      startedOpen: startedOpen,
+      rows: rows(),
+      scrollHeight: s ? s.scrollHeight : 0,
+    };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+})();
+`;
+
+export async function recycleHistorySidebar(): Promise<{
+  rows: number;
+  scrollHeight: number;
+  startedOpen: boolean;
+}> {
+  return run<{ rows: number; scrollHeight: number; startedOpen: boolean }>(
+    RECYCLE_SIDEBAR_SCRIPT,
+    30_000,
+  );
+}
+
 const GEOMETRY_SCRIPT = `
 (() => {
   try {
@@ -459,14 +571,38 @@ const GEOMETRY_SCRIPT = `
     if (getComputedStyle(scroller).display === 'none') {
       return { ok: false, error: 'History sidebar is closed; the thread list in the DOM is stale' };
     }
-    const row = document.querySelector(${JSON.stringify(THREAD_BUTTON_SELECTOR)});
-    const rowHeight = row ? Math.round(row.getBoundingClientRect().height) : 0;
+    const rows = Array.from(
+      document.querySelectorAll(${JSON.stringify(THREAD_BUTTON_SELECTOR)}),
+    ).filter((el) => el.offsetParent !== null);
+    const rowHeight = rows[0] ? Math.round(rows[0].getBoundingClientRect().height) : 0;
+
+    // The PITCH from one row to the next, which is what scrollHeight is made
+    // of — not the height of the button, which is what used to be divided into
+    // it. They are the same number only while the row is nothing but its
+    // button: add a wrapper, a margin or a date header and the estimate doubles.
+    // A harvest reported "150 / ~301 threads · INCOMPLETE" on a sidebar that a
+    // previous run had walked to rank 299 with no gaps, and 150 x 2 = 300 is
+    // not a coincidence worth ignoring.
+    //
+    // The MEDIAN gap, so a date header inflating one interval does not move it.
+    let pitch = 0;
+    if (rows.length >= 3) {
+      const tops = rows
+        .map((el) => el.getBoundingClientRect().top)
+        .sort((a, b) => a - b);
+      const gaps = [];
+      for (let i = 1; i < tops.length; i += 1) gaps.push(tops[i] - tops[i - 1]);
+      gaps.sort((a, b) => a - b);
+      pitch = Math.round(gaps[Math.floor(gaps.length / 2)]);
+    }
     return {
       ok: true,
       scrollTop: Math.round(scroller.scrollTop),
       scrollHeight: scroller.scrollHeight,
       clientHeight: scroller.clientHeight,
       rowHeight,
+      pitch,
+      rendered: rows.length,
     };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
@@ -476,9 +612,11 @@ const GEOMETRY_SCRIPT = `
 
 export async function getListGeometry(): Promise<ListGeometry> {
   const g = await run<Omit<ListGeometry, 'expectedTotal'>>(GEOMETRY_SCRIPT);
-  // A rowHeight of 0 means nothing is laid out yet; refuse to invent a total
-  // rather than divide by zero and "expect" nothing.
-  const expectedTotal = g.rowHeight > 0 ? Math.round(g.scrollHeight / g.rowHeight) : 0;
+  // Pitch first, row height only as a fallback when too few rows are rendered to
+  // measure a gap. Zero for both means nothing is laid out yet; refuse to invent
+  // a total rather than divide by zero and "expect" nothing.
+  const per = g.pitch > 0 ? g.pitch : g.rowHeight;
+  const expectedTotal = per > 0 ? Math.round(g.scrollHeight / per) : 0;
   return { ...g, expectedTotal };
 }
 
@@ -533,6 +671,10 @@ const SCROLL_STEP_SCRIPT_SUFFIX = `, scroller.scrollHeight);
       ok: true,
       scrollTop: Math.round(scroller.scrollTop),
       moved: Math.round(scroller.scrollTop - before),
+      // Reported so the caller can tell "the list ended" from "the list is still
+      // loading". A lazy-loaded list is at its bottom repeatedly, each time with
+      // more below it.
+      scrollHeight: scroller.scrollHeight,
       atBottom: scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8,
     };
   } catch (err) {
@@ -544,6 +686,8 @@ const SCROLL_STEP_SCRIPT_SUFFIX = `, scroller.scrollHeight);
 export interface ScrollStepResult {
   scrollTop: number;
   moved: number;
+  /** Growing means more rows loaded — the bottom was not the end. */
+  scrollHeight: number;
   atBottom: boolean;
 }
 
@@ -605,6 +749,16 @@ const SCROLL_TO_THREAD_SCRIPT = (externalId: string) => `
     // below the last one — rewinding to the top every time re-walks the whole
     // list and gets slower the deeper it goes. The wrap-around second pass is
     // what keeps it correct regardless of starting position.
+    //
+    // A wall-clock budget as well as a step budget, and the budget is why: two
+    // passes of 220 steps at 350ms is 154 seconds, and run() gave up at 120. So
+    // on a thread Google has rotated out of the sidebar the search never
+    // reached its own conclusion — it was killed mid-search and reported
+    // "Injected script timed out after 120000ms". Twenty of those in one run,
+    // every one of them a thread that simply is not there any more.
+    //
+    // With this, the search always finishes and always says what it found.
+    const deadline = Date.now() + 60000;
     let steps = 0;
     for (let pass = 0; pass < 2; pass += 1) {
       if (pass === 1) {
@@ -612,12 +766,15 @@ const SCROLL_TO_THREAD_SCRIPT = (externalId: string) => `
         await wait(400);
       }
       for (let step = 0; step < 220; step += 1) {
+        if (Date.now() > deadline) {
+          return { ok: true, found: false, steps: steps, reason: 'search budget spent' };
+        }
         steps += 1;
         const el = find();
         if (el && el.offsetParent !== null) {
           el.scrollIntoView({ block: 'center' });
           await wait(150);
-          return { ok: true, steps: steps, pass: pass };
+          return { ok: true, found: true, steps: steps, pass: pass };
         }
         // Bottom detected from geometry, not from "the scroll didn't move".
         // Those are different things, and conflating them is what broke this.
@@ -630,7 +787,7 @@ const SCROLL_TO_THREAD_SCRIPT = (externalId: string) => `
           if (last && last.offsetParent !== null) {
             last.scrollIntoView({ block: 'center' });
             await wait(150);
-            return { ok: true, steps: steps, pass: pass };
+            return { ok: true, found: true, steps: steps, pass: pass };
           }
           break;
         }
@@ -641,10 +798,35 @@ const SCROLL_TO_THREAD_SCRIPT = (externalId: string) => `
         await wait(350);
       }
     }
-    return { ok: false, error: 'Thread row never rendered: ' + wanted };
+    // ok: TRUE. The search ran to completion and the row is not in the list —
+    // which is an answer, not a malfunction. Returning ok:false made run() throw
+    // a generic Error, indistinguishable from a broken injection, so a thread
+    // Google had rotated out was recorded as a failure and retried.
+    return { ok: true, found: false, steps: steps, reason: 'walked the list to the end' };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
   }
+})();
+`;
+
+/**
+ * Is the row there at all? Asked separately, and awaited, before the click.
+ *
+ * The click itself cannot be awaited — it navigates, which tears down the
+ * execution context so the promise never settles; that is why fireAndForget
+ * exists. But something had to be awaited, because the old code clicked blind
+ * and reported success either way, and that was the most damaging bug in this
+ * file: a thread Google has rotated out of the sidebar has no row, so the click
+ * did nothing, the panel went on showing the PREVIOUS thread, and the caller
+ * read that and stored it under this thread's id. No error, no sign — one
+ * thread quietly holding another thread's conversation.
+ *
+ * A query navigates nothing, so this one is safe to wait for.
+ */
+const FIND_THREAD_ROW_SCRIPT = (externalId: string) => `
+(() => {
+  const el = document.querySelector('button.qqMZif[data-thread-id="' + ${JSON.stringify(externalId)} + '"]');
+  return { ok: true, found: !!el };
 })();
 `;
 
@@ -656,10 +838,98 @@ const CLICK_THREAD_SCRIPT = (externalId: string) => `
 })();
 `;
 
+/** Thrown when the thread has no row in the sidebar — Google no longer lists it. */
+export class ThreadNotListedError extends Error {
+  constructor(externalId: string) {
+    super(
+      `Google no longer lists this thread in the sidebar (${externalId}), so the panel ` +
+        'cannot open it.',
+    );
+    this.name = 'ThreadNotListedError';
+  }
+}
+
+/**
+ * Is the panel on an AI Mode page at all?
+ *
+ * Google answers an export link with its own error page often enough to matter —
+ * "internal server error ... try again later", caught live on an mstk link. That
+ * page has no turns, so every caller waited out a 90-second settle and then a
+ * 60-second retry for content that was never coming, and reported it as "slow",
+ * which is what a page that IS merely loading also reports.
+ *
+ * Judged STRUCTURALLY rather than by the message. A real AI Mode page carries the
+ * history sidebar container whether or not it is open; an error page, a consent
+ * interstitial and a sign-in redirect all lack it. Keying on the English words
+ * would work today and fail on the first localised error page.
+ *
+ * The message is still read when it is there, because a reason a person can act
+ * on beats a category — but it is reported, not relied upon.
+ */
+const PAGE_KIND_SCRIPT = `
+(() => {
+  try {
+    const hasSidebar = !!document.querySelector(${JSON.stringify(THREAD_LIST_SCROLLER)});
+    const turns = document.querySelectorAll('div.CKgc1d').length;
+    const text = (document.body ? document.body.textContent || '' : '').replace(/\\s+/g, ' ');
+    return {
+      ok: true,
+      isAiMode: hasSidebar,
+      turns: turns,
+      // Reported for the message, not used for the verdict.
+      looksLikeServerError: /internal server error|try again later/i.test(text),
+      chars: text.length,
+    };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+})();
+`;
+
+export interface PageKind {
+  isAiMode: boolean;
+  turns: number;
+  looksLikeServerError: boolean;
+  chars: number;
+}
+
+export async function readPageKind(): Promise<PageKind> {
+  return run<PageKind>(PAGE_KIND_SCRIPT, 15_000);
+}
+
+/**
+ * Google served something that is not the conversation.
+ *
+ * Distinguished from a page that is still rendering, because the two need
+ * opposite handling: a slow page is worth waiting for, and this is worth
+ * abandoning immediately and trying again another day. Both leave the record in
+ * the queue — the fault is Google's and it is not permanent.
+ */
+export class PageNotAiModeError extends Error {
+  constructor(detail: string) {
+    super(`Google did not serve the conversation (${detail})`);
+    this.name = 'PageNotAiModeError';
+  }
+}
+
 export async function openThreadById(externalId: string): Promise<void> {
-  // Generous timeout: finding a row can mean scrolling most of a 300-row
-  // virtualised list, at ~350ms a step.
-  await run(SCROLL_TO_THREAD_SCRIPT(externalId), 120_000);
+  // 90s against the script's own 60s budget, so the SCRIPT is what concludes,
+  // not the timeout. The other way round — a 120s runner against a search that
+  // could take 154s — is what turned "this thread is no longer in the sidebar"
+  // into "Injected script timed out", twenty times in one run.
+  const scan = await run<{ found: boolean; steps: number; reason?: string }>(
+    SCROLL_TO_THREAD_SCRIPT(externalId),
+    90_000,
+  );
+  // A completed search that found nothing is the answer, and it has a name.
+  // Classifying it matters: captureTurns treats an unlisted thread as a fact
+  // about that thread rather than a failure — no retry, and it does not count
+  // toward the systemic-failure abort that stops the whole run.
+  if (!scan.found) throw new ThreadNotListedError(externalId);
+  // Checked again before clicking, and this is not defensive tidying: without it
+  // the caller stores whatever thread the panel happens to be showing.
+  const { found } = await run<{ found: boolean }>(FIND_THREAD_ROW_SCRIPT(externalId), 15_000);
+  if (!found) throw new ThreadNotListedError(externalId);
   await fireAndForget(CLICK_THREAD_SCRIPT(externalId));
 }
 
@@ -699,17 +969,110 @@ const READ_TURNS_SCRIPT = `
 
     const chromeSel = ${JSON.stringify(TURN_CHROME_SELECTORS.join(','))};
     // Defined before stripped(), which depends on it.
-    const imagesIn = (el) =>
-      Array.from(el.querySelectorAll('img'))
+    // What an image IS, not merely how big it is. Size alone was the whole
+    // rule, and it let every rich link preview and source-card thumbnail
+    // through: a conversation reported 17 images of which none were the
+    // generated pictures the conversation was about. Classified from the
+    // markers recorded in the findings above — img.HkNHyd with
+    // alt="AI generated image" for generated, img.taqkMe for uploads — and
+    // anything else is called 'other' rather than guessed at.
+    const kindOf = (img) => {
+      // FIRST, and that placement is the whole point: what the page itself drew
+      // small is decoration whatever it is called. Measured live — a
+      // source-citation favicon is img.IpiY3d, 100x100 in the file and 18x18 on
+      // screen, and one thread carried 173 of them. Judging the FILE's size let
+      // every one through.
+      //
+      // Deliberately not a class check, and deliberately ahead of the class
+      // checks below. Those names are minified and Google reissues them; when
+      // img.IpiY3d becomes something else this still holds, because it asks what
+      // the page did rather than what it called the element. A zero-width box
+      // means not laid out — the sidebar, a hidden turn — and says nothing about
+      // the image, so it falls through to the names.
+      const box = img.getBoundingClientRect();
+      if (box.width > 0 && box.width < 64 && box.height > 0 && box.height < 64) {
+        return 'other';
+      }
+
+      const cls = img.className || '';
+      const alt = img.getAttribute('alt') || '';
+      if (cls.indexOf('HkNHyd') !== -1 || alt === 'AI generated image') return 'generated';
+      if (cls.indexOf('taqkMe') !== -1 || alt === 'Visually searched image') return 'upload';
+      // img.fRm5F is the expand-wrapper copy of a real image. Still classified
+      // as content, because when it is the ONLY copy it is the picture — but
+      // redundantImages() drops it when a primary copy stands beside it, which
+      // is what the store collapsing the bytes never did for the markup.
+      if (cls.indexOf('fRm5F') !== -1) return 'generated';
+      return 'other';
+    };
+
+    // Which <img> elements are REDUNDANT copies of a picture the turn already
+    // holds. AI Mode renders every image twice: once in the answer, and once
+    // inside the click-to-expand wrapper as img.fRm5F[data-deferred]. Google's
+    // own stylesheet hides the second; the archive has no stylesheet, so both
+    // showed, and every generated image appeared twice in the reader.
+    //
+    // The duplicate was already known here — the note below kept img.fRm5F on
+    // the grounds that the content-addressed store collapses it. It does, for
+    // the BYTES. The second <img> tag survived, and so did a second asset row
+    // whenever Google served the expand copy re-encoded: measured on thread
+    // #2842, an upload stored twice under two different hashes.
+    //
+    // Two rules, because the two cases differ:
+    //  - identical src twice in one turn: the generated-image case, exact.
+    //  - img.fRm5F alongside a primary copy: the upload case, where the expand
+    //    copy is the same picture at a different encoding and the hashes differ.
+    // An fRm5F with no primary beside it is KEPT — if Google ever renders only
+    // the deferred copy, dropping it would lose the picture.
+    const redundantImages = (root) => {
+      const imgs = Array.from(root.querySelectorAll('img'));
+      const isExpandCopy = (img) => (img.className || '').indexOf('fRm5F') !== -1;
+      const hasPrimary = imgs.some((img) => {
+        if (isExpandCopy(img)) return false;
+        const cls = img.className || '';
+        const alt = img.getAttribute('alt') || '';
+        return (
+          cls.indexOf('HkNHyd') !== -1 ||
+          cls.indexOf('taqkMe') !== -1 ||
+          alt === 'AI generated image' ||
+          alt === 'Visually searched image'
+        );
+      });
+      const skip = new Set();
+      const seen = new Set();
+      for (const img of imgs) {
+        const src = img.currentSrc || img.getAttribute('src') || '';
+        if (!src) continue;
+        if (seen.has(src)) {
+          skip.add(img);
+          continue;
+        }
+        seen.add(src);
+        if (hasPrimary && isExpandCopy(img)) skip.add(img);
+      }
+      return skip;
+    };
+
+    const imagesIn = (el) => {
+      const redundant = redundantImages(el);
+      return Array.from(el.querySelectorAll('img'))
+        .filter((img) => !redundant.has(img))
         .map((img) => ({
           src: img.currentSrc || img.getAttribute('src') || '',
           alt: img.getAttribute('alt') || null,
           width: img.naturalWidth,
           height: img.naturalHeight,
+          kind: kindOf(img),
         }))
-        // Icons and spacers are not conversation content. 120px is above every
-        // UI glyph seen and below every real image.
-        .filter((i) => i.src && (i.width >= 120 || i.height >= 120));
+        // A floor against spacers and 1px trackers only. It is NOT a way to
+        // tell content from chrome, and the note that used to stand here — "120px
+        // is above every UI glyph seen and below every real image" — was wrong:
+        // site favicons are served at 256px and larger now, so they cleared the
+        // bar comfortably and a thread came back reporting seventeen images of
+        // which none were the pictures it was about. Size cannot answer this
+        // question; kindOf can, which is why it exists.
+        .filter((i) => i.src && (i.width >= 32 || i.height >= 32));
+    };
 
     // Strip chrome from a COPY, so the live page is never modified — this runs
     // against the user's real session.
@@ -736,6 +1099,25 @@ const READ_TURNS_SCRIPT = `
       const keep = new Set(imagesIn(el).map((i) => i.src));
 
       const copy = el.cloneNode(true);
+
+      // COMMENTS, which are not markup anyone reads and are most of what gets
+      // stored. Google leaves its own serialised page data in them —
+      // <!--TgQPHd|[[null,null,["data:image/png;base64,...  — up to about 5KB
+      // apiece, and a single answer can carry dozens.
+      //
+      // Measured on the real archive: 3,504 stored turns hold a data: image, all
+      // of them inside comments and none inside an <img>, which is why "Move
+      // inline images" ran repeatedly and moved nothing. It looks for
+      // <img src="data:" and there has never been one to find; it counted them as
+      // "a carrier the patterns do not know about" and said so, and I read that
+      // as a failure to convert rather than as the answer.
+      //
+      // Nothing renders from a comment, so this loses no picture and no text.
+      const comments = document.createTreeWalker(copy, NodeFilter.SHOW_COMMENT);
+      const doomed = [];
+      for (let c = comments.nextNode(); c; c = comments.nextNode()) doomed.push(c);
+      for (const c of doomed) c.remove();
+
       for (const junk of Array.from(copy.querySelectorAll(chromeSel))) {
         // Controls are stripped for their labels, but Google puts real images
         // inside them — an uploaded reference image lives in a clickable
@@ -746,14 +1128,49 @@ const READ_TURNS_SCRIPT = `
         const rescued = Array.from(junk.querySelectorAll('img')).filter((img) =>
           keep.has(img.currentSrc || img.getAttribute('src') || ''),
         );
-        if (rescued.length > 0) {
-          junk.replaceWith.apply(junk, rescued);
+
+        // Citations are rescued too, for the same reason the images are: Google
+        // puts a source link inside a clickable chip, and removing the chip took
+        // the link with it. Measured on one real answer — 37 anchors, 13 of them
+        // inside controls — so a third of the sources a thread cited were being
+        // dropped at capture.
+        //
+        // Not recoverable from the export, which carries its own three inline
+        // anchors in the prose and not these. The two readings cite differently —
+        // the export links words in the sentence, the panel puts chips beside it —
+        // so each holds sources the other does not, and a chip dropped here is
+        // dropped for good.
+        //
+        // Google's own links are NOT citations. support.google.com and
+        // policies.google.com belong to the disclaimer, and rescuing those would
+        // put boilerplate back into every answer. Host, not class, because the
+        // classes churn.
+        const rescuedLinks = Array.from(junk.querySelectorAll('a[href]')).filter((a) => {
+          const href = a.getAttribute('href') || '';
+          if (!/^https?:/i.test(href)) return false;
+          try {
+            const host = new URL(href).hostname;
+            return !/(^|\.)google\.com$/i.test(host);
+          } catch {
+            return false;
+          }
+        });
+        const survivors = rescued.concat(rescuedLinks);
+        if (survivors.length > 0) {
+          junk.replaceWith.apply(junk, survivors);
         } else {
           junk.remove();
         }
       }
       for (const code of Array.from(copy.querySelectorAll('script,style,noscript,template'))) {
         code.remove();
+      }
+      // After the chrome pass, so an image rescued out of a control is still
+      // considered — and recomputed on the copy rather than mapped across the
+      // clone, which is safe here because the rule reads class, alt and src and
+      // all three survive cloneNode.
+      for (const dup of Array.from(redundantImages(copy))) {
+        dup.remove();
       }
       return copy;
     };
@@ -812,6 +1229,12 @@ const READ_TURNS_SCRIPT = `
 `;
 
 export interface CapturedImage {
+  /**
+   * 'generated' | 'upload' | 'other'. 'other' is a rich link preview, a source
+   * card thumbnail or anything else the page put inline — stored, because
+   * nothing is discarded, but not counted as one of the conversation's images.
+   */
+  kind: string;
   src: string;
   alt: string | null;
   width: number;

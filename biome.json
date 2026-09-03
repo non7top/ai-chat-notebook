@@ -91,7 +91,10 @@
 			}
 		}
 	},
-	"javascript": { "formatter": { "quoteStyle": "double" } },
+	"javascript": {
+		"formatter": { "quoteStyle": "double" },
+		"globals": ["__DEBUG_BUILD__", "__BUILD_ID__"]
+	},
 	"overrides": [
 		{
 			"includes": ["*.ts", "*.tsx", "*.mts", "*.cts"],
