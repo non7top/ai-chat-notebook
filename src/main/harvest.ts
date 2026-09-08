@@ -25,7 +25,26 @@ import {
   type CapturedTurn,
   type ThreadListEntry,
 } from './aiModeDriver';
-import type { CaptureProgress, HarvestProgress, SyncProgress } from '../shared/types';
+// HarvestSummary comes from the shared types, and nothing here redeclares it.
+// It WAS declared in both places with the same shape, which is worse than having
+// two names for two things: adding stoppedAtKnown to the shared copy typechecked,
+// changed nothing, and took a compile error to notice. The renderer reads this
+// shape over IPC, so the shared file is where it belongs.
+// Every summary shape the renderer reads over IPC lives in the shared types and
+// nowhere else. All four were declared TWICE, in this file and there, with
+// identical bodies — which is worse than two names for two things, because
+// adding a field to the shared copy typechecks, changes nothing at runtime, and
+// gives no error to notice. That is exactly how stoppedAtKnown appeared to work
+// while doing nothing.
+import type {
+  CaptureProgress,
+  CaptureSummary,
+  HarvestProgress,
+  HarvestSummary,
+  LinkRunSummary,
+  SyncProgress,
+  SyncSummary,
+} from '../shared/types';
 
 // Driven from the main process, one scroll step per round trip, rather than as
 // a single long injected script. That is what makes progress reporting and
@@ -124,15 +143,6 @@ function broadcast(progress: HarvestProgress): void {
 // aiModeDriver.ts.
 function threadUrl(_entry: ThreadListEntry): string | null {
   return null;
-}
-
-export interface HarvestSummary {
-  found: number;
-  expected: number;
-  created: number;
-  updated: number;
-  complete: boolean;
-  cancelled: boolean;
 }
 
 /**
@@ -572,7 +582,19 @@ export async function harvestThreadList(
       expected: walk.expected,
       created,
       updated,
+      // Two different things, reported as two fields rather than one.
+      //
+      // A walk that stopped on known rows did its job, so it must not read as a
+      // failure — which is why this OR was here. But it must not read as
+      // "complete" either: it never saw the rest of the list. The strip showed
+      // "20 / ~185 threads · complete" after checking the newest twenty, which
+      // says the opposite of what happened.
+      //
+      // This is the same conflation that produced 358 false "no longer listed"
+      // verdicts: a report that cannot distinguish "I looked everywhere" from
+      // "I stopped looking".
       complete: walk.complete || walk.stoppedAtKnown,
+      stoppedAtKnown: walk.stoppedAtKnown,
       cancelled: cancelRequested,
     };
     db.recordJob(
@@ -1218,22 +1240,6 @@ export async function captureFromEntryLink(entryId: number): Promise<LinkCapture
   return { distance, rejected: null, chatId, turns: stored.turns, images: stored.images };
 }
 
-export interface LinkRunSummary {
-  attempted: number;
-  fetched: number;
-  turns: number;
-  images: number;
-  /** Pages whose answer did not match the export's — a re-run, not the thread. */
-  rejected: number;
-  errors: number;
-  /** Pages that had not rendered in time. Left in the queue for a later run. */
-  notReady: number;
-  remaining: number;
-  cancelled: boolean;
-  failures: { title: string; reason: string }[];
-  stoppedEarly?: string;
-}
-
 /**
  * Works through the threads only an export knows about, opening each by its link.
  *
@@ -1496,16 +1502,6 @@ export interface InlineRepairSummary {
  */
 export type SyncMode = 'new' | 'all';
 
-export interface SyncSummary {
-  listed: number;
-  captured: number;
-  fetched: number;
-  matched: number;
-  errors: number;
-  cancelled: boolean;
-  stoppedEarly?: string;
-}
-
 /**
  * Cancellation at the level of the WHOLE run, which the per-step flags cannot
  * express: each step resets its own flag when it starts, so a Stop pressed
@@ -1733,25 +1729,6 @@ export async function openChatInPanel(chatId: number): Promise<void> {
   await ensureOnAiMode();
   await ensureHistorySidebarOpen();
   await openThreadById(chat.externalId);
-}
-
-export interface CaptureSummary {
-  attempted: number;
-  captured: number;
-  /** Threads Google no longer lists; see the note in shared/types.ts. */
-  unlisted: number;
-  turns: number;
-  images: number;
-  errors: number;
-  remaining: number;
-  /**
-   * Threads deliberately left alone, having failed too many times already. See
-   * MAX_CAPTURE_ATTEMPTS — reported rather than silently dropped.
-   */
-  exhausted?: number;
-  cancelled: boolean;
-  failures: { title: string; reason: string }[];
-  stoppedEarly?: string;
 }
 
 /**

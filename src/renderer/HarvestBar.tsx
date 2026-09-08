@@ -669,9 +669,14 @@ export default function HarvestBar({
                   identical to a finished one from the inside, so a shortfall is
                   called out rather than quietly reported as success. */}
               {progress.phase === 'done' &&
-                (progress.complete
-                  ? ' · complete'
-                  : ` · INCOMPLETE, expected ~${progress.expected}`)}
+                (progress.stoppedAtKnown
+                  ? // Get new stops on a run of rows already in the archive,
+                    // which is the point of it — but it has NOT seen the rest of
+                    // the list, and saying "complete" claimed it had.
+                    ' · newest checked, nothing new below'
+                  : progress.complete
+                    ? ' · complete'
+                    : ` · INCOMPLETE, expected ~${progress.expected}`)}
             </>
           )}
         </span>
