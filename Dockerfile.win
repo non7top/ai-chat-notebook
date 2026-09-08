@@ -30,11 +30,20 @@ RUN mkdir -p /app /app/node_modules \
 #                  download it does silently on first run
 #   wine           the prefix, which wine otherwise rebuilds from scratch every
 #                  container: about 40 seconds of nothing on each build
+#
+# WINEPREFIX points at a *subdirectory* of the volume, not the volume root.
+# A fresh named volume comes up owned by root:root (mode 1777, inherited from
+# this image's own chmod above) — sticky-writable, but wine refuses to
+# *initialize a prefix* in a directory it doesn't own, regardless of the 1777
+# bit: "'/cache/wine' is not owned by you, refusing to create a configuration
+# directory there". /cache/wine/prefix doesn't exist yet at image build time,
+# so the non-root user that runs the container creates it itself on first use
+# (allowed, since its parent is sticky-1777) and therefore owns it.
 ENV HOME=/cache/home \
     npm_config_cache=/cache/npm \
     ELECTRON_CACHE=/cache/electron \
     ELECTRON_BUILDER_CACHE=/cache/electron-builder \
-    WINEPREFIX=/cache/wine \
+    WINEPREFIX=/cache/wine/prefix \
     WINEDEBUG=-all
 
 WORKDIR /app
