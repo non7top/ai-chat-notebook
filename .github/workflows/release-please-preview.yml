@@ -2,12 +2,29 @@ name: release-please-preview
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    # 'edited' is here because this action reads the PR TITLE into its
+    # prediction, and GitHub does not enable that activity type by default.
+    # Without it a retitle triggers no run, so the preview comment, the release
+    # label and the 'version' output all keep asserting the prediction made for
+    # the old title — reported by the action's own preflight on PR #11.
+    types: [opened, synchronize, reopened, edited]
     branches: [master]
 
 permissions:
   contents: read
   pull-requests: write
+
+# One run per pull request, newest wins.
+#
+# Without this, two events arriving together — a force-push and a retitle, say —
+# start two runs that both write this PR's comment and label, and whichever
+# finishes LAST wins. That is not necessarily the newest: the run holding the
+# older title can finish second and overwrite the correct prediction with a
+# stale one. cancel-in-progress makes the outcome the newest event's rather than
+# the slowest one's.
+concurrency:
+  group: release-please-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   preview:
