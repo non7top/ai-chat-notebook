@@ -173,6 +173,12 @@ export interface HarvestProgress {
   created: number;
   updated: number;
   complete?: boolean;
+  /**
+   * Stopped deliberately on a run of already-known rows rather than walking to
+   * the bottom. A success for "what is new" and no evidence about anything else,
+   * so it must never be shown as `complete`.
+   */
+  stoppedAtKnown?: boolean;
   cancelled?: boolean;
   error?: string;
 }
@@ -183,6 +189,8 @@ export interface HarvestSummary {
   created: number;
   updated: number;
   complete: boolean;
+  /** See HarvestProgress.stoppedAtKnown. */
+  stoppedAtKnown?: boolean;
   cancelled: boolean;
 }
 
