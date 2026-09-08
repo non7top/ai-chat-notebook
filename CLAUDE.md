@@ -1,13 +1,17 @@
 # ai-chat-notebook — working instructions
 
-## Build locally. Do not wait on GitHub Actions.
+## Build locally, by preference rather than by necessity.
 
-The account's Actions quota is exhausted: as of 2026-08-28 every job on every
-workflow fails in about two seconds having run zero steps, while the artifact
-store separately refuses uploads for lack of space. Nothing in this repo causes
-it and nothing in this repo fixes it.
+CI works again — verified 2026-09-08: `Build` and `Release` both succeeded on
+`4621bab`, along with release-please and its preview. Between 2026-08-28 and then
+every job on every workflow failed in about two seconds having run zero steps,
+with the artifact store separately refusing uploads; that is over.
 
-So the loop is local, in docker, through the Makefile:
+Build locally anyway. It is a forty-second loop against several minutes, it costs
+no quota, and it does not depend on someone else's runner being willing. Use CI
+for what only CI does — the release pipeline, and checks on a pull request.
+
+The loop is local, in docker, through the Makefile:
 
     make win-dir     # the app, unpacked, as a folder — no wine, no installer
     make deploy      # copies that folder to /mnt/d/ai-chat-notebook
@@ -17,7 +21,8 @@ exists and works through wine, but installing is a step nobody needs here: the
 unpacked folder is run directly, and it reads the same userData directory the
 installed build does, so the archive carries over untouched.
 
-Do not push a commit and then watch CI for a binary. There will not be one.
+Do not push a commit and then wait on CI for a binary you could have built here
+in under a minute.
 
 ## Deploying
 
