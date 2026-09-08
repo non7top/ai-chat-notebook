@@ -1264,12 +1264,24 @@ export async function waitForTurnsToSettle(timeoutMs = 60_000): Promise<number> 
   const started = Date.now();
   let last = -1;
   let stableFor = 0;
-  // Four consecutive identical readings, not two. Conversations load slowly and
-  // turn by turn, so a count can sit unchanged for over a second while more is
-  // still arriving — which stored a 6-turn conversation as 1 turn and, because
-  // the queue skips anything with turns, never revisited it. Silent truncation
-  // is worse than a slow capture.
-  const requiredStablePolls = 4;
+  // Ten consecutive identical readings at 500ms, so a count must hold still for
+  // FIVE seconds before it is believed.
+  //
+  // It was two, which stored a 6-turn conversation as 1 turn — and because the
+  // queue skips anything with turns, never went back. Then four, which is two
+  // seconds. Measured on the live page since: the FIRST turn pair appears 3 to 6
+  // seconds after the row is clicked. A stability window of two seconds is
+  // shorter than the render it is policing, which is a thin bet on a page that
+  // arrives turn by turn.
+  //
+  // Not measured, and worth saying: I could not record the shape of the ramp
+  // between the first pair and the last. Clicking a row navigates, which destroys
+  // the execution context of any script sampling it, so the interesting interval
+  // is exactly the one a one-shot evaluator cannot see. Five seconds is therefore
+  // a judgement, not a finding — chosen because the cost is bounded and known
+  // (about three seconds a thread, twenty minutes across all 365) while the
+  // failure it guards against is silent and permanent.
+  const requiredStablePolls = 10;
   while (Date.now() - started < timeoutMs) {
     let count = 0;
     try {
