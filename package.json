@@ -1,7 +1,7 @@
 {
   "name": "ai-chat-notebook",
   "productName": "AI Chat Notebook",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A local archive and organizer for Google Search AI Mode conversations. Harvests them into a fully offline copy (text and images), files them into a folder tree by hand, and resumes any saved conversation in an embedded browser panel.",
   "main": "out/main/index.js",
   "private": true,
