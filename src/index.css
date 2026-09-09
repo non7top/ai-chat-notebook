@@ -882,6 +882,90 @@ button:disabled {
   padding: 0.25rem 0.5rem;
 }
 
+/* Everything below existed as STRUCTURE the whole time — the sanitiser's
+   allowlist keeps h1-h6, ul/ol/li, blockquote, dl/dt/dd and code, and none of
+   it was ever stripped. What was missing is that nothing here ever STYLED any
+   of it, so it fell back to the browser's bare UA defaults inside a bubble only
+   ~260px wide on a typical pane. Measured on a real captured answer: a <ul>
+   rendered with the default 40px left padding — over 15% of the bubble's own
+   width spent on the marker gutter before a single word of the item. That is
+   what "formatting is lost" looks like from the outside: the tag survived, the
+   look did not.
+
+   Scaled down rather than zeroed: these are still headings, still a list, and
+   should still read as one — just sized for a chat bubble, not a full page. */
+.turn-body h1,
+.turn-body h2,
+.turn-body h3,
+.turn-body h4,
+.turn-body h5,
+.turn-body h6 {
+  margin: 0.9em 0 0.4em;
+  line-height: 1.3;
+  font-weight: 700;
+}
+.turn-body h1 { font-size: 1.25em; }
+.turn-body h2 { font-size: 1.15em; }
+.turn-body h3 { font-size: 1.05em; }
+.turn-body h4,
+.turn-body h5,
+.turn-body h6 { font-size: 1em; }
+
+.turn-body ul,
+.turn-body ol {
+  /* Down from the browser default 40px, which is more than a third of a
+     narrow-pane bubble's own width before any text starts. */
+  padding-left: 1.35rem;
+  margin: 0.4em 0;
+}
+.turn-body li {
+  margin: 0.2em 0;
+}
+.turn-body li > ul,
+.turn-body li > ol {
+  margin: 0.2em 0;
+}
+
+/* A left rule rather than the bare browser-default indent, which reads as
+   accidental whitespace rather than a quotation — nothing distinguished a
+   blockquote from a paragraph that happened to be pushed in. */
+.turn-body blockquote {
+  margin: 0.5em 0;
+  padding: 0.1em 0 0.1em 0.75em;
+  border-left: 3px solid var(--border);
+  color: #4b5563;
+}
+
+.turn-body dl {
+  margin: 0.5em 0;
+}
+.turn-body dt {
+  font-weight: 700;
+}
+.turn-body dd {
+  margin: 0 0 0.4em 1rem;
+}
+
+/* Inline code, as opposed to .turn-body pre's block form above. Unstyled, an
+   inline <code> span is textually and visually IDENTICAL to the words around
+   it — the one piece of this whole gap that did not just look worse, it threw
+   the information away: a code span read as plain prose, indistinguishable
+   from the sentence it sat in. */
+.turn-body code {
+  font-family: ui-monospace, 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 0.9em;
+  background: #f6f8fa;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+/* A block <pre><code> already has the block-level background from .turn-body
+   pre above; doubling it here would nest two tinted boxes inside each other. */
+.turn-body pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+}
+
 /* --------------------------------------------------------------- harvesting */
 
 /* A column in the left pane now, not a bar across the top. */
