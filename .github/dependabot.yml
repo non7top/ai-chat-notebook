@@ -10,12 +10,12 @@ updates:
     # human decides if a given bump actually warrants a real release,
     # rather than every bump silently triggering one.
     commit-message:
-      prefix: "chore"
-      prefix-development: "chore"
+      prefix: "chore(ci)"
+      prefix-development: "chore(ci)"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
     commit-message:
-      prefix: "chore"
+      prefix: "chore(ci)"
