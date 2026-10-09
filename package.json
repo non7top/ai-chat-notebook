@@ -43,7 +43,7 @@
     "@vitejs/plugin-react": "^6.1.1",
     "electron": "44.5.1",
     "electron-builder": "^26.15.3",
-    "electron-vite": "^6.0.0-beta.1",
+    "electron-vite": "^6.0.0-beta.5",
     "jsdom": "^30.0.1",
     "typescript": "^7.0.2",
     "vite": "^8.2.2"
