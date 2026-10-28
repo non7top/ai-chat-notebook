@@ -141,9 +141,9 @@ import { getAiModeNavState, getAiModeWebContents } from './aiModeView';
 //   reach it, and must never be offered as "open in browser".
 //
 // SIDEBAR CONTROLS
-// - Open/close: `button.SbLVJc[aria-label="AI Mode history"]`, and
-//   `a.ilLN6b.FyY3Xc[title=" AI Mode history "]` (note the padding spaces).
-//   "Open sidebar" / "Close sidebar" labels appear on `.xYn6Gf` elements.
+// - Open/close: `button.ONx74b[aria-label="Open sidebar"]` and
+//   `button.OxKcRe[aria-label="Close sidebar"]`; both stay in the DOM in either state.
+//   `a.ilLN6b.FyY3Xc[title=" AI Mode history "]` is the link (note the padding spaces).
 // - New conversation: `button.UTNPFf[aria-label="New thread"]`.
 // - Thread titles are mirrored into `.Se0jFd` and `.xYn6Gf.sJ0xEf` in the
 //   sidebar. These are NOT turns - a long first query reads as a long title,
@@ -319,7 +319,9 @@ import { getAiModeNavState, getAiModeWebContents } from './aiModeView';
 
 const THREAD_BUTTON_SELECTOR = 'button.qqMZif[data-thread-id]';
 const THREAD_LIST_SCROLLER = 'div.cIl10d';
-const HISTORY_TOGGLE_SELECTOR = 'button.SbLVJc[aria-label="AI Mode history"]';
+// button.SbLVJc is now an unlabelled aria-hidden overlay; the controls carry their own labels.
+const SIDEBAR_OPEN_SELECTOR = 'button.ONx74b[aria-label="Open sidebar"]';
+const SIDEBAR_CLOSE_SELECTOR = 'button.OxKcRe[aria-label="Close sidebar"]';
 const FRAME_SEARCH_RETRIES = 10;
 const FRAME_SEARCH_RETRY_DELAY_MS = 500;
 
@@ -448,9 +450,9 @@ const OPEN_SIDEBAR_SCRIPT = `
     const scroller = document.querySelector(${JSON.stringify(THREAD_LIST_SCROLLER)});
     const visible = scroller && getComputedStyle(scroller).display !== 'none';
     if (visible) return { ok: true, alreadyOpen: true };
-    const toggle = document.querySelector(${JSON.stringify(HISTORY_TOGGLE_SELECTOR)});
-    if (!toggle) return { ok: false, error: 'History toggle button not found' };
-    toggle.click();
+    const opener = document.querySelector(${JSON.stringify(SIDEBAR_OPEN_SELECTOR)});
+    if (!opener) return { ok: false, error: 'Open sidebar button not found' };
+    opener.click();
     return { ok: true, alreadyOpen: false };
   } catch (err) {
     return { ok: false, error: String((err && err.message) || err) };
@@ -509,8 +511,9 @@ const RECYCLE_SIDEBAR_SCRIPT = `
 (async () => {
   try {
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-    const toggle = document.querySelector(${JSON.stringify(HISTORY_TOGGLE_SELECTOR)});
-    if (!toggle) return { ok: false, error: 'History toggle button not found' };
+    const opener = document.querySelector(${JSON.stringify(SIDEBAR_OPEN_SELECTOR)});
+    const closer = () => document.querySelector(${JSON.stringify(SIDEBAR_CLOSE_SELECTOR)});
+    if (!opener || !closer()) return { ok: false, error: 'Open/close sidebar buttons not found' };
 
     const scroller = () => document.querySelector(${JSON.stringify(THREAD_LIST_SCROLLER)});
     const isOpen = () => {
@@ -524,14 +527,14 @@ const RECYCLE_SIDEBAR_SCRIPT = `
     // Closed first if it is open, so the list is genuinely rebuilt rather than
     // merely revealed - a revealed stub stays a stub.
     if (startedOpen) {
-      toggle.click();
+      closer().click();
       await wait(900);
     }
     // Then open, and keep trying until it is. A click landing during the panel's
     // own animation does nothing at all, which is how two blind clicks ended
     // with the sidebar shut.
     for (let attempt = 0; attempt < 4 && !isOpen(); attempt += 1) {
-      toggle.click();
+      opener.click();
       await wait(1000);
     }
     if (!isOpen()) {
