@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.1](https://github.com/non7top/ai-chat-notebook/compare/v0.4.0...v0.4.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **sidebar:** use Google's new Open/Close sidebar buttons ([42af90b](https://github.com/non7top/ai-chat-notebook/commit/42af90bc57984f67c0aeca472465e3265e514dc7))
+* **sidebar:** use Google's new Open/Close sidebar buttons ([fc44329](https://github.com/non7top/ai-chat-notebook/commit/fc44329175cc3a71ebe8b1f808cd657bc8ad6399))
+
 ## [0.4.0](https://github.com/non7top/ai-chat-notebook/compare/v0.3.0...v0.4.0) (2026-10-07)
 
 
